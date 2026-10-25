@@ -199,6 +199,34 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
             "hass_sensor_unit_u0x20ac_per_kwh",
             "EUR/kWh",
         ),
+        # Sub-load and control signals for the load-forecaster feature table
+        # (``features.py``).  None of them is a default: the canonical extraction and
+        # ``dataset_id`` never read them.  Request them with ``--entities`` (or via
+        # ``FEATURE_ENTITY_IDS``).  Names and units confirmed against the live archive.
+        EntitySpec("sensor.shellypmmini_servers_power", "hass_sensor_power_w", "W"),
+        EntitySpec("sensor.aquarea_heat_power_consumed", "hass_sensor_power_w", "W"),
+        EntitySpec("sensor.aquarea_dhw_power_consumed", "hass_sensor_power_w", "W"),
+        EntitySpec("sensor.aquarea_cool_power_consumed", "hass_sensor_power_w", "W"),
+        EntitySpec("sensor.aquarea_heat_power_produced", "hass_sensor_power_w", "W"),
+        EntitySpec("sensor.aquarea_dhw_power_produced", "hass_sensor_power_w", "W"),
+        EntitySpec("sensor.aquarea_cool_power_produced", "hass_sensor_power_w", "W"),
+        EntitySpec("sensor.aquarea_power_consumed", "hass_sensor_unit_w", "W"),
+        EntitySpec(
+            "sensor.aquarea_outside_ambient_temperature",
+            "hass_sensor_unit_celsius",
+            "\u00b0C",
+        ),
+        EntitySpec("input_boolean.appdaemon_climate_enable", "hass_input_boolean_state", "bool"),
+        EntitySpec("input_boolean.appdaemon_dhw_enable", "hass_input_boolean_state", "bool"),
+        EntitySpec(
+            "input_number.appdaemon_climate_min_hours_per_day",
+            "hass_input_number_state",
+            "h",
+        ),
+        EntitySpec("switch.aquarea_force_dhw_mode", "hass_switch_state", "bool"),
+        # Washer submeter candidate (audit only; the owner has not confirmed it).
+        EntitySpec("sensor.smart_plug_v2_terrace_power", "hass_sensor_power_w", "W"),
+        EntitySpec("sensor.terrace_lavadora_energy_today", "hass_sensor_energy_wh", "Wh"),
     )
 }
 
@@ -210,6 +238,13 @@ DEFAULT_ENTITY_IDS: tuple[str, ...] = (
 )
 
 DEAD_DUPLICATE_ENTITY_IDS = frozenset({"sensor.esios_pvpc_2"})
+
+FEATURE_ENTITY_IDS: tuple[str, ...] = tuple(
+    entity_id
+    for entity_id in ENTITY_SPECS
+    if entity_id not in DEFAULT_ENTITY_IDS and entity_id not in DEAD_DUPLICATE_ENTITY_IDS
+)
+"""Registered entities that feed the sub-load feature table, never the canonical build."""
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -242,7 +277,7 @@ class NonFiniteSampleError(PrometheusExtractionError):
 
 _ENTITY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@\-]*$")
 _METRIC_RE = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$")
-_UNIT_RE = re.compile(r"^[A-Za-z0-9_%/\-.*+ ]+$")
+_UNIT_RE = re.compile(r"^[A-Za-z0-9_%/\-.*+ \u00b0]+$")
 _HASH8_RE = re.compile(r"[0-9a-f]{8}")
 
 
