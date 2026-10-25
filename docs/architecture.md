@@ -1,6 +1,6 @@
 # Architecture
 
-<!-- COMPONENT DIAGRAM -->
+The component diagram is in the [README](../README.md#architecture).
 
 The package has two halves. The offline pipeline (`extract`, `validate`, `build`, `benchmark`, `report`;
 see the [CLI reference](cli.md)) ingests Prometheus and Home Assistant history into an immutable,
@@ -11,7 +11,7 @@ Decisions are recorded in [`adr/`](adr/); the production architecture is
 
 ## Modules with no CLI surface
 
-**Modules with no CLI surface (or `hack/` only), deliberately:**
+These have no CLI surface (or `hack/` only), deliberately:
 
 - `dispatch.py` — the dispatch **intent contract** (see [Dispatch intent contract](#dispatch-intent-contract-dispatchpy)).
   Typed, validated, canonically serialized `DispatchIntent` / `DispatchPlan`. No writer, no I/O,

@@ -12,7 +12,49 @@ compared with the native battery behaviour, and nothing is ever actuated.
 
 ## Architecture
 
-<!-- COMPONENT DIAGRAM -->
+```text
++--------------------------------------+       +------------------------------+
+|            Home Assistant            |       |    Prometheus (long-term)    |
+|  recorder history | live states, PVPC|       |  hass_* counters and gauges  |
++-------+----------------------+-------+       +-----+------------------+-----+
+        |                      |                     |                  |
+        | REST history         | WebSocket + REST GET|                  |
+        |                      | (ha_guard allowlist:|                  |
+        v                      |  read-only)         |                  |
++------------------------+     |                     |                  |
+| Offline pipeline       |<----|---------------------+                  |
+| (nightly CronJob)      |     |                                        |
+|                        |     |                                        |
+|  extract -> validate   |     |                                        |
+|     -> build           |     |                                        |
+|     -> benchmark,report|     |                                        |
++-----------+------------+     |                                        |
+            |                  |                                        |
+            v                  |                                        |
+  data_dir: raw/, manifests/,  |                                        |
+            analysis/          |                                        |
+                               v                                        v
++-----------------------------------------------------------------------------+
+| Shadow service: `battery-optimizer serve` (one replica)                     |
+|                                                                             |
+|  ha_client --> entity_store --+--> PVPC prices, SOC ----+                   |
+|  (reconnect,   (source-time   |                         v                   |
+|   resync)       ordering,     |        history -----> planner               |
+|                 freshness)    |        (load           (MPC solve in a      |
+|                               |         forecast)       1-worker executor)  |
+|                               v                         |                   |
+|                           observer                      v                   |
+|                        (native slots)               shadow intents          |
+|                               |                    (recorded, never sent)   |
+|                               +--> virtual_battery <----+                   |
+|                                         |                                   |
+|                                         v                                   |
+|  api: /health/* /status /plan /metrics  sink --> data_dir/service/v1/       |
++-------+-------------------------------------------------+-------------------+
+        |                                                 |
+        v                                                 v
+  Prometheus scrape -> alerts, Grafana           shadow-report (CLI)
+```
 
 The modules, the pipeline stages and the shadow service are described in
 [docs/architecture.md](docs/architecture.md) and the [ADRs](docs/adr/).
