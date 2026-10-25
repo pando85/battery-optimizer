@@ -1,0 +1,1066 @@
+"""The resident shadow service: adapters, MPC loop, intents and shadow sink.
+
+Concurrency model
+-----------------
+One asyncio event loop owns all state.  Blocking work leaves it:
+
+* the CPU-bound solve runs in a ``ThreadPoolExecutor(max_workers=1)`` with a
+  timeout.  A solve that times out keeps the single worker until its thread
+  really ends (``asyncio.wait_for`` cannot kill a thread), so a new solve is
+  refused as ``busy`` instead of starting a second worker — solves never overlap;
+* Prometheus history fetches and every store write run on a second
+  single-thread executor, which keeps appends in order.
+
+Scheduling
+----------
+For every slot boundary ``B`` (UTC grid, ``interval_seconds``):
+
+* ``B - solve_lead_s``: scheduled solve; the plan starts at ``B``;
+* ``B``: the slot opens — the decision for ``[B, B + interval)`` is frozen: the
+  intent valid at ``B`` from the newest unexpired plan, or no decision with a
+  reason (no plan, plan expired, inputs not ready);
+* ``B + slot_close_grace_s``: the previous slot closes — its measurements, its
+  decision and the virtual-battery replay step are appended to the store.
+
+Significant state changes (SOC moved, next-day prices published, a completed
+resync) request an extra solve after a debounce, rate-limited.
+
+Safety
+------
+There is no actuation path: the HA adapters are read-only by construction
+(:mod:`.ha_guard`), and intents are records, not commands.  On start, after every
+reconnect and whenever an input is stale, no decision is taken until a fresh,
+complete snapshot exists; a persisted plan is never resumed.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import time
+from collections import deque
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from battery_optimizer.config import TariffConfig
+
+from .clock import Clock
+from .config import ServiceConfig
+from .entity_store import EntityState, EntityStore, UpdateResult
+from .ha_client import HARestClient, HAWebSocketClient, WSTransport
+from .history import ForecastUnavailableError, LoadHistory, forecast_load
+from .metrics import ServiceMetrics
+from .observer import SlotMeasurements, SlotObserver, normalise_value
+from .planner import (
+    PlanningSnapshot,
+    PlanResult,
+    ShadowIntent,
+    battery_spec_from_tariff,
+    clamp_soc,
+    run_planner,
+)
+from .pvpc import PriceCurve, PriceParseError, parse_pvpc_state
+from .sink import ShadowSink
+from .timegrid import floor_slot, local_date, next_slot_boundary
+from .virtual_battery import SlotStep, intent_energy_kwh, soc_violation, step_virtual_battery
+
+__all__ = ["NotReadyError", "Readiness", "ShadowService"]
+
+log = logging.getLogger(__name__)
+
+HistoryFetcher = Callable[[datetime, date], LoadHistory]
+Planner = Callable[[PlanningSnapshot], PlanResult]
+
+_HISTORY_RETRY_S = 600.0
+_PLAN_MEMORY = 16
+
+
+class NotReadyError(Exception):
+    """Planning refused: an input is missing or stale."""
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+        self.reason = reason
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class Readiness:
+    ready: bool
+    inputs_ready: bool
+    reasons: tuple[str, ...]
+    details: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class _SlotOpen:
+    slot_start: datetime
+    intent: ShadowIntent | None
+    decision: str
+    inputs_ready: bool
+    reasons: tuple[str, ...]
+    opened_at: datetime
+
+
+class ShadowService:
+    def __init__(
+        self,
+        *,
+        config: ServiceConfig,
+        tariff: TariffConfig | None,
+        data_dir: Path,
+        clock: Clock,
+        code_version: str,
+        tariff_error: str | None = None,
+        ws_transport: WSTransport | None = None,
+        rest_transport: Any = None,
+        history_fetcher: HistoryFetcher | None = None,
+        planner: Planner = run_planner,
+        enable_ha: bool = True,
+    ) -> None:
+        self.config = config
+        self.tariff = tariff
+        self.tariff_error = tariff_error
+        self.clock = clock
+        self.code_version = code_version
+        self.data_dir = data_dir
+        self.sink = ShadowSink(data_dir)
+        self._planner = planner
+        self._history_fetcher = history_fetcher
+        self._interval = config.planning.interval_seconds
+        self._tz = config.tz
+
+        self.store = EntityStore.for_entities(config.entities.all_entities())
+        self.observer = SlotObserver(config)
+        self.store.add_listener(self.observer.on_state)
+        self.store.add_listener(self._on_state)
+
+        self.metrics = ServiceMetrics(snapshot=self.metric_snapshot)
+        from battery_optimizer import __version__
+
+        self.metrics.build_info.labels(
+            code_version=code_version,
+            version=__version__,
+            soc_source=config.planning.soc_source,
+            mode=config.mode,
+        ).set(1)
+
+        ha = config.home_assistant
+        self.ha: HAWebSocketClient | None = None
+        self.rest: HARestClient | None = None
+        if enable_ha and ha.url and ha.token:
+            self.ha = HAWebSocketClient(
+                settings=ha,
+                store=self.store,
+                clock=clock,
+                transport=ws_transport,
+                on_synced=self._on_synced,
+                on_disconnected=self._on_disconnected,
+            )
+            self.rest = HARestClient(settings=ha, transport=rest_transport)
+
+        self.price_curve: PriceCurve | None = None
+        self.price_error: str | None = None
+        self.history: LoadHistory | None = None
+        self.history_error: str | None = None
+        self._history_last_attempt: float | None = None
+        self.forecast_error: str | None = None
+
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bo-planner")
+        self._io = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bo-io")
+        self._worker_busy = False
+        self._generation = 0
+        self._plan_sequence = int(clock.now().timestamp())
+        self.plans: deque[PlanResult] = deque(maxlen=_PLAN_MEMORY)
+        self.last_solve: dict[str, Any] | None = None
+        self._last_solve_started: datetime | None = None
+        self._replan_task: asyncio.Task[None] | None = None
+        self._tasks: list[asyncio.Task[Any]] = []
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._started_at = clock.now()
+
+        self._slot_open: dict[datetime, _SlotOpen] = {}
+        self._opened_slot: datetime | None = None
+        self._closed_slot: datetime | None = None
+        self._solved_for: datetime | None = None
+
+        self.virtual_soc: float | None = None
+        self.virtual_soc_origin: str | None = None
+        self._init_virtual_battery()
+
+    # ------------------------------------------------------------------ lifecycle
+
+    async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        await self._record_event("service_started", {"soc_source": self.config.planning.soc_source})
+        if self.ha is not None:
+            self._tasks.append(asyncio.create_task(self.ha.run(), name="ha-websocket"))
+            self._tasks.append(asyncio.create_task(self._poll_loop(), name="ha-rest-poll"))
+        self._tasks.append(asyncio.create_task(self._history_loop(), name="history"))
+        self._tasks.append(asyncio.create_task(self._scheduler_loop(), name="scheduler"))
+
+    async def stop(self) -> None:
+        self._generation += 1  # fence any in-flight solve
+        if self.ha is not None:
+            await self.ha.stop()
+        tasks = [*self._tasks, *([self._replan_task] if self._replan_task else [])]
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._tasks.clear()
+        if self.rest is not None:
+            with contextlib.suppress(Exception):
+                await self.rest.aclose()
+        with contextlib.suppress(Exception):
+            await self._record_event("service_stopped", {})
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._io.shutdown(wait=True)
+
+    # ------------------------------------------------------------------ HA hooks
+
+    def _on_synced(self) -> None:
+        self._spawn(
+            self._record_event("ha_synced", {"resyncs": self.ha.stats.resyncs if self.ha else 0})
+        )
+        self._request_replan("resync")
+
+    def _on_disconnected(self) -> None:
+        detail = self.ha.stats.last_error if self.ha else None
+        self._spawn(self._record_event("ha_disconnected", {"error": detail}))
+
+    def _spawn(self, coro: Any) -> None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            coro.close()
+            return
+        task = loop.create_task(coro)
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+
+    def _on_state(self, state: EntityState, result: UpdateResult) -> None:
+        role = self.config.entities.role_of(state.entity_id)
+        if role == "price":
+            had_tomorrow = bool(self.price_curve and self.price_curve.tomorrow_published)
+            try:
+                self.price_curve = parse_pvpc_state(
+                    state, self._tz, interval_seconds=self._interval
+                )
+                self.price_error = None
+            except PriceParseError as exc:
+                self.price_curve = None
+                self.price_error = str(exc)
+                return
+            if self.price_curve.tomorrow_published and not had_tomorrow:
+                self._spawn(self._record_event("prices_published", self.price_curve.summary()))
+                self._request_replan("prices_published")
+        elif role == "battery_soc" and result is UpdateResult.ACCEPTED:
+            value = normalise_value("battery_soc", state)
+            last = self.plans[-1].snapshot.soc_frac if self.plans else None
+            if value is not None and last is not None:
+                if abs(value - last) >= self.config.planning.replan_soc_change_frac:
+                    self._request_replan("soc_change")
+
+    def _request_replan(self, reason: str) -> None:
+        if self._loop is None or (self._replan_task and not self._replan_task.done()):
+            return
+        self._replan_task = self._loop.create_task(self._debounced_replan(reason))
+
+    async def _debounced_replan(self, reason: str) -> None:
+        await self.clock.sleep(self.config.planning.replan_debounce_s)
+        last = self._last_solve_started
+        if last is not None:
+            since = (self.clock.now() - last).total_seconds()
+            if since < self.config.planning.replan_min_interval_s:
+                return
+        await self.request_solve(f"event:{reason}")
+
+    # ------------------------------------------------------------------ inputs
+
+    def _role_fresh(self, role: str, now: datetime) -> tuple[bool, float | None]:
+        entity = self.config.entities.get(role)
+        if entity is None:
+            return False, None
+        state = self.store.get(entity)
+        if state is None:
+            return False, None
+        age = self.store.age_s(entity, now)
+        value = normalise_value(role, state)
+        return value is not None and age is not None and age <= self.config.freshness_for(role), age
+
+    def _soc_now(self, now: datetime) -> tuple[float | None, datetime | None, str]:
+        """``(soc_frac, observed_at, source)`` or a ``None`` SOC when unusable."""
+        if self.config.planning.soc_source == "entity":
+            entity = self.config.entities.get("battery_soc")
+            fresh, _ = self._role_fresh("battery_soc", now)
+            state = self.store.get(entity)
+            if not fresh or state is None:
+                return None, state.observed_at if state else None, "entity"
+            value = normalise_value("battery_soc", state)
+            if value is None or not 0.0 <= value <= 1.0:
+                return None, state.observed_at, "entity"
+            return value, state.observed_at, "entity"
+        return self._projected_virtual_soc(now), None, "simulated"
+
+    def _projected_virtual_soc(self, now: datetime) -> float | None:
+        """Virtual SOC at the next boundary: the current slot's decision applied
+        against the forecast load (closing the slot later uses the measured one)."""
+        if self.virtual_soc is None or self.tariff is None:
+            return self.virtual_soc
+        current = floor_slot(now, self._interval)
+        opened = self._slot_open.get(current)
+        if opened is None or opened.intent is None:
+            return self.virtual_soc
+        load = None
+        if self.history is not None:
+            with contextlib.suppress(ForecastUnavailableError, ValueError):
+                load = forecast_load(
+                    self.history,
+                    [current],
+                    tz=self._tz,
+                    window_days=self.config.planning.forecast_window_days,
+                    interval_seconds=self._interval,
+                ).load_kwh[0]
+        try:
+            spec, limit, _ = battery_spec_from_tariff(self.tariff, self.virtual_soc)
+        except ValueError:
+            return self.virtual_soc
+        step = step_virtual_battery(
+            spec,
+            soc_start_frac=self.virtual_soc,
+            mode=opened.intent.mode,
+            target_power_w=opened.intent.target_power_w,
+            load_kwh=load,
+            interval_seconds=self._interval,
+            import_limit_kw=limit,
+        )
+        return step.soc_end_frac
+
+    def _terminal_value(self) -> tuple[float | None, str]:
+        configured = self.config.planning.terminal_value
+        if configured != "trailing_mean":
+            return float(configured), "config: explicit terminal_value"
+        if self.history is not None and self.history.mean_price_eur_per_kwh is not None:
+            return (
+                self.history.mean_price_eur_per_kwh,
+                f"default:trailing_mean: mean of {self.history.price_samples} PVPC samples over "
+                f"the {self.history.window_days} local days before {self.history.cutoff_day}",
+            )
+        if self.price_curve is not None and self.price_curve.prices:
+            values = list(self.price_curve.prices.values())
+            return (
+                sum(values) / len(values),
+                "fallback: mean of the published curve (trailing history price unavailable)",
+            )
+        return None, "unavailable"
+
+    def evaluate_inputs(self, now: datetime) -> list[tuple[str, str]]:
+        """Every reason planning would be refused right now (empty == ready)."""
+        reasons: list[tuple[str, str]] = []
+        if self.config.home_assistant.url is None or self.config.home_assistant.token is None:
+            reasons.append(("ha_unconfigured", "BATTERY_OPTIMIZER_HA_URL/TOKEN not set"))
+        elif self.ha is None or not self.ha.stats.connected:
+            reasons.append(("ha_disconnected", (self.ha.stats.last_error or "") if self.ha else ""))
+        elif not self.ha.stats.synced:
+            reasons.append(("ha_not_synced", "waiting for get_states"))
+        fresh, age = self._role_fresh("grid_power", now)
+        if not fresh:
+            reasons.append(("grid_power_stale", f"age={age}"))
+        if self.config.planning.soc_source == "entity":
+            if not self.config.entities.get("battery_soc"):
+                reasons.append(("soc_unconfigured", "entities.battery_soc is null"))
+            elif self._soc_now(now)[0] is None:
+                reasons.append(("soc_stale", "battery SOC missing, stale or out of range"))
+        elif self.virtual_soc is None:
+            reasons.append(("soc_unconfigured", "virtual battery not initialised"))
+        if self.tariff is None:
+            reasons.append(("tariff_invalid", self.tariff_error or "tariff config not loaded"))
+        first = next_slot_boundary(now, self._interval)
+        if self.price_curve is None:
+            reasons.append(("prices_missing", self.price_error or "no PVPC state yet"))
+        else:
+            n = len(self.price_curve.contiguous_from(first))
+            if n < self.config.planning.min_horizon_slots:
+                reasons.append(
+                    ("prices_insufficient", f"{n} published slot(s) from {first.isoformat()}")
+                )
+        today = local_date(now, self._tz)
+        if self.history is None or self.history.cutoff_day != today:
+            reasons.append(
+                ("history_unavailable", self.history_error or "load history not fetched for today")
+            )
+        elif self.forecast_error:
+            reasons.append(("forecast_unavailable", self.forecast_error))
+        return reasons
+
+    def readiness(self, now: datetime | None = None) -> Readiness:
+        now = now or self.clock.now()
+        reasons = self.evaluate_inputs(now)
+        inputs_ready = not reasons
+        plan = self.plans[-1] if self.plans else None
+        max_age = self._interval + self.config.planning.solve_lead_s + 60.0
+        if (
+            plan is None
+            or (now - plan.plan.generated_at).total_seconds() > max_age
+            or plan.plan.is_expired(now)
+        ):
+            reasons.append(("no_recent_plan", "no unexpired plan generated recently"))
+        readiness = Readiness(
+            ready=not reasons,
+            inputs_ready=inputs_ready,
+            reasons=tuple(r for r, _ in reasons),
+            details={r: d for r, d in reasons},
+        )
+        return readiness
+
+    # ------------------------------------------------------------------ planning
+
+    def build_snapshot(self, now: datetime, trigger: str) -> PlanningSnapshot:
+        reasons = self.evaluate_inputs(now)
+        blocking = [r for r in reasons if r[0] != "forecast_unavailable"]
+        if blocking:
+            raise NotReadyError(blocking[0][0], blocking[0][1])
+        assert self.tariff is not None and self.price_curve is not None and self.history is not None
+        first = next_slot_boundary(now, self._interval)
+        prices = self.price_curve.contiguous_from(first, self.config.planning.max_horizon_slots)
+        step = timedelta(seconds=self._interval)
+        starts = tuple(first + i * step for i in range(len(prices)))
+        try:
+            forecast = forecast_load(
+                self.history,
+                starts,
+                tz=self._tz,
+                window_days=self.config.planning.forecast_window_days,
+                interval_seconds=self._interval,
+            )
+        except (ForecastUnavailableError, ValueError) as exc:
+            self.forecast_error = str(exc)
+            raise NotReadyError("forecast_unavailable", str(exc)) from exc
+        self.forecast_error = None
+        soc_raw, soc_at, soc_source = self._soc_now(now)
+        if soc_raw is None:
+            raise NotReadyError("soc_stale", "SOC unavailable at snapshot time")
+        soc, clamped = clamp_soc(soc_raw, self.tariff)
+        terminal, terminal_source = self._terminal_value()
+        if terminal is None:
+            raise NotReadyError("prices_missing", "no terminal value")
+        try:
+            spec, import_limit, _ = battery_spec_from_tariff(self.tariff, soc)
+        except ValueError as exc:
+            raise NotReadyError("tariff_invalid", str(exc)) from exc
+        self._plan_sequence += 1
+        return PlanningSnapshot(
+            decision_time=now,
+            interval_seconds=self._interval,
+            slot_starts=starts,
+            prices=tuple(prices),
+            load_kwh=forecast.load_kwh,
+            soc_frac=soc,
+            soc_measured_frac=soc_raw,
+            soc_clamped=clamped,
+            soc_source=soc_source,
+            soc_observed_at=soc_at,
+            spec=spec,
+            import_limit_kw=import_limit,
+            terminal_value_eur_per_kwh=terminal,
+            terminal_value_source=terminal_source,
+            throughput_cost_eur_per_kwh=self.config.planning.throughput_cost_eur_per_kwh,
+            solver_time_limit_s=self.config.planning.solver_time_limit_s,
+            plan_sequence=self._plan_sequence,
+            expires_at=first + self.config.planning.plan_ttl_slots * step,
+            trigger=trigger,
+            code_version=self.code_version,
+            config_hash=self.config.config_hash(),
+            forecast_meta=forecast.meta,
+            price_meta=self.price_curve.summary(),
+        )
+
+    def _worker_finished(self, generation: int) -> None:
+        # Runs on the loop thread once the planner thread has really ended.
+        self._worker_busy = False
+
+    async def request_solve(self, trigger: str) -> str:
+        """Run one solve if the worker is free and the inputs are ready.
+
+        Returns the outcome: ``ok``, ``skipped:<reason>``, ``timeout``, ``error``
+        or ``discarded:<why>``.
+        """
+        now = self.clock.now()
+        if self._worker_busy:
+            self.metrics.skipped.labels(reason="busy").inc()
+            await self._record_event("solve_skipped", {"trigger": trigger, "reason": "busy"})
+            return "skipped:busy"
+        try:
+            snapshot = self.build_snapshot(now, trigger)
+        except NotReadyError as exc:
+            self.metrics.skipped.labels(reason=exc.reason).inc()
+            self.last_solve = {
+                "at": now.isoformat(),
+                "trigger": trigger,
+                "outcome": f"skipped:{exc.reason}",
+                "detail": exc.detail,
+            }
+            await self._record_event(
+                "solve_skipped", {"trigger": trigger, "reason": exc.reason, "detail": exc.detail}
+            )
+            return f"skipped:{exc.reason}"
+
+        loop = asyncio.get_running_loop()
+        self._worker_busy = True
+        self._last_solve_started = now
+        generation = self._generation
+        future = self._executor.submit(self._planner, snapshot)
+
+        def _done(_f: Any, gen: int = generation) -> None:
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(self._worker_finished, gen)
+
+        future.add_done_callback(_done)
+        started = time.perf_counter()
+        timeout = self.config.planning.solve_timeout_s
+        try:
+            result: PlanResult = await asyncio.wait_for(
+                asyncio.wrap_future(future), timeout=timeout
+            )
+        except TimeoutError:
+            self.metrics.solves.labels(result="timeout").inc()
+            self.last_solve = {
+                "at": now.isoformat(),
+                "trigger": trigger,
+                "outcome": "timeout",
+                "timeout_s": timeout,
+            }
+            await self._record_event("solve_timeout", {"trigger": trigger, "timeout_s": timeout})
+            return "timeout"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - solver/contract errors are reported, not fatal
+            self.metrics.solves.labels(result="error").inc()
+            detail = f"{type(exc).__name__}: {exc}"[:500]
+            self.last_solve = {
+                "at": now.isoformat(),
+                "trigger": trigger,
+                "outcome": "error",
+                "error": detail,
+            }
+            await self._record_event("solve_error", {"trigger": trigger, "error": detail})
+            return "error"
+        elapsed = time.perf_counter() - started
+        completed = self.clock.now()
+        if generation != self._generation:
+            self.metrics.solves.labels(result="discarded").inc()
+            return "discarded:stopped"
+        if snapshot.first_slot <= completed:
+            # The first slot has begun: the plan is obsolete, a partly elapsed slot
+            # cannot honour an intent sized for the whole slot.
+            self.metrics.solves.labels(result="discarded").inc()
+            self.last_solve = {
+                "at": now.isoformat(),
+                "trigger": trigger,
+                "outcome": "discarded:obsolete",
+            }
+            await self._record_event(
+                "solve_discarded",
+                {"trigger": trigger, "reason": "obsolete", "plan_id": result.plan_id},
+            )
+            return "discarded:obsolete"
+        self.metrics.solves.labels(result="ok").inc()
+        self.metrics.solve_duration.observe(elapsed)
+        self.plans.append(result)
+        self.last_solve = {
+            "at": now.isoformat(),
+            "trigger": trigger,
+            "outcome": "ok",
+            "plan_id": result.plan_id,
+            "duration_s": round(elapsed, 4),
+            "solver_status": result.solver.get("status"),
+        }
+        await self._write(self.sink.write_plan, result.to_record())
+        return "ok"
+
+    # ------------------------------------------------------------------ decisions
+
+    def decision_for_slot(self, slot_start: datetime) -> tuple[ShadowIntent | None, str]:
+        """The intent valid at *slot_start* from the newest plan made before it."""
+        candidates = [p for p in self.plans if p.plan.generated_at <= slot_start]
+        if not candidates:
+            return None, "no_plan"
+        for plan in sorted(candidates, key=lambda p: p.plan.plan_sequence, reverse=True):
+            if plan.plan.is_expired(slot_start):
+                continue
+            intent = plan.intent_for_slot(slot_start)
+            if intent is not None:
+                return intent, "intent"
+        return None, "plan_expired"
+
+    def current_intent(self, now: datetime | None = None) -> ShadowIntent | None:
+        now = now or self.clock.now()
+        opened = self._slot_open.get(floor_slot(now, self._interval))
+        if opened is None or opened.intent is None or not opened.intent.is_current(now):
+            return None
+        return opened.intent
+
+    async def open_slot(self, slot_start: datetime) -> _SlotOpen:
+        now = self.clock.now()
+        reasons = self.evaluate_inputs(now)
+        intent, decision = self.decision_for_slot(slot_start)
+        if reasons:
+            intent, decision = None, "not_ready"
+        opened = _SlotOpen(
+            slot_start=slot_start,
+            intent=intent,
+            decision=decision,
+            inputs_ready=not reasons,
+            reasons=tuple(r for r, _ in reasons),
+            opened_at=now,
+        )
+        self._slot_open[slot_start] = opened
+        self._opened_slot = slot_start
+        for old in [s for s in self._slot_open if s < slot_start - timedelta(hours=2)]:
+            del self._slot_open[old]
+        return opened
+
+    async def close_slot(self, slot_start: datetime) -> dict[str, Any]:
+        slot_end = slot_start + timedelta(seconds=self._interval)
+        measured = self.observer.measure(slot_start, slot_end)
+        self.observer.prune(self.clock.now())
+        opened = self._slot_open.get(slot_start)
+        price = self.price_curve.price_at(slot_start) if self.price_curve else None
+        if price is None:
+            price = self._recorded_price(slot_start)
+        record = self._slot_record(slot_start, slot_end, measured, opened, price)
+        self._closed_slot = slot_start
+        await self._write(self.sink.append_slot, slot_start, record)
+        return record
+
+    def _recorded_price(self, slot_start: datetime) -> float | None:
+        for plan in reversed(self.plans):
+            try:
+                index = plan.snapshot.slot_starts.index(slot_start)
+            except ValueError:
+                continue
+            return plan.snapshot.prices[index]
+        return None
+
+    def _slot_record(
+        self,
+        slot_start: datetime,
+        slot_end: datetime,
+        measured: SlotMeasurements,
+        opened: _SlotOpen | None,
+        price: float | None,
+    ) -> dict[str, Any]:
+        intent = opened.intent if opened else None
+        decision = opened.decision if opened else "not_observed"
+        battery_mapped = self.config.entities.has_battery
+        load = measured.gross_load_kwh(battery_mapped)
+        self.metrics.shadow_slots.labels(decision=decision).inc()
+
+        mode = intent.mode if intent else None
+        target = intent.target_power_w if intent else 0.0
+        planned_c, planned_d = intent_energy_kwh(mode, target, self._interval)
+        self.metrics.shadow_planned_energy.labels(direction="charge").inc(planned_c)
+        self.metrics.shadow_planned_energy.labels(direction="discharge").inc(planned_d)
+        if measured.battery_charge_kwh is not None:
+            self.metrics.shadow_actual_energy.labels(direction="charge").inc(
+                measured.battery_charge_kwh
+            )
+        if measured.battery_discharge_kwh is not None:
+            self.metrics.shadow_actual_energy.labels(direction="discharge").inc(
+                measured.battery_discharge_kwh
+            )
+
+        # SOC-limit check of the request against the *measured* SOC (entity mode).
+        violation: bool | None = None
+        step: SlotStep | None = None
+        base = self._base_spec()
+        if base is not None and self.tariff is not None:
+            spec, limit = base
+            if intent is not None and measured.soc_start_frac is not None:
+                violation = soc_violation(spec, measured.soc_start_frac, planned_c, planned_d)
+                if violation:
+                    self.metrics.shadow_soc_violations.inc()
+            if self.virtual_soc is None and measured.soc_start_frac is not None:
+                self.virtual_soc = clamp_soc(measured.soc_start_frac, self.tariff)[0]
+                self.virtual_soc_origin = f"measured SOC at {slot_start.isoformat()}"
+            if self.virtual_soc is not None:
+                step = step_virtual_battery(
+                    spec,
+                    soc_start_frac=self.virtual_soc,
+                    mode=mode,
+                    target_power_w=target,
+                    load_kwh=load,
+                    interval_seconds=self._interval,
+                    import_limit_kw=limit,
+                )
+                self.virtual_soc = step.soc_end_frac
+                self.metrics.shadow_clipped.inc(
+                    step.clipped_charge_kwh + step.clipped_discharge_kwh
+                )
+                self._spawn(self._save_virtual_battery(slot_end))
+
+        native_cost = cf_cost = None
+        if (
+            price is not None
+            and measured.grid_kwh is not None
+            and step is not None
+            and step.grid_kwh is not None
+        ):
+            native_cost = price * measured.grid_kwh
+            cf_cost = price * step.grid_kwh
+            # Gauges, not counters: PVPC can be negative, so these sums can fall.
+            self.metrics.shadow_native_cost.inc(native_cost)
+            self.metrics.shadow_cf_cost.inc(cf_cost)
+            self.metrics.shadow_comparable.inc()
+
+        return {
+            "kind": "shadow_slot",
+            "shadow": True,
+            "slot_start": slot_start.isoformat(),
+            "slot_end": slot_end.isoformat(),
+            "observed_from": max(slot_start, self._started_at).isoformat(),
+            "local_day": local_date(slot_start, self._tz).isoformat(),
+            "interval_seconds": self._interval,
+            "soc_source": self.config.planning.soc_source,
+            "battery_mapped": battery_mapped,
+            "price_eur_per_kwh": price,
+            "decision": decision,
+            "inputs_ready_at_open": opened.inputs_ready if opened else None,
+            "not_ready_reasons": list(opened.reasons) if opened else [],
+            "intent": intent.to_dict() if intent else None,
+            "planned_charge_kwh": planned_c,
+            "planned_discharge_kwh": planned_d,
+            "measured": measured.to_dict(),
+            "gross_load_kwh": load,
+            "soc_violation": violation,
+            "virtual": None
+            if step is None
+            else {
+                "soc_start_frac": step.soc_start_frac,
+                "soc_end_frac": step.soc_end_frac,
+                "charge_kwh": step.charge_kwh,
+                "discharge_kwh": step.discharge_kwh,
+                "clipped_charge_kwh": step.clipped_charge_kwh,
+                "clipped_discharge_kwh": step.clipped_discharge_kwh,
+                "grid_kwh": step.grid_kwh,
+                "applied": step.applied,
+            },
+            "native_cost_eur": native_cost,
+            "counterfactual_cost_eur": cf_cost,
+            "code_version": self.code_version,
+        }
+
+    # ------------------------------------------------------------------ virtual battery
+
+    def _base_spec(self) -> tuple[Any, float | None] | None:
+        """Battery spec from the tariff (initial SOC irrelevant: callers re-anchor)."""
+        if self.tariff is None:
+            return None
+        floor = self.tariff.battery.soc_window_min or 0.0
+        try:
+            spec, limit, _ = battery_spec_from_tariff(self.tariff, float(floor))
+        except ValueError:
+            return None
+        return spec, limit
+
+    def _init_virtual_battery(self) -> None:
+        if self.tariff is None:
+            return
+        saved = self.sink.load_virtual_battery()
+        now = self.clock.now()
+        if saved and saved.get("soc_frac") is not None and saved.get("at"):
+            with contextlib.suppress(ValueError, TypeError):
+                at = datetime.fromisoformat(saved["at"])
+                if (now - at).total_seconds() <= 6 * 3600:
+                    self.virtual_soc = clamp_soc(float(saved["soc_frac"]), self.tariff)[0]
+                    self.virtual_soc_origin = f"restored from store ({saved['at']})"
+                    return
+        if self.config.planning.soc_source == "simulated":
+            initial = self.tariff.battery.initial_soc_frac
+            if initial is None:
+                initial = self.tariff.battery.soc_window_min
+            if initial is not None:
+                self.virtual_soc = clamp_soc(float(initial), self.tariff)[0]
+                self.virtual_soc_origin = "tariff.yaml battery.initial_soc_frac"
+
+    async def _save_virtual_battery(self, at: datetime) -> None:
+        if self.virtual_soc is None:
+            return
+        await self._write(
+            self.sink.save_virtual_battery,
+            {"soc_frac": self.virtual_soc, "at": at.isoformat(), "origin": self.virtual_soc_origin},
+        )
+
+    # ------------------------------------------------------------------ loops
+
+    async def _write(self, fn: Callable[..., Any], *args: Any) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(self._io, fn, *args)
+        except RuntimeError as exc:  # executor shut down
+            log.warning("store write skipped: %s", exc)
+        except OSError as exc:
+            self.sink.write_errors += 1
+            self.metrics.sink_errors.inc()
+            log.error("store write failed: %s", exc)
+
+    async def _record_event(self, kind: str, details: dict[str, Any]) -> None:
+        now = self.clock.now()
+        await self._write(
+            self.sink.append_event,
+            now,
+            {"kind": kind, "at": now.isoformat(), "code_version": self.code_version, **details},
+        )
+
+    async def refresh_history(self) -> bool:
+        if self._history_fetcher is None:
+            self.history_error = "no Prometheus URL configured"
+            return False
+        now = self.clock.now()
+        today = local_date(now, self._tz)
+        self._history_last_attempt = time.monotonic()
+        loop = asyncio.get_running_loop()
+        try:
+            history = await loop.run_in_executor(self._io, self._history_fetcher, now, today)
+        except Exception as exc:  # noqa: BLE001 - reported as not-ready, retried later
+            self.history_error = f"{type(exc).__name__}: {exc}"[:500]
+            self.metrics.history_refresh.labels(result="error").inc()
+            await self._record_event("history_error", {"error": self.history_error})
+            return False
+        self.history = history
+        self.history_error = None
+        self.forecast_error = None
+        self.metrics.history_refresh.labels(result="ok").inc()
+        await self._record_event("history_refreshed", history.summary())
+        return True
+
+    async def _history_loop(self) -> None:
+        """Fetch history once per local day (the forecast cutoff moves at midnight),
+        retrying a failed fetch every ``_HISTORY_RETRY_S``."""
+        while True:
+            today = local_date(self.clock.now(), self._tz)
+            due = self.history is None or self.history.cutoff_day != today
+            retry_ok = (
+                self._history_last_attempt is None
+                or time.monotonic() - self._history_last_attempt >= _HISTORY_RETRY_S
+            )
+            if due and retry_ok and await self.refresh_history():
+                self._request_replan("history_refreshed")
+            await self.clock.sleep(60.0)
+
+    async def _poll_loop(self) -> None:
+        assert self.rest is not None
+        roles = [r for r in self.config.entities.configured() if r != "grid_energy"]
+        while True:
+            await self.clock.sleep(self.config.home_assistant.poll_interval_s)
+            for role in roles:
+                entity = self.config.entities.get(role)
+                if entity is None:
+                    continue
+                try:
+                    payload = await self.rest.get_state(entity)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - the WebSocket stays authoritative
+                    self.metrics.rest_polls.labels(result="error").inc()
+                    continue
+                if payload is None:
+                    self.metrics.rest_polls.labels(result="missing").inc()
+                    continue
+                from .entity_store import parse_ha_state
+
+                try:
+                    self.store.apply(parse_ha_state(payload, received_at=self.clock.now()))
+                    self.metrics.rest_polls.labels(result="ok").inc()
+                except ValueError:
+                    self.metrics.rest_polls.labels(result="error").inc()
+
+    async def scheduler_tick(self) -> float:
+        """Run whatever is due now; return seconds until the next due action."""
+        now = self.clock.now()
+        interval = timedelta(seconds=self._interval)
+        current = floor_slot(now, self._interval)
+        boundary = current + interval
+        lead = timedelta(seconds=self.config.planning.solve_lead_s)
+        grace = timedelta(seconds=self.config.observation.slot_close_grace_s)
+
+        if self._opened_slot != current:
+            await self.open_slot(current)
+        previous = current - interval
+        close_due = now >= current + grace
+        if close_due and (self._closed_slot is None or self._closed_slot < previous):
+            if previous >= floor_slot(self._started_at, self._interval):
+                await self.close_slot(previous)
+            else:
+                self._closed_slot = previous
+        retry_soon = False
+        if now >= boundary - lead and self._solved_for != boundary:
+            self._solved_for = boundary
+            outcome = await self.request_solve("scheduled")
+            if outcome == "skipped:busy":
+                # An event-triggered solve holds the worker; try again shortly.
+                self._solved_for = None
+                retry_soon = True
+
+        now = self.clock.now()
+        candidates = [boundary]
+        if self._solved_for != boundary:
+            candidates.append(boundary - lead)
+        if self._closed_slot is None or self._closed_slot < previous:
+            candidates.append(current + grace)
+        upcoming = [c for c in candidates if c > now]
+        wake = min(upcoming) if upcoming else boundary
+        delay = (wake - now).total_seconds()
+        if retry_soon:
+            delay = min(delay, 2.0)
+        return max(0.05, delay)
+
+    async def _scheduler_loop(self) -> None:
+        while True:
+            try:
+                delay = await self.scheduler_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - the loop must survive one bad tick
+                log.exception("scheduler tick failed")
+                delay = 5.0
+            await self.clock.sleep(delay)
+
+    # ------------------------------------------------------------------ views
+
+    def _inputs_view(self, now: datetime) -> list[dict[str, Any]]:
+        out = []
+        for role, entity in self.config.entities.configured().items():
+            state = self.store.get(entity)
+            age = self.store.age_s(entity, now)
+            limit = self.config.freshness_for(role) if role != "price" else None
+            fresh = state is not None and state.available
+            if limit is not None:
+                fresh = fresh and age is not None and age <= limit
+            out.append(
+                {
+                    "role": role,
+                    "entity": entity,
+                    "seen": state is not None,
+                    "available": state.available if state else None,
+                    "age_s": None if age is None else round(age, 3),
+                    "max_age_s": limit,
+                    "fresh": bool(fresh),
+                }
+            )
+        return out
+
+    def metric_snapshot(self) -> dict[str, Any]:
+        now = self.clock.now()
+        readiness = self.readiness(now)
+        plan = self.plans[-1] if self.plans else None
+        intent = self.current_intent(now)
+        ha = self.ha.stats if self.ha else None
+        return {
+            "ready": 1.0 if readiness.ready else 0.0,
+            "inputs_ready": 1.0 if readiness.inputs_ready else 0.0,
+            "reasons": readiness.reasons,
+            "ha": {}
+            if ha is None
+            else {
+                "connected": 1.0 if ha.connected else 0.0,
+                "synced": 1.0 if ha.synced else 0.0,
+                "reconnects": ha.reconnects,
+                "resyncs": ha.resyncs,
+                "events": ha.events_received,
+                "failures": dict(ha.failures),
+            },
+            "updates": self.store.totals(),
+            "inputs": self._inputs_view(now),
+            "price_horizon_s": (self.price_curve.end - now).total_seconds()
+            if self.price_curve and self.price_curve.end
+            else None,
+            "tomorrow_published": None
+            if self.price_curve is None
+            else (1.0 if self.price_curve.tomorrow_published else 0.0),
+            "plan_age_s": (now - plan.plan.generated_at).total_seconds() if plan else None,
+            "plan_slots": plan.plan.n if plan else None,
+            "current_intent_w": intent.signed_power_w if intent else None,
+            "current_intent_active": 1.0 if intent else 0.0,
+            "worker_busy": 1.0 if self._worker_busy else 0.0,
+            "history_usable_slots": self.history.usable_slots if self.history else None,
+            "history_age_s": (now - self.history.fetched_at).total_seconds()
+            if self.history
+            else None,
+            "terminal_value": plan.snapshot.terminal_value_eur_per_kwh if plan else None,
+            "virtual_soc": self.virtual_soc,
+            "late_samples": self.observer.late_samples,
+        }
+
+    def status(self) -> dict[str, Any]:
+        now = self.clock.now()
+        readiness = self.readiness(now)
+        ha = self.ha.stats if self.ha else None
+        return {
+            "service": "battery-optimizer",
+            "mode": "shadow",
+            "actuation": "none (read-only adapters; intents are recorded, never sent)",
+            "code_version": self.code_version,
+            "now": now.isoformat(),
+            "started_at": self._started_at.isoformat(),
+            "ready": readiness.ready,
+            "inputs_ready": readiness.inputs_ready,
+            "not_ready": readiness.details,
+            "soc_source": self.config.planning.soc_source,
+            "home_assistant": None
+            if ha is None
+            else {
+                "connected": ha.connected,
+                "synced": ha.synced,
+                "connects": ha.connects,
+                "reconnects": ha.reconnects,
+                "resyncs": ha.resyncs,
+                "failures": dict(ha.failures),
+                "last_error": ha.last_error,
+                "last_connected_at": ha.last_connected_at.isoformat()
+                if ha.last_connected_at
+                else None,
+                "last_synced_at": ha.last_synced_at.isoformat() if ha.last_synced_at else None,
+                "next_retry_delay_s": ha.next_retry_delay_s,
+            },
+            "entity_updates": self.store.counts,
+            "inputs": self._inputs_view(now),
+            "prices": self.price_curve.summary()
+            if self.price_curve
+            else {"error": self.price_error},
+            "history": self.history.summary() if self.history else {"error": self.history_error},
+            "forecast_error": self.forecast_error,
+            "solver": {
+                "worker_busy": self._worker_busy,
+                "last_solve": self.last_solve,
+                "plans_in_memory": len(self.plans),
+            },
+            "virtual_battery": {"soc_frac": self.virtual_soc, "origin": self.virtual_soc_origin},
+            "store": {"root": str(self.sink.root), "write_errors": self.sink.write_errors},
+            "config_hash": self.config.config_hash(),
+        }
+
+    def plan_view(self) -> dict[str, Any]:
+        now = self.clock.now()
+        plan = self.plans[-1] if self.plans else None
+        intent = self.current_intent(now)
+        if plan is None:
+            return {"shadow": True, "plan": None, "current_intent": None, "now": now.isoformat()}
+        record = plan.to_record()
+        record.pop("inputs", None)
+        return {
+            "shadow": True,
+            "now": now.isoformat(),
+            "expired": plan.plan.is_expired(now),
+            "current_intent": intent.to_dict() if intent else None,
+            "plan": record,
+        }
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
