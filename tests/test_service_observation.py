@@ -1,0 +1,259 @@
+"""Slot measurements, Prometheus history/forecast and the virtual battery."""
+
+from __future__ import annotations
+
+import math
+import re
+from datetime import date, timedelta
+from urllib.parse import parse_qs
+
+import httpx
+import numpy as np
+import pytest
+from service_fakes import ENTITY_MODE, TARIFF, TZ, entity_state, flat_history, service_config, utc
+
+from battery_optimizer.service.entity_store import UpdateResult
+from battery_optimizer.service.history import (
+    BASIS_GRID_ONLY,
+    ForecastUnavailableError,
+    PrometheusHistory,
+    forecast_load,
+)
+from battery_optimizer.service.observer import SlotObserver, normalise_value
+from battery_optimizer.service.planner import battery_spec_from_tariff
+from battery_optimizer.service.timegrid import local_day_bounds_utc, local_day_slots
+from battery_optimizer.service.virtual_battery import soc_violation, step_virtual_battery
+
+T0 = utc(2026, 10, 20, 10, 0)
+END = T0 + timedelta(minutes=15)
+
+
+def _observer(tmp_path):
+    return SlotObserver(
+        service_config(
+            tmp_path,
+            **ENTITY_MODE,
+            **{
+                "entities.grid_energy": "sensor.shellyem_main_channel_1_energy",
+            },
+        )
+    )
+
+
+def _feed(observer, entity, value, at, unit):
+    observer.on_state(
+        entity_state(entity, value, at, attributes={"unit_of_measurement": unit}),
+        UpdateResult.ACCEPTED,
+    )
+
+
+def test_counter_edges_power_average_and_soc(tmp_path):
+    obs = _observer(tmp_path)
+    energy = "sensor.shellyem_main_channel_1_energy"
+    for at, value in [(-30, 100.0), (300, 100.1), (890, 100.25), (910, 100.26)]:
+        _feed(obs, energy, value, T0 + timedelta(seconds=at), "kWh")
+    for k in range(-60, 450, 90):
+        _feed(obs, "sensor.shellyem_main_channel_1_power", 1000, T0 + timedelta(seconds=k), "W")
+    for k in range(450, 900, 90):
+        _feed(obs, "sensor.shellyem_main_channel_1_power", 2, T0 + timedelta(seconds=k), "kW")
+    _feed(obs, "sensor.test_soc", 40, T0 - timedelta(seconds=10), "%")
+    _feed(obs, "sensor.test_soc", 42, T0 + timedelta(seconds=800), "%")
+    m = obs.measure(T0, END)
+    assert m.grid_energy_source == "counter"
+    assert m.grid_kwh == pytest.approx(0.25)
+    assert m.grid_power_avg_w == pytest.approx(1500.0)
+    assert m.grid_power_coverage == pytest.approx(1.0)
+    assert (m.soc_start_frac, m.soc_end_frac) == (pytest.approx(0.40), pytest.approx(0.42))
+
+
+def test_stale_counter_edge_falls_back_to_labelled_power_integral(tmp_path):
+    obs = _observer(tmp_path)
+    energy = "sensor.shellyem_main_channel_1_energy"
+    _feed(obs, energy, 100.0, T0 - timedelta(seconds=600), "kWh")  # too old for the edge
+    _feed(obs, energy, 100.3, T0 + timedelta(seconds=890), "kWh")
+    for k in range(0, 900, 60):
+        _feed(obs, "sensor.shellyem_main_channel_1_power", 800, T0 + timedelta(seconds=k), "W")
+    m = obs.measure(T0, END)
+    assert m.grid_energy_source == "power_integral"
+    assert m.grid_kwh == pytest.approx(0.2)
+
+
+def test_counter_reset_is_unknown_not_negative(tmp_path):
+    obs = _observer(tmp_path)
+    energy = "sensor.shellyem_main_channel_1_energy"
+    _feed(obs, energy, 100.0, T0 - timedelta(seconds=10), "kWh")
+    _feed(obs, energy, 0.1, T0 + timedelta(seconds=890), "kWh")
+    m = obs.measure(T0, END)
+    assert m.grid_kwh is None and m.grid_energy_source is None
+
+
+def test_bounded_hold_limits_coverage(tmp_path):
+    obs = _observer(tmp_path)
+    _feed(obs, "sensor.test_battery_power", -500, T0, "W")  # held at most 300 s
+    m = obs.measure(T0, END)
+    assert m.battery_power_avg_w == pytest.approx(-500)
+    assert m.battery_power_coverage == pytest.approx(1 / 3, abs=1e-3)
+    assert m.battery_charge_kwh is None  # coverage too low to claim energy
+    assert m.gross_load_kwh(battery_mapped=True) is None
+
+
+def test_battery_flows_reconstruct_gross_load(tmp_path):
+    obs = _observer(tmp_path)
+    energy = "sensor.shellyem_main_channel_1_energy"
+    _feed(obs, energy, 10.0, T0, "kWh")
+    _feed(obs, energy, 10.5, END, "kWh")
+    for k in range(0, 900, 120):
+        _feed(obs, "sensor.test_battery_power", 1200, T0 + timedelta(seconds=k), "W")
+    m = obs.measure(T0, END)
+    assert m.battery_charge_kwh == pytest.approx(0.3)
+    assert m.battery_discharge_kwh == 0
+    assert m.gross_load_kwh(battery_mapped=True) == pytest.approx(0.2)
+    assert m.gross_load_kwh(battery_mapped=False) == pytest.approx(0.5)
+
+
+def test_normalise_units():
+    s = entity_state("sensor.x", 2.5, T0, attributes={"unit_of_measurement": "kW"})
+    assert normalise_value("grid_power", s) == 2500
+    s = entity_state("sensor.x", 1500, T0, attributes={"unit_of_measurement": "Wh"})
+    assert normalise_value("grid_energy", s) == 1.5
+    s = entity_state("sensor.x", 55, T0, attributes={"unit_of_measurement": "%"})
+    assert normalise_value("battery_soc", s) == 0.55
+    s = entity_state("sensor.x", 55, T0, attributes={"unit_of_measurement": "V"})
+    assert normalise_value("battery_soc", s) is None
+
+
+# ---------------------------------------------------------------------------
+# Forecast
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_reproduces_flat_history_and_handles_fall_back_day():
+    day = date(2026, 10, 25)
+    history = flat_history(day, load_kwh=0.2)
+    targets = local_day_slots(day, TZ)
+    fc = forecast_load(history, targets, tz=TZ, window_days=28)
+    assert len(fc.load_kwh) == 100
+    assert np.allclose(fc.load_kwh, 0.2)  # positions 96..99 use the pooled mean
+    assert fc.meta["days"][0]["slots_pooled_fallback"] == 4
+
+
+def test_forecast_uses_nothing_from_the_decision_day():
+    day = date(2026, 10, 20)
+    history = flat_history(day)
+    with pytest.raises(ForecastUnavailableError):
+        forecast_load(
+            history,
+            [local_day_bounds_utc(day, TZ)[0] - timedelta(minutes=15)],
+            tz=TZ,
+            window_days=28,
+        )
+
+
+def test_forecast_refuses_without_history():
+    day = date(2026, 10, 20)
+    history = flat_history(day)
+    empty = type(history)(**{**history.__dict__, "usable": np.zeros_like(history.usable)})
+    with pytest.raises(ForecastUnavailableError, match="no usable load history"):
+        forecast_load(empty, local_day_slots(day, TZ)[:4], tz=TZ, window_days=28)
+
+
+def test_prometheus_history_from_raw_counter_samples():
+    """Raw range-vector samples -> stitched counter -> 15-min gross load (offline primitives)."""
+    rate_kwh_per_s = 0.4 / 3600  # 400 W
+    queries = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = parse_qs(request.url.query.decode())
+        query, at = params["query"][0], float(params["time"][0])
+        queries.append(query)
+        window = int(re.search(r"\[(\d+)s\]", query).group(1))
+        start = at - window
+        ts = [t for t in range(int(math.ceil(start / 60)) * 60, int(at) + 1, 60) if t > start]
+        if "energy" in query:
+            values = [[t, str(1000 + rate_kwh_per_s * (t - 1_790_000_000))] for t in ts]
+        else:
+            values = [[t, "0.2"] for t in ts]
+        metric = {"__name__": "x", "entity": "e", "job": "home-assistant", "instance": "10.0.0.1"}
+        return httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "data": {"resultType": "matrix", "result": [{"metric": metric, "values": values}]},
+            },
+        )
+
+    fetcher = PrometheusHistory(
+        base_url="http://prom.test:9090",
+        timeout_s=5,
+        tz=TZ,
+        window_days=2,
+        grid_energy_entity="sensor.shellyem_main_channel_1_energy",
+        price_entity="sensor.esios_pvpc",
+        client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    day = date(2026, 10, 20)
+    history = fetcher.fetch(utc(2026, 10, 20, 9, 0), day)
+    assert history.cutoff == local_day_bounds_utc(day, TZ)[0]
+    assert len(history.starts) == 2 * 96
+    assert history.basis == BASIS_GRID_ONLY
+    assert history.usable.mean() > 0.95
+    assert np.nanmedian(history.load_kwh) == pytest.approx(0.1, rel=1e-3)
+    assert history.mean_price_eur_per_kwh == pytest.approx(0.2)
+    assert all("[" in q and "query_range" not in q for q in queries)
+
+
+# ---------------------------------------------------------------------------
+# Virtual battery
+# ---------------------------------------------------------------------------
+
+
+def _spec():
+    return battery_spec_from_tariff(TARIFF, 0.2)
+
+
+def test_virtual_battery_clips_discharge_to_measured_load():
+    spec, limit, _ = _spec()
+    step = step_virtual_battery(
+        spec,
+        soc_start_frac=0.5,
+        mode="discharge",
+        target_power_w=2000,
+        load_kwh=0.1,
+        interval_seconds=900,
+        import_limit_kw=limit,
+    )
+    assert step.discharge_kwh == pytest.approx(0.1)
+    assert step.clipped_discharge_kwh == pytest.approx(0.4)
+    assert step.grid_kwh == pytest.approx(0.0)
+    assert step.soc_end_frac < 0.5
+
+
+def test_virtual_battery_respects_soc_ceiling_and_unknown_load():
+    spec, limit, _ = _spec()
+    full = step_virtual_battery(
+        spec,
+        soc_start_frac=0.95,
+        mode="charge",
+        target_power_w=2500,
+        load_kwh=0.2,
+        interval_seconds=900,
+        import_limit_kw=limit,
+    )
+    assert full.charge_kwh == 0 and full.clipped_charge_kwh == pytest.approx(0.625)
+    held = step_virtual_battery(
+        spec,
+        soc_start_frac=0.5,
+        mode="charge",
+        target_power_w=1000,
+        load_kwh=None,
+        interval_seconds=900,
+        import_limit_kw=limit,
+    )
+    assert not held.applied and held.soc_end_frac == 0.5 and held.grid_kwh is None
+
+
+def test_soc_violation_detection():
+    spec, _, _ = _spec()
+    assert soc_violation(spec, 0.94, 0.625, 0.0)
+    assert not soc_violation(spec, 0.5, 0.625, 0.0)
+    assert soc_violation(spec, 0.21, 0.0, 0.625)
