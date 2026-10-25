@@ -18,7 +18,9 @@ retried in a tight loop: they back off at the maximum delay.
 Every outgoing frame passes :func:`~battery_optimizer.service.ha_guard.check_ws_frame`
 inside :class:`GuardedConnection`, and the REST client checks every request in an
 ``httpx`` request hook, so neither adapter can send anything but the read-only
-allowlist — whatever the caller asks for.
+allowlist — whatever the caller asks for.  The single exception is
+:meth:`HAWebSocketClient.get_weather_forecast` (``weather.get_forecasts`` with a
+response, a query that changes nothing; see :mod:`~battery_optimizer.service.ha_guard`).
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ import httpx
 from .clock import Clock
 from .config import HomeAssistantSettings, Secret
 from .entity_store import EntityStore, UpdateResult, parse_ha_state
-from .ha_guard import check_rest_request, check_ws_frame
+from .ha_guard import check_rest_request, check_ws_frame, weather_forecast_request
 
 __all__ = [
     "GuardedConnection",
@@ -220,6 +222,8 @@ class HAWebSocketClient:
         self._ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future[Mapping[str, Any]]] = {}
         self._subscription_id: int | None = None
+        self._conn: GuardedConnection | None = None
+        self._reader_task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
         self.stats = HAClientStats()
 
@@ -285,6 +289,8 @@ class HAWebSocketClient:
         self.stats.connected = False
         self.stats.synced = False
         self._subscription_id = None
+        self._conn = None
+        self._reader_task = None
         for future in self._pending.values():
             if not future.done():
                 future.set_exception(HAConnectionClosedError("session ended"))
@@ -338,6 +344,7 @@ class HAWebSocketClient:
             self.stats.synced = True
             self.stats.resyncs += 1
             self.stats.last_synced_at = self._clock.now()
+            self._conn, self._reader_task = conn, reader
             if self._on_synced is not None:
                 self._on_synced()
             heartbeat = asyncio.create_task(self._heartbeat(conn, reader), name="ha-heartbeat")
@@ -386,6 +393,34 @@ class HAWebSocketClient:
             error = reply.get("error") or {}
             raise HACommandError(stage, f"refused: {error.get('code')}: {error.get('message')}")
         return reply.get("result")
+
+    async def get_weather_forecast(
+        self, entity_id: str, forecast_type: str = "hourly"
+    ) -> list[Any]:
+        """``weather.get_forecasts`` over the live session: the raw forecast list.
+
+        The one permitted service call (see :mod:`~battery_optimizer.service.ha_guard`).
+        Raises :class:`HACommandError` when there is no synced session, HA refuses the
+        call or the response lacks a forecast list for *entity_id*;
+        :class:`HAConnectionClosedError` when the session ends meanwhile.
+        """
+        conn, reader = self._conn, self._reader_task
+        if conn is None or reader is None or not self.stats.synced:
+            raise HACommandError("weather_forecast", "no synced Home Assistant session")
+        message = weather_forecast_request(next(self._ids), entity_id, forecast_type)
+        try:
+            result = await self._request(conn, message, stage="weather_forecast", reader=reader)
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise  # we are being cancelled
+            raise HAConnectionClosedError("weather_forecast: session ended") from None
+        response = result.get("response") if isinstance(result, Mapping) else None
+        entry = response.get(entity_id) if isinstance(response, Mapping) else None
+        forecast = entry.get("forecast") if isinstance(entry, Mapping) else None
+        if not isinstance(forecast, list):
+            raise HACommandError("weather_forecast", f"no forecast list for {entity_id}")
+        return forecast
 
     async def _reader(self, conn: GuardedConnection) -> None:
         while True:

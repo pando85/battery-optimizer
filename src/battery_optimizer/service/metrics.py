@@ -214,6 +214,25 @@ class ServiceMetrics:
         self.sink_errors = Counter(
             f"{PREFIX}_sink_write_errors", "Failed shadow-store writes", registry=r
         )
+        self.pvpc_snapshots = Counter(
+            f"{PREFIX}_pvpc_snapshots",
+            "PVPC publication snapshots by result (written, failed)",
+            ["result"],
+            registry=r,
+        )
+        self.weather_forecast_fetches = Counter(
+            f"{PREFIX}_weather_forecast_fetches",
+            "weather.get_forecasts archive fetches by result (ok = fetched and written)",
+            ["result"],
+            registry=r,
+        )
+        # Set only on a success, so the series is absent until the first one.
+        self.archive_last_success = Gauge(
+            f"{PREFIX}_archive_last_success_timestamp_seconds",
+            "Unix time of the last successful archive write",
+            ["archive"],
+            registry=r,
+        )
         self.rest_polls = Counter(
             f"{PREFIX}_ha_rest_polls", "REST GET refreshes by result", ["result"], registry=r
         )
@@ -259,6 +278,10 @@ class ServiceMetrics:
             "Requested energy the replay had to clip (SOC, power, import ceiling, no export)",
             registry=r,
         )
+        for result in ("written", "failed"):
+            self.pvpc_snapshots.labels(result=result)
+        for result in ("ok", "failed"):
+            self.weather_forecast_fetches.labels(result=result)
         for reason in ("busy", *(r for r in NOT_READY_REASONS if r != "no_recent_plan")):
             self.skipped.labels(reason=reason)
         for result in ("ok", "error", "timeout", "discarded"):

@@ -27,6 +27,22 @@ TARIFF = load_config(REPO / "config" / "tariff.yaml")
 
 _CLOSE = object()
 
+WEATHER_FORECAST = [
+    {
+        "datetime": "2026-10-20T11:00:00+00:00",
+        "condition": "sunny",
+        "temperature": 21.5,
+        "templow": None,
+        "precipitation_probability": 0,
+    },
+    {
+        "datetime": "2026-10-20T12:00:00+00:00",
+        "condition": "cloudy",
+        "temperature": 22.0,
+        "precipitation_probability": 10,
+    },
+]
+
 
 async def wait_until(predicate, timeout: float = 3.0, step: float = 0.005) -> None:
     loop = asyncio.get_running_loop()
@@ -197,7 +213,9 @@ class FakeHAServer:
 
     Keys: ``refuse`` (connect raises), ``auth_invalid``, ``subscribe_fail``,
     ``get_states_silent`` (never answers), ``no_pong``, ``events_before_states``
-    (payloads pushed as events before the get_states result).
+    (payloads pushed as events before the get_states result); for the weather archive
+    ``weather_forecast`` (the list returned), ``weather_response`` (the whole response
+    object), ``weather_error`` (``success: false``), ``weather_silent`` (no answer).
     """
 
     def __init__(self, states: list[dict[str, Any]] | None = None) -> None:
@@ -205,6 +223,7 @@ class FakeHAServer:
         self.behaviours: list[dict[str, Any]] = []
         self.connections: list[FakeConnection] = []
         self.all_sent: list[dict[str, Any]] = []
+        self.service_calls: list[dict[str, Any]] = []
         self.connect_attempts = 0
 
     async def connect(self, url: str, *, timeout: float) -> FakeConnection:
@@ -252,6 +271,32 @@ class FakeHAServer:
         elif kind == "ping":
             if not b.get("no_pong"):
                 conn.push({"id": message["id"], "type": "pong"})
+        elif kind == "call_service":
+            self.service_calls.append(message)
+            if b.get("weather_error"):
+                conn.push(
+                    {
+                        "id": message["id"],
+                        "type": "result",
+                        "success": False,
+                        "error": {"code": "unauthorized", "message": "nope"},
+                    }
+                )
+            elif not b.get("weather_silent"):
+                entity = message["target"]["entity_id"]
+                forecast = b.get("weather_forecast", WEATHER_FORECAST)
+                response = {entity: {"forecast": forecast}}
+                conn.push(
+                    {
+                        "id": message["id"],
+                        "type": "result",
+                        "success": True,
+                        "result": {
+                            "context": {"id": "01", "parent_id": None, "user_id": "u"},
+                            "response": b.get("weather_response", response),
+                        },
+                    }
+                )
 
 
 def utc(*args: int) -> datetime:
