@@ -325,11 +325,15 @@ Start only if P2–P5 leave a large share of the P0 gap uncaptured.
 
 ## 5. Owner decisions needed
 
-1. G0 minimum worthwhile annual gain (kept private, outside the repo).
+1. ~~G0 minimum worthwhile annual gain~~ — decided 2026-10-25: **no EUR floor**. Any gain whose
+   95 % paired bootstrap interval lies above zero in both evaluation periods is worth keeping. The
+   pre-registered G2 share criterion (at least 10 % of the P0 gap) still applies to P2 as recorded.
+   **P2 pick rule:** if several candidates pass G2, the highest paired `rolling_horizon` saving
+   averaged over both periods becomes the P4 reference, and a tie goes to the simpler candidate.
 2. ~~The temperature source for P4~~ — decided: persistence for the backtest, plus archiving the HA
    weather forecast (see P4).
 3. ~~Whether the terrace plug meters the washer~~ — P3: it does not. It reported only in
    April–July 2024 and its loads are small. Washer energy labels come from
    `sensor.terrace_lavadora_energy_today` and the Home Connect counters instead.
-4. The holiday subdivision for `daytype`.
+4. ~~The holiday subdivision for `daytype`~~ — decided: Spain national holidays only.
 5. Whether LightGBM may be added as an image dependency (P6 only).
