@@ -90,6 +90,7 @@ def test_endpoints_not_ready_then_ready(tmp_path):
     finally:
         service._executor.shutdown(wait=True)
         service._io.shutdown(wait=True)
+        service._history_pool.shutdown(wait=True)
 
 
 def test_no_writable_routes(tmp_path):
@@ -109,6 +110,7 @@ def test_no_writable_routes(tmp_path):
     finally:
         service._executor.shutdown(wait=True)
         service._io.shutdown(wait=True)
+        service._history_pool.shutdown(wait=True)
 
 
 def test_lifespan_starts_and_stops_the_service(tmp_path):

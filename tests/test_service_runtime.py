@@ -55,6 +55,7 @@ def cleanup():
     for service in services:
         service._executor.shutdown(wait=True)
         service._io.shutdown(wait=True)
+        service._history_pool.shutdown(wait=True)
 
 
 # ---------------------------------------------------------------------------

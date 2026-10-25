@@ -8,8 +8,9 @@ One asyncio event loop owns all state.  Blocking work leaves it:
   timeout.  A solve that times out keeps the single worker until its thread
   really ends (``asyncio.wait_for`` cannot kill a thread), so a new solve is
   refused as ``busy`` instead of starting a second worker — solves never overlap;
-* Prometheus history fetches and every store write run on a second
-  single-thread executor, which keeps appends in order.
+* every store write runs on a second single-thread executor, which keeps
+  appends in order, and Prometheus history fetches on a third, so a slow
+  Prometheus never delays a slot close or a plan write.
 
 Scheduling
 ----------
@@ -173,6 +174,9 @@ class ShadowService:
 
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bo-planner")
         self._io = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bo-io")
+        # History fetches can take minutes when Prometheus is slow; they get their own
+        # thread so they never delay a slot close or a plan write queued behind them.
+        self._history_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bo-history")
         self._worker_busy = False
         self._generation = 0
         self._plan_sequence = int(clock.now().timestamp())
@@ -222,6 +226,7 @@ class ShadowService:
             await self._record_event("service_stopped", {})
         self._executor.shutdown(wait=False, cancel_futures=True)
         self._io.shutdown(wait=True)
+        self._history_pool.shutdown(wait=False, cancel_futures=True)
 
     # ------------------------------------------------------------------ HA hooks
 
@@ -826,7 +831,9 @@ class ShadowService:
         self._history_last_attempt = time.monotonic()
         loop = asyncio.get_running_loop()
         try:
-            history = await loop.run_in_executor(self._io, self._history_fetcher, now, today)
+            history = await loop.run_in_executor(
+                self._history_pool, self._history_fetcher, now, today
+            )
         except Exception as exc:  # noqa: BLE001 - reported as not-ready, retried later
             self.history_error = f"{type(exc).__name__}: {exc}"[:500]
             self.metrics.history_refresh.labels(result="error").inc()
