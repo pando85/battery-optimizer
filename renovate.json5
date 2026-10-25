@@ -1,0 +1,133 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: [
+    'config:recommended',
+    'helpers:pinGitHubActionDigests',
+  ],
+  configMigration: true,
+  timezone: 'Europe/Madrid',
+  schedule: [
+    'before 6am on monday',
+  ],
+  semanticCommits: 'enabled',
+  semanticCommitType: 'build',
+  semanticCommitScope: 'deps',
+  // pre-commit hooks are not enabled by default.
+  'pre-commit': {
+    enabled: true,
+  },
+  // Dependencies in pyproject.toml are deliberately unconstrained: uv.lock is the source of truth
+  // and this weekly lock refresh is how Python dependencies are updated. CI gates the automerge.
+  lockFileMaintenance: {
+    enabled: true,
+    automerge: true,
+    automergeType: 'pr',
+    platformAutomerge: true,
+    schedule: [
+      'before 6am on monday',
+    ],
+  },
+  customManagers: [
+    {
+      customType: 'regex',
+      description: 'Process "# renovate: datasource=... depName=..." hints in YAML (e.g. the uv version in .github/actions/setup-uv)',
+      managerFilePatterns: [
+        '/.+\\.yaml$/',
+        '/.+\\.yml$/',
+      ],
+      matchStrings: [
+        '#\\srenovate: datasource=(?<datasource>\\S+)( versioning=(?<versioning>\\S+))?\n.*?: (?<depName>\\S+):(?<currentValue>.*)\n',
+        '#\\srenovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)( versioning=(?<versioning>\\S+))?\n.*?: (?<currentValue>.*)\n',
+        '#\\srenovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)( versioning=(?<versioning>\\S+))?\n.*?=\\S+(?<currentValue>.*)\n',
+      ],
+      versioningTemplate: '{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}',
+    },
+  ],
+  // Later rules win over earlier ones.
+  packageRules: [
+    {
+      description: 'Automerge everything but majors once CI is green',
+      matchUpdateTypes: [
+        'patch',
+        'minor',
+        'digest',
+        'pin',
+        'pinDigest',
+      ],
+      automerge: true,
+      automergeType: 'pr',
+      platformAutomerge: true,
+      ignoreTests: false,
+    },
+    {
+      description: 'Majors are reviewed by a human',
+      matchUpdateTypes: [
+        'major',
+      ],
+      automerge: false,
+    },
+    {
+      description: 'Let new releases settle before adopting them (digests carry no release date)',
+      matchUpdateTypes: [
+        'major',
+        'minor',
+        'patch',
+      ],
+      minimumReleaseAge: '3 days',
+    },
+    {
+      description: 'Python minor versions are bumped deliberately, together with requires-python and CI',
+      matchPackageNames: [
+        'python',
+      ],
+      matchUpdateTypes: [
+        'major',
+        'minor',
+      ],
+      enabled: false,
+    },
+    {
+      matchManagers: [
+        'github-actions',
+      ],
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+        'digest',
+        'pin',
+        'pinDigest',
+      ],
+      groupName: 'github-actions',
+      groupSlug: 'github-actions',
+    },
+    {
+      matchManagers: [
+        'pre-commit',
+      ],
+      groupName: 'pre-commit hooks',
+      groupSlug: 'pre-commit-hooks',
+    },
+    {
+      description: 'One uv version everywhere: CI action, Dockerfile image and pre-commit hook',
+      matchPackageNames: [
+        'astral-sh/uv',
+        'ghcr.io/astral-sh/uv',
+        'astral-sh/uv-pre-commit',
+      ],
+      groupName: 'uv',
+      groupSlug: 'uv',
+    },
+    {
+      description: 'Python dev tooling (the ruff pre-commit hook must match the locked ruff)',
+      matchPackageNames: [
+        'ruff',
+        'astral-sh/ruff-pre-commit',
+        'pytest',
+        'pytest-cov',
+        'git-cliff',
+      ],
+      groupName: 'python dev tooling',
+      groupSlug: 'python-dev-tooling',
+    },
+  ],
+}
