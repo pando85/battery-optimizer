@@ -405,3 +405,161 @@ def test_default_periods_are_the_p0_windows() -> None:
     ]
     assert [p.train_days for p in fe.DEFAULT_PERIODS] == [366, 365]
     assert fe.DEFAULT_PERIODS[0].train_end - timedelta(days=366) == datetime(2024, 1, 1, tzinfo=UTC)
+
+
+# ---------------------------------------------------------------------------
+# Gate G4 and the structured forecaster's side inputs
+# ---------------------------------------------------------------------------
+
+
+def _write_feature_set(data_dir: Path, *, n: int) -> str:
+    """A tiny feature set aligned with the synthetic dataset grid; returns its id."""
+    import hashlib
+
+    import pyarrow as pa
+
+    rng = np.random.default_rng(11)
+    starts = [START + timedelta(minutes=15 * i) for i in range(n)]
+    hour = np.array([(s.hour + 1) % 24 for s in starts])
+    columns: dict[str, object] = {
+        "interval_start": pa.array(starts, type=pa.timestamp("us", tz="UTC")),
+        "hp_heat_kwh": 0.2 * (hour < 8) + rng.random(n) * 0.01,
+        "hp_cool_kwh": np.zeros(n),
+        "hp_dhw_kwh": rng.random(n) * 0.01,
+        "outdoor_temp_mean_c": 8.0 + rng.random(n),
+        "climate_enable_at_start": np.ones(n),
+        "climate_min_hours_at_start": np.full(n, 6.0),
+        "dhw_enable_at_start": np.ones(n),
+    }
+    table = pa.table(columns)
+    feature_id = "ab" * 32
+    base = data_dir / "analysis" / "v1" / "features" / feature_id
+    (base / "parts").mkdir(parents=True)
+    part = base / "parts" / "features-test.parquet"
+    pq.write_table(table, part)
+    manifest = {
+        "feature_set_id": feature_id,
+        "part_files": [
+            {
+                "name": part.name,
+                "path": f"parts/{part.name}",
+                "rows": n,
+                "sha256": hashlib.sha256(part.read_bytes()).hexdigest(),
+            }
+        ],
+    }
+    (base / "features_manifest.json").write_text(json.dumps(manifest))
+    return feature_id
+
+
+class TestCandidateLabels:
+    def test_an_alias_names_the_candidate(self) -> None:
+        c = fe.parse_candidate("structured@lf1:residual_forecaster=trailing_median")
+        assert c.label == "lf1" and c.name == "structured"
+        assert c.params["residual_forecaster"] == "trailing_median"
+
+    def test_long_values_are_shortened_in_automatic_labels(self) -> None:
+        c = fe.parse_candidate("structured:features=" + "ab" * 32)
+        assert c.label == "structured[features=abababababab]"
+        assert c.as_dict()["side_inputs"] is not None
+        assert fe.parse_candidate("trailing_mean").as_dict()["side_inputs"] is None
+
+
+class TestSeasonPairs:
+    def _record(self, cost: np.ndarray, days: list[str]) -> dict[str, object]:
+        n = len(days)
+        return {"local_day": np.array(days), "usable": np.ones(n, dtype=bool), "cost": cost}
+
+    def test_a_steady_saving_holds_in_the_season_it_covers(self) -> None:
+        start = datetime(2025, 1, 1)
+        days = [(start + timedelta(days=i)).date().isoformat() for i in range(365)]
+        ref = self._record(np.ones(365), days)
+        saving = np.where(np.array([int(d[5:7]) for d in days]) <= 3, 0.1, 0.0)
+        cand = self._record(1.0 - saving, days)
+        out = fe._season_pairs(ref, cand, resamples=5000, seed=(1, 0, 0))
+        assert out["heating"]["holds"] is True
+        assert out["cooling"]["holds"] is False
+        assert out["period"]["point_eur"] == pytest.approx(saving.sum())
+        assert out["heating"]["days"] == 90 + 61  # Jan-Mar plus Nov-Dec
+
+    def test_a_short_season_is_not_evaluated(self) -> None:
+        days = [f"2025-03-{d:02d}" for d in range(1, 11)]
+        ref = self._record(np.ones(10), days)
+        out = fe._season_pairs(ref, ref, resamples=5000, seed=(1, 0, 0))
+        assert out["heating"]["status"] == "too few days" and out["heating"]["holds"] is False
+
+    def test_the_g4_definition_states_the_seasons_before_any_run(self) -> None:
+        g4 = fe._g4_definition("lf1", "trailing_mean", [("lf1", "trailing_median")], PERIODS)
+        assert g4["seasons"] == {"heating": [11, 12, 1, 2, 3], "cooling": [6, 7, 8, 9]}
+        assert g4["secondary_comparisons"][0]["gating"] is False
+        assert "at least one heating season instance AND at least one cooling" in g4["rule"]
+
+
+class TestG4EndToEnd:
+    @pytest.fixture(scope="class")
+    @classmethod
+    def run(cls, tmp_path_factory) -> dict[str, object]:
+        requires_core()
+        tmp = tmp_path_factory.mktemp("g4")
+        dataset, config = _dataset(tmp)
+        feature_id = _write_feature_set(tmp, n=DAYS * 96)
+        out = fe.run_forecast_eval(
+            dataset=dataset,
+            config_path=config,
+            name="g4",
+            candidates=[
+                "trailing_mean",
+                f"structured@lf1:features={feature_id}",
+                f"structured@lf1_median:features={feature_id},residual_forecaster=trailing_median",
+                "trailing_median",
+            ],
+            periods=PERIODS[:1],
+            resamples=5000,
+            data_dir=tmp,
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+            gate="G4",
+            gate_candidate="lf1",
+            gate_reference="trailing_mean",
+            compare=[("lf1", "trailing_median"), ("lf1_median", "trailing_mean")],
+        )
+        return {
+            "dir": out,
+            "prereg": json.loads((out / fe.PREREGISTRATION_NAME).read_text()),
+            "summary": json.loads((out / fe.SUMMARY_JSON_NAME).read_text()),
+        }
+
+    def test_the_gate_and_seasons_are_preregistered(self, run) -> None:
+        prereg = run["prereg"]
+        assert prereg["gate_g4"]["seasons"]["cooling"] == [6, 7, 8, 9]
+        assert prereg["gate_g4"]["candidate"] == "lf1"
+        assert prereg["structured"]["rule_mirror"]["climate_control"][0]["history_days"] == 10
+        assert prereg["side_inputs"]["lf1"]["feature_set_id"] == "ab" * 32
+        assert {c["label"] for c in prereg["candidates"]} >= {"lf1", "lf1_median"}
+
+    def test_the_summary_carries_g4_pairwise_and_diagnostics(self, run) -> None:
+        summary = run["summary"]
+        assert summary["g4"]["candidate"] == "lf1" and summary["g4"]["passed"] is False
+        # One week of March: no season instance has 14 days.
+        assert all("status" in row for row in summary["g4"]["instances"].values())
+        period = summary["periods"]["a"]
+        assert set(period["pairwise"]) == {
+            "lf1 vs trailing_mean",
+            "lf1 vs trailing_median",
+            "lf1_median vs trailing_mean",
+        }
+        assert period["pairwise"]["lf1 vs trailing_median"]["role"] == "secondary"
+        diag = period["candidates"]["lf1"]["diagnostics"]
+        assert set(diag) == {"day_ahead", "rolling_horizon"}
+        assert diag["rolling_horizon"]["decisions"] > 0
+        assert "afternoon/prices" in diag["rolling_horizon"]["counts"]
+        assert period["candidates"]["trailing_mean"]["diagnostics"] is None
+        assert "Gate G4" in (run["dir"] / fe.SUMMARY_MD_NAME).read_text()
+
+    def test_the_benchmark_ran_the_structured_forecaster_on_its_side_inputs(self, run) -> None:
+        summary = run["summary"]
+        run_id = summary["provenance"]["benchmark_runs"]["a"]["lf1"]
+        bench = Path(summary["provenance"]["dataset_dir"]) / "benchmarks" / run_id
+        results = json.loads((bench / bm.RESULTS_JSON_NAME).read_text())
+        record = results["lineage"]["load_forecaster"]
+        assert record["name"] == "structured"
+        assert record["side_inputs_source"]["feature_set_id"] == "ab" * 32

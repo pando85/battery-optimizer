@@ -46,6 +46,17 @@ Two optional capabilities, both declared at registration:
   local-midnight cutoff.  ``day_ahead`` decides at local midnight, where the two
   cutoffs coincide.
 
+* ``side_loader=`` — a forecaster that reads more than the load: aligned side series (a
+  sub-metered heat pump, an outdoor temperature, control states, the PVPC prices).  The
+  caller builds one :class:`SideInputs` for the whole index space
+  (:func:`build_side_inputs`) and passes it as ``side=``.  The seam hands the forecaster a
+  :class:`SideView` only: every measured side series is cut at ``cutoff_idx`` exactly like
+  the load, and the prices at the first index that is **not yet public** at the cutoff
+  instant (:func:`battery_optimizer.price_outlook.published_end_idx`), so an unpublished
+  price cannot reach it.  A forecaster that does not declare a ``side_loader`` is never
+  handed side data, and one that does must still run (degraded, with the reason in its
+  diagnostics) when no side data is passed.
+
 Scoring a forecast against the measured load needs hindsight and therefore lives
 outside the forecasters (:func:`battery_optimizer.policies.score_day_forecast`).
 """
@@ -59,9 +70,11 @@ import json
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -71,16 +84,22 @@ from .policies import (
     FORECAST_METHOD,
     trailing_slot_mean_for_day,
 )
+from .price_outlook import PVPC_NEXT_DAY_PUBLISHED_FROM, published_end_idx
 
 __all__ = [
     "DEFAULT_LOAD_FORECASTER",
     "FIT_FOLD_RULE",
+    "SIDE_INPUT_RULE",
     "DayForecast",
     "FitRequest",
     "ForecastRequest",
     "ForecastResult",
     "LoadForecaster",
+    "SideInputs",
+    "SideView",
+    "build_side_inputs",
     "fold_start_idx",
+    "fold_state",
     "forecast_each_day_at_its_start",
     "forecaster_names",
     "get_forecaster",
@@ -102,6 +121,193 @@ FIT_FOLD_RULE = (
     "the month reuses that fit"
 )
 
+#: How a forecaster with side inputs sees them, recorded in its provenance.
+SIDE_INPUT_RULE = (
+    "side inputs reach the forecaster as an as-of view: every measured side series is cut at "
+    "the decision cutoff, exactly like the load, and the prices at the first index that is not "
+    "yet public at the cutoff instant (PVPC for the next local day counts as published from "
+    f"{PVPC_NEXT_DAY_PUBLISHED_FROM:%H:%M} local); nothing at or past either boundary is "
+    "readable"
+)
+
+#: Every interval is a quarter of an hour; side calendars are built on that grid.
+SIDE_INTERVAL_SECONDS = 900
+
+
+class SideInputs:
+    """Aligned side series over the whole index space, built once by the caller.
+
+    ``prices`` (EUR/kWh) and every entry of ``series`` have one value per interval of the
+    local-day partition, ``NaN`` where unknown; ``interval_starts_utc`` is the grid.  The
+    object is immutable (arrays are read-only) and carries a :attr:`fingerprint` of its
+    content, which keys the fit cache.  Forecasters never receive it: they get a
+    :class:`SideView` cut by :meth:`view`.
+    """
+
+    def __init__(
+        self,
+        *,
+        interval_starts_utc: Sequence[datetime],
+        tz: ZoneInfo,
+        prices: np.ndarray | Sequence[float],
+        series: Mapping[str, np.ndarray | Sequence[float]],
+        source: Mapping[str, Any] | None = None,
+    ) -> None:
+        starts = tuple(
+            s if s.tzinfo is not None else s.replace(tzinfo=UTC) for s in interval_starts_utc
+        )
+        self.n = len(starts)
+        self.tz = tz
+        self.interval_starts_utc = starts
+        self.prices = self._frozen(prices, "prices")
+        self.series = {name: self._frozen(values, name) for name, values in series.items()}
+        self.source = dict(source or {})
+        local = [s.astimezone(tz) for s in starts]
+        self.local_hour = np.array([t.hour for t in local], dtype=np.int16)
+        self.quarter = np.array([t.minute // 15 for t in local], dtype=np.int16)
+        self.local_hour.setflags(write=False)
+        self.quarter.setflags(write=False)
+        # Real hours (four intervals each) and the local day they belong to.  A new local
+        # day starts where the clock hour does not increase, which holds for the DST days
+        # too (the repeated hour of a fall-back day does not wrap, the skipped one of a
+        # spring-forward day only jumps).
+        nreal = self.n // 4
+        self.clock_of_real = self.local_hour[: 4 * nreal : 4].astype(np.int16)
+        wrap = np.zeros(nreal, dtype=np.int64)
+        if nreal > 1:
+            wrap[1:] = (self.clock_of_real[1:] < self.clock_of_real[:-1]).astype(np.int64)
+        self.day_of_real = np.cumsum(wrap)
+        self.clock_of_real.setflags(write=False)
+        self.day_of_real.setflags(write=False)
+        if self.n:
+            first = int(starts[0].timestamp())
+            stamps = np.array([int(s.timestamp()) for s in starts], dtype=np.int64)
+            if (stamps - first != np.arange(self.n) * SIDE_INTERVAL_SECONDS).any():
+                raise ValueError("side inputs need a uniform 15-minute grid without gaps")
+            if first % 3600 != 0:
+                raise ValueError("side inputs need the grid to start on a full hour")
+        digest = hashlib.sha256()
+        digest.update(np.ascontiguousarray(self.prices).tobytes())
+        for name in sorted(self.series):
+            digest.update(name.encode())
+            digest.update(np.ascontiguousarray(self.series[name]).tobytes())
+        digest.update(repr((self.n, starts[0] if starts else None, str(tz))).encode())
+        self.fingerprint = digest.hexdigest()
+
+    def _frozen(self, values: np.ndarray | Sequence[float], name: str) -> np.ndarray:
+        arr = np.array(values, dtype=float).reshape(-1)
+        if arr.size != self.n:
+            raise ValueError(f"side series {name!r} has {arr.size} entries, the grid has {self.n}")
+        arr.setflags(write=False)
+        return arr
+
+    def slice(self, stop: int) -> SideInputs:
+        """The first *stop* intervals, for a dataset cut at an earlier instant."""
+        if not 0 <= stop <= self.n:
+            raise ValueError(f"cannot slice {self.n} intervals at {stop}")
+        return SideInputs(
+            interval_starts_utc=self.interval_starts_utc[:stop],
+            tz=self.tz,
+            prices=self.prices[:stop],
+            series={k: v[:stop] for k, v in self.series.items()},
+            source=self.source,
+        )
+
+    def view(
+        self,
+        cutoff_idx: int,
+        days: Sequence[tuple[Any, int, int]],
+        *,
+        published_end: int | None = None,
+    ) -> SideView:
+        """What a decision cut at *cutoff_idx* may read.
+
+        Measured series are cut at the cutoff.  Prices are cut at the first index not public
+        at the cutoff instant, or at *published_end* when the caller states it (the fit uses
+        the fold start).  The decision instant is the start of interval ``cutoff_idx``.
+        """
+        cut = min(max(int(cutoff_idx), 0), self.n)
+        if published_end is None:
+            probe = self.interval_starts_utc[min(cut, self.n - 1)] if self.n else None
+            end = published_end_idx(probe, days, self.tz) if probe is not None else 0
+        else:
+            end = int(published_end)
+        end = min(max(end, 0), self.n)
+
+        def _ro(values: np.ndarray, stop: int) -> np.ndarray:
+            v = values[:stop].view()
+            v.setflags(write=False)
+            return v
+
+        n_days = len(days)
+        if self.day_of_real.size and int(self.day_of_real[-1]) >= n_days:
+            raise ValueError("the side inputs' local calendar and the day partition disagree")
+        first_real = np.full((n_days, 24), -1, dtype=np.int64)
+        # Assign in reverse so the FIRST real hour of a repeated clock hour wins.
+        reverse = np.arange(self.day_of_real.size)[::-1]
+        first_real[self.day_of_real[reverse], self.clock_of_real[reverse]] = reverse
+        first_real.setflags(write=False)
+        return SideView(
+            cutoff_idx=cut,
+            published_end_idx=end,
+            interval_starts_utc=self.interval_starts_utc,
+            tz=self.tz,
+            local_hour=self.local_hour,
+            quarter=self.quarter,
+            day_of_real_hour=self.day_of_real,
+            first_real_hour=first_real,
+            series={name: _ro(values, cut) for name, values in self.series.items()},
+            published_prices=_ro(self.prices, end),
+            source=self.source,
+        )
+
+    def describe(self) -> dict[str, Any]:
+        """The identity record of these side inputs (no values)."""
+        return {
+            **self.source,
+            "fingerprint": self.fingerprint,
+            "slots": self.n,
+            "series": sorted(self.series),
+        }
+
+
+@dataclass(frozen=True)
+class SideView:
+    """The as-of side data of one decision (see :meth:`SideInputs.view`)."""
+
+    cutoff_idx: int
+    """First index the decision does not know; every ``series`` entry has this length."""
+
+    published_end_idx: int
+    """First index whose price is not public at the decision; ``published_prices`` length."""
+
+    interval_starts_utc: Sequence[datetime]
+    """UTC start of every interval of the partition (calendar knowledge)."""
+
+    tz: ZoneInfo
+    """The tariff's local time zone."""
+
+    local_hour: np.ndarray
+    """Local clock hour of every interval of the partition (calendar knowledge)."""
+
+    quarter: np.ndarray
+    """Quarter of the local clock hour (0..3) of every interval (calendar knowledge)."""
+
+    day_of_real_hour: np.ndarray
+    """Index into the day partition of every real hour (four intervals), calendar knowledge."""
+
+    first_real_hour: np.ndarray
+    """``(days, 24)``: index of the first real hour of each local clock hour of each local day,
+    ``-1`` where the clock hour does not exist (the skipped hour of a spring-forward day)."""
+
+    series: Mapping[str, np.ndarray]
+    """Measured side series at indices ``[0, cutoff_idx)``, read-only, ``NaN`` unknown."""
+
+    published_prices: np.ndarray
+    """Prices at indices ``[0, published_end_idx)``, read-only, ``NaN`` unknown."""
+
+    source: Mapping[str, Any] = field(default_factory=dict)
+
 
 @dataclass(frozen=True)
 class FitRequest:
@@ -121,6 +327,10 @@ class FitRequest:
 
     fold: str
     """The fold's local month, ``YYYY-MM``."""
+
+    side: SideView | None = None
+    """Side data as of the fold start (prices only up to it), for a forecaster with a
+    ``side_loader`` when the caller passed side inputs; else ``None``."""
 
 
 @dataclass(frozen=True)
@@ -152,6 +362,10 @@ class ForecastRequest:
     fit_cutoff_idx: int | None = None
     """First index of the fold the state was fitted before (``<= cutoff_idx``)."""
 
+    side: SideView | None = None
+    """The as-of side data for a forecaster registered with ``side_loader=`` when the caller
+    passed side inputs; else ``None``."""
+
 
 @dataclass(frozen=True)
 class LoadForecaster:
@@ -166,6 +380,8 @@ class LoadForecaster:
     description: str
     fit: Callable[..., Any] | None = None
     intraday_cutoff: bool = False
+    side_loader: Callable[..., SideInputs] | None = None
+    diagnose: Callable[..., dict[str, Any]] | None = None
 
     def provenance(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """The record every artifact carries next to its lineage.
@@ -183,6 +399,8 @@ class LoadForecaster:
             record["fit"] = FIT_FOLD_RULE
         if self.intraday_cutoff:
             record["intraday_cutoff"] = True
+        if self.side_loader is not None:
+            record["side_inputs"] = SIDE_INPUT_RULE
         return record
 
 
@@ -211,6 +429,8 @@ def register_forecaster(
     description: str = "",
     fit: Callable[..., Any] | None = None,
     intraday_cutoff: bool = False,
+    side_loader: Callable[..., SideInputs] | None = None,
+    diagnose: Callable[..., dict[str, Any]] | None = None,
 ) -> Callable[[Callable[..., list[DayForecast]]], Callable[..., list[DayForecast]]]:
     """Register ``fn(request, **params) -> list[DayForecast]`` under *name*.
 
@@ -222,6 +442,13 @@ def register_forecaster(
             as the forecaster, once per monthly walk-forward fold (:data:`FIT_FOLD_RULE`).
         intraday_cutoff: the rolling-horizon rung hands this forecaster history up to
             the event instant instead of the event's local midnight.
+        side_loader: ``side_loader(params, *, table, data_dir) -> SideInputs`` builds the
+            side series from a built dataset table (:func:`build_side_inputs`); the
+            forecaster then receives the as-of :class:`SideView`.
+        diagnose: optional ``diagnose(*, side, load, usable, days, decisions, params) ->
+            dict`` that the evaluation harness calls to report the forecaster's components
+            (see :mod:`battery_optimizer.structured_forecast`); it needs hindsight and is
+            never part of a forecast.
     """
 
     def decorate(fn: Callable[..., list[DayForecast]]) -> Callable[..., list[DayForecast]]:
@@ -244,6 +471,8 @@ def register_forecaster(
             description=description or (inspect.getdoc(fn) or "").split("\n", 1)[0],
             fit=fit,
             intraday_cutoff=bool(intraday_cutoff),
+            side_loader=side_loader,
+            diagnose=diagnose,
         )
         return fn
 
@@ -331,8 +560,13 @@ def _fitted_state(
     days: Sequence[tuple[Any, int, int]],
     fit_cutoff: int,
     fold: str,
+    side: SideInputs | None = None,
 ) -> Any:
-    """The fold's state: fitted once on ``[0, fit_cutoff)`` and cached by content."""
+    """The fold's state: fitted once on ``[0, fit_cutoff)`` and cached by content.
+
+    Side inputs are immutable, so their fingerprint and the fold start identify exactly the
+    side data the fit reads (``[0, fit_cutoff)``).
+    """
     digest = hashlib.sha256()
     digest.update(np.ascontiguousarray(load[:fit_cutoff]).tobytes())
     digest.update(np.ascontiguousarray(keep[:fit_cutoff]).tobytes())
@@ -343,6 +577,7 @@ def _fitted_state(
         json.dumps(dict(params), sort_keys=True, default=str),
         int(fit_cutoff),
         digest.hexdigest(),
+        None if side is None else side.fingerprint,
     )
     if key in _FIT_CACHE:
         _FIT_CACHE.move_to_end(key)
@@ -356,6 +591,9 @@ def _fitted_state(
             days=days,
             fit_cutoff_idx=int(fit_cutoff),
             fold=fold,
+            side=(
+                None if side is None else side.view(fit_cutoff, days, published_end=int(fit_cutoff))
+            ),
         ),
         **params,
     )
@@ -375,6 +613,7 @@ def run_forecaster(
     target_days: Sequence[int],
     params: Mapping[str, Any] | None = None,
     allow_oracle: bool = False,
+    side: SideInputs | None = None,
 ) -> ForecastResult:
     """Forecast *target_days* with the forecaster *name*, knowing only ``[0, cutoff_idx)``.
 
@@ -388,6 +627,8 @@ def run_forecaster(
         params: forecaster params; ``None`` means its registered defaults.
         allow_oracle: must be ``True`` to run an ``oracle=True`` forecaster.  Only the
             offline benchmark passes it.
+        side: side inputs for the whole partition; only a forecaster registered with
+            ``side_loader=`` receives them, as an as-of :class:`SideView`.
 
     Raises:
         ValueError: unknown forecaster, an oracle without ``allow_oracle``, malformed
@@ -413,12 +654,17 @@ def run_forecaster(
     for j in targets:
         if not 0 <= j < len(days):
             raise ValueError(f"target day index {j} is outside the partition of {len(days)}")
+    use_side = side if forecaster.side_loader is not None else None
+    if use_side is not None and use_side.n != total:
+        raise ValueError(f"side inputs cover {use_side.n} intervals, the partition {total}")
     fitted: Any = None
     fit_cutoff: int | None = None
     fold: str | None = None
     if forecaster.fit is not None:
         fit_cutoff, fold = fold_start_idx(days, cutoff_idx)
-        fitted = _fitted_state(forecaster, resolved, load, keep, days, fit_cutoff, fold)
+        fitted = _fitted_state(
+            forecaster, resolved, load, keep, days, fit_cutoff, fold, side=use_side
+        )
     request = ForecastRequest(
         history_load_kwh=_read_only_view(load, cutoff_idx),
         history_usable=_read_only_view(keep, cutoff_idx),
@@ -428,6 +674,7 @@ def run_forecaster(
         measured_load_kwh=_read_only_view(load, load.size) if forecaster.oracle else None,
         fitted=fitted,
         fit_cutoff_idx=fit_cutoff,
+        side=None if use_side is None else use_side.view(cutoff_idx, days),
     )
     out = forecaster.fn(request, **resolved)
     if len(out) != len(targets):
@@ -460,6 +707,58 @@ def run_forecaster(
     return ForecastResult(values=values, per_day=per_day, provenance=provenance)
 
 
+def build_side_inputs(
+    name: str,
+    params: Mapping[str, Any] | None = None,
+    *,
+    table: Any,
+    data_dir: Path | str | None = None,
+) -> SideInputs | None:
+    """The side inputs forecaster *name* needs for a built dataset *table*, or ``None``.
+
+    ``None`` for a forecaster that does not declare a ``side_loader``.  *table* is the
+    (possibly ``--eval-end``-truncated) dataset table the run plans on; the loader aligns
+    its side series to the table's own grid.
+    """
+    forecaster = get_forecaster(name)
+    if forecaster.side_loader is None:
+        return None
+    resolved = resolve_forecaster_params(name, overrides=params)
+    return forecaster.side_loader(resolved, table=table, data_dir=data_dir)
+
+
+def fold_state(
+    name: str,
+    params: Mapping[str, Any],
+    load_kwh: np.ndarray,
+    usable: np.ndarray,
+    days: Sequence[tuple[Any, int, int]],
+    cutoff_idx: int,
+    side: SideInputs | None = None,
+) -> Any:
+    """The fitted state the monthly fold of a decision cut at *cutoff_idx* uses.
+
+    The same state :func:`run_forecaster` hands the forecaster as ``request.fitted`` (fitted
+    once per fold and cached); ``None`` for a forecaster without a ``fit`` step.  The
+    evaluation diagnostics use it to look inside a forecast.
+    """
+    forecaster = get_forecaster(name)
+    if forecaster.fit is None:
+        return None
+    resolved = resolve_forecaster_params(name, overrides=params)
+    fit_cutoff, fold = fold_start_idx(days, cutoff_idx)
+    return _fitted_state(
+        forecaster,
+        resolved,
+        np.asarray(load_kwh, dtype=float).reshape(-1),
+        np.asarray(usable, dtype=bool).reshape(-1),
+        days,
+        fit_cutoff,
+        fold,
+        side=side if forecaster.side_loader is not None else None,
+    )
+
+
 def forecast_each_day_at_its_start(
     name: str,
     *,
@@ -469,6 +768,7 @@ def forecast_each_day_at_its_start(
     target_days: Sequence[int],
     params: Mapping[str, Any] | None = None,
     allow_oracle: bool = False,
+    side: SideInputs | None = None,
 ) -> ForecastResult:
     """The day-ahead vintage: each target day cut at its **own** local-day start.
 
@@ -492,6 +792,7 @@ def forecast_each_day_at_its_start(
             target_days=(int(j),),
             params=params,
             allow_oracle=allow_oracle,
+            side=side,
         )
         _label, start, stop = days[j]
         values[start:stop] = result.values[start:stop]
@@ -1042,3 +1343,8 @@ def _blend(
             )
         )
     return out
+
+
+# Registers the structured forecaster (LF-1).  It lives in its own module and needs the names
+# above, so it is imported last.
+from . import structured_forecast  # noqa: E402,F401
