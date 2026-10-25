@@ -11,7 +11,7 @@ runs:
   steps:
     - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       with:
-        # renovate: datasource=github-releases depName=astral-sh/uv
+        # Renovate updates this input natively (github-actions manager).
         version: 0.13.5
         python-version: ${{ inputs.python-version }}
         enable-cache: true

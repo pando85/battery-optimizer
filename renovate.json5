@@ -27,22 +27,6 @@
       'before 6am on monday',
     ],
   },
-  customManagers: [
-    {
-      customType: 'regex',
-      description: 'Process "# renovate: datasource=... depName=..." hints in YAML (e.g. the uv version in .github/actions/setup-uv)',
-      managerFilePatterns: [
-        '/.+\\.yaml$/',
-        '/.+\\.yml$/',
-      ],
-      matchStrings: [
-        '#\\srenovate: datasource=(?<datasource>\\S+)( versioning=(?<versioning>\\S+))?\n.*?: (?<depName>\\S+):(?<currentValue>.*)\n',
-        '#\\srenovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)( versioning=(?<versioning>\\S+))?\n.*?: (?<currentValue>.*)\n',
-        '#\\srenovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)( versioning=(?<versioning>\\S+))?\n.*?=\\S+(?<currentValue>.*)\n',
-      ],
-      versioningTemplate: '{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}',
-    },
-  ],
   // Later rules win over earlier ones.
   packageRules: [
     {
