@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.0](https://github.com/pando85/battery-optimizer/tree/v0.3.0) - 2026-10-25
+
+### Added
+
+- features: Add sub-load feature table and load decomposition report ([9ef0654](https://github.com/pando85/battery-optimizer/commit/9ef0654944f3591aa9ed4e528a154ffbc82ae754))
+- forecast: Add a load-forecaster seam with an offline perfect oracle ([b6af2fd](https://github.com/pando85/battery-optimizer/commit/b6af2fd6f52af7d8f580e7d81a281342a7920077))
+- forecast-eval: Add a pre-registered load-forecaster evaluation harness ([d6646ad](https://github.com/pando85/battery-optimizer/commit/d6646ad4d6c1dcc61ed4979b3d8d7cc87b6f7620))
+- service: Archive price snapshots and weather forecasts ([7b57745](https://github.com/pando85/battery-optimizer/commit/7b5774577c4b5aca608cb1ac18f1d174d825989c))
+
+### Documentation
+
+- Reconcile production roadmap with v0.2.1 and homelab rollout ([d9617c9](https://github.com/pando85/battery-optimizer/commit/d9617c9a1c09fc6d377d3daabd3490ada62b930d))
+- Split the README into focused guides ([66acfe4](https://github.com/pando85/battery-optimizer/commit/66acfe4191610857030aa92d5d223de0bef55ad2))
+- Define planning components and individual roadmaps ([a8d6bc7](https://github.com/pando85/battery-optimizer/commit/a8d6bc791ce3a253aa1b04f43d78e7e8978342cc))
+- Add load forecaster improvement plan ([8f8a867](https://github.com/pando85/battery-optimizer/commit/8f8a867f28f904220ee95042a4a9f120df1e016a))
+- Record P0-P3 outcomes and plan P4 in the load forecaster plan ([3c28ec2](https://github.com/pando85/battery-optimizer/commit/3c28ec200145cd444ade21cd8941ef1963b6eddd))
+- Add price outlook improvement plan ([cd786de](https://github.com/pando85/battery-optimizer/commit/cd786dea6517de154194563131bc273f8fafcf2b))
+
 ## [v0.2.1](https://github.com/pando85/battery-optimizer/tree/v0.2.1) - 2026-10-25
 
 ### Fixed
