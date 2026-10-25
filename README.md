@@ -1,16 +1,77 @@
 # battery-optimizer
 
+[![CI](https://github.com/pando85/battery-optimizer/actions/workflows/ci.yml/badge.svg)](https://github.com/pando85/battery-optimizer/actions/workflows/ci.yml)
+[![Images](https://github.com/pando85/battery-optimizer/actions/workflows/images.yml/badge.svg)](https://github.com/pando85/battery-optimizer/actions/workflows/images.yml)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE.md)
+
 Reproducible energy measurement and baseline toolkit for the home battery optimizer project
-([ADR-0003](../../docs/adr/0003-phase1-measurement-and-baseline.md)).
+([ADR-0003](docs/adr/0003-phase1-measurement-and-baseline.md)). Architecture decisions live in
+[`docs/adr/`](docs/adr/), plans and progress notes in [`docs/planning/`](docs/planning/).
 
 ## Quick start
 
+Requires Python 3.14 and [uv](https://docs.astral.sh/uv/).
+
 ```bash
+# Run from a checkout
 uv sync --extra dev
 uv run battery-optimizer --help
-uv run pytest
-uv run ruff check .
+
+# Or install the CLI from a release
+uv tool install https://github.com/pando85/battery-optimizer/releases/download/vX.Y.Z/battery_optimizer-X.Y.Z-py3-none-any.whl
 ```
+
+### Development
+
+```bash
+make help         # list the targets
+make git-hooks    # install the pre-commit and commit-msg hooks (once)
+make lint         # all pre-commit checks: ruff, yamllint, shellcheck, uv.lock, ...
+make fmt          # ruff check --fix and ruff format
+make test         # pytest
+make image        # build the container image locally
+```
+
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/), are signed and carry
+`Signed-off-by` (`git commit -s`). Releases are cut with `make release`; see
+[`.opencode/skills/release/SKILL.md`](.opencode/skills/release/SKILL.md).
+
+### Container image
+
+Multi-arch (`linux/amd64`, `linux/arm64`) images are published to
+`ghcr.io/pando85/battery-optimizer` with the tags `latest` (main), `sha-<short-sha>` (main),
+`X.Y.Z` and `X.Y` (releases). The image runs as uid/gid `65532`, works with a read-only root
+filesystem, and contains no data and no git.
+
+```bash
+docker run --rm ghcr.io/pando85/battery-optimizer:latest --help
+
+# Mount the private data directory and the tariff config; pass secrets by name, never by value.
+docker run --rm --read-only \
+  -v "$HOME/data/energy-baseline:/data" \
+  -v "$PWD/config:/config:ro" \
+  -e BATTERY_OPTIMIZER_DATA_DIR=/data \
+  -e BATTERY_OPTIMIZER_CONFIG=/config/tariff.yaml \
+  -e BATTERY_OPTIMIZER_HA_TOKEN \
+  ghcr.io/pando85/battery-optimizer:latest validate
+```
+
+The data directory must be writable by uid `65532`. Verify an image's provenance with
+`gh attestation verify oci://ghcr.io/pando85/battery-optimizer:<tag> --owner pando85`.
+The image records the commit it was built from in `BATTERY_OPTIMIZER_GIT_SHA` (see below).
+
+### Environment variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `BATTERY_OPTIMIZER_DATA_DIR` | Private dataset store; must be **outside** any git worktree | `~/data/energy-baseline` |
+| `BATTERY_OPTIMIZER_CONFIG` | Tariff configuration file | `config/tariff.yaml` relative to the working directory |
+| `BATTERY_OPTIMIZER_HA_URL` | Home Assistant base URL | built-in default |
+| `BATTERY_OPTIMIZER_HA_TOKEN` | Home Assistant bearer token, read-only; required for HA extraction and `ha-states` | unset |
+| `BATTERY_OPTIMIZER_PROMETHEUS_URL` | Prometheus base URL | built-in default |
+| `BATTERY_OPTIMIZER_GIT_SHA` | Build-time commit identity (40-hex, optional `-dirty`) used when git is unavailable | unset (set by the image build) |
+
+`.envrc.example` shows a [direnv](https://direnv.net/) setup without any secret in it.
 
 ## Development and production locations
 
@@ -43,7 +104,7 @@ with the same directory layout and permission model. Migration is a `rsync` + a
 There is no recurring scheduler, cron job, or Kubernetes CronJob wired up for this toolkit yet.
 Every command below is run manually (or by a human-driven runbook). A scheduled pipeline
 (extract → validate → build → benchmark → report) is deferred to a later phase: see
-[ADR-0003](../../docs/adr/0003-phase1-measurement-and-baseline.md) for the scope boundary.
+[ADR-0003](docs/adr/0003-phase1-measurement-and-baseline.md) for the scope boundary.
 
 ## CLI commands
 
@@ -248,7 +309,7 @@ from a clean one, so the reproducibility guarantee the id exists to provide is p
 **Policy set — five rungs, one per information level.** The evaluation window is scored by
 `no_battery`, `causal_price`, `day_ahead`, `rolling_horizon` and `oracle` (ADR-0003
 §"Strategy comparison"; the day-ahead rung was previously "considered and deferred" in
-`planning/energy-baseline-appdaemon-baseline-context.md` and is now built, and `rolling_horizon` was
+`docs/planning/energy-baseline-appdaemon-baseline-context.md` and is now built, and `rolling_horizon` was
 promoted from an offline experiment to a canonical rung on 2026-10-24 — the ladder was four rungs until
 then, and `POLICY_NAMES` is now `('no_battery', 'causal_price', 'day_ahead', 'rolling_horizon', 'oracle')`,
 which is also what `--policies all` runs):
@@ -693,7 +754,7 @@ entity filters) is suppressed at the start of `extract_ha_history()` via
 and host from transport-error text before it reaches stderr or logs.
 
 For a first-run login flow (username + password from `pass`), see
-[`docs/troubleshooting/home-assistant-api-hacs-deploy.md`](../../docs/troubleshooting/home-assistant-api-hacs-deploy.md).
+[`docs/troubleshooting/home-assistant-api-hacs-deploy.md` in pando85/homelab](https://github.com/pando85/homelab/blob/master/docs/troubleshooting/home-assistant-api-hacs-deploy.md).
 The login flow is ephemeral: the token lives in memory for the duration of the
 extract call and is never persisted.
 
