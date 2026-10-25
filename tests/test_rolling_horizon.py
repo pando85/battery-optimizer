@@ -2555,8 +2555,10 @@ class TestLegacyCadenceGolden:
         assert _run_digest(result.schedule.discharge_kwh) == golden["discharge_sha"]
         assert _run_digest(result.schedule.soc_kwh) == golden["soc_sha"]
         assert _run_digest(result.schedule.grid_kwh) == golden["grid_sha"]
-        assert result.cost_eur == golden["cost_eur"]
-        assert result.meter_cost_eur == golden["cost_eur"]
+        # Schedules are pinned bit-exactly above; cost totals are float sums whose last bit
+        # depends on the CPU's SIMD summation order, so they get a 1e-12 relative tolerance.
+        assert result.cost_eur == pytest.approx(golden["cost_eur"], rel=1e-12)
+        assert result.meter_cost_eur == pytest.approx(golden["cost_eur"], rel=1e-12)
         assert float(result.schedule.efc) == pytest.approx(golden["efc"], rel=1e-12)
         assert result.telemetry["terminal_soc_kwh"] == golden["terminal_soc_kwh"]
 
@@ -4708,8 +4710,10 @@ class TestCausalGolden:
         assert _run_digest(result.schedule.discharge_kwh) == golden["discharge_sha"]
         assert _run_digest(result.schedule.soc_kwh) == golden["soc_sha"]
         assert _run_digest(result.schedule.grid_kwh) == golden["grid_sha"]
-        assert result.cost_eur == golden["cost_eur"]
-        assert result.meter_cost_eur == golden["meter_cost_eur"]
+        # Schedules are pinned bit-exactly above; cost totals are float sums whose last bit
+        # depends on the CPU's SIMD summation order, so they get a 1e-12 relative tolerance.
+        assert result.cost_eur == pytest.approx(golden["cost_eur"], rel=1e-12)
+        assert result.meter_cost_eur == pytest.approx(golden["meter_cost_eur"], rel=1e-12)
         # True-price scoring: cost equals meter cost (zero inventory adjustment).
         assert result.cost_eur == pytest.approx(result.meter_cost_eur, rel=0.0, abs=0.0)
         assert result.telemetry["event_count"] == golden["event_count"]
