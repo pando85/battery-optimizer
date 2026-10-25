@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.2.0](https://github.com/pando85/battery-optimizer/tree/v0.2.0) - 2026-10-25
+
+### Added
+
+- service: Add the resident shadow service ([a1d52fe](https://github.com/pando85/battery-optimizer/commit/a1d52fef8b571d6515b9b339fde4bbc3f499aeb5))
+
+### CI
+
+- Lint the PR title with commitlint ([173e9ee](https://github.com/pando85/battery-optimizer/commit/173e9ee53f53ed22cedca77dc38279830888775c))
+- Attach only the wheel and sdist to GitHub releases ([f6d935e](https://github.com/pando85/battery-optimizer/commit/f6d935e414cd2c51656153afa951c7693f51aa45))
+
 ## [v0.1.0](https://github.com/pando85/battery-optimizer/tree/v0.1.0) - 2026-10-25
 
 ### Added
