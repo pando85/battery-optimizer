@@ -33,15 +33,32 @@ deployable model) is registered with ``oracle=True``: it is the only kind that s
 ``request.measured_load_kwh``, :func:`run_forecaster` refuses it unless the caller
 passes ``allow_oracle=True``, and the service configuration rejects it outright.
 
+Two optional capabilities, both declared at registration:
+
+* ``fit=`` — a trained model.  ``fit(FitRequest, **params)`` returns any state; the
+  seam fits **once per monthly walk-forward fold** on history strictly before the
+  fold's first local day (:func:`fold_start_idx`) and hands the state to every
+  decision in that fold as ``request.fitted``.  A fold is the local calendar month of
+  the decision's cutoff, so the fit never sees the fold it forecasts.
+* ``intraday_cutoff=True`` — the rolling-horizon rung cuts this forecaster's history
+  at the event instant (14:00 / 20:30) instead of the event's local midnight, so it
+  may use today's observed slots.  The default (``False``) keeps the conservative
+  local-midnight cutoff.  ``day_ahead`` decides at local midnight, where the two
+  cutoffs coincide.
+
 Scoring a forecast against the measured load needs hindsight and therefore lives
 outside the forecasters (:func:`battery_optimizer.policies.score_day_forecast`).
 """
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 import numpy as np
@@ -55,10 +72,13 @@ from .policies import (
 
 __all__ = [
     "DEFAULT_LOAD_FORECASTER",
+    "FIT_FOLD_RULE",
     "DayForecast",
+    "FitRequest",
     "ForecastRequest",
     "ForecastResult",
     "LoadForecaster",
+    "fold_start_idx",
     "forecast_each_day_at_its_start",
     "forecaster_names",
     "get_forecaster",
@@ -72,6 +92,33 @@ DEFAULT_LOAD_FORECASTER = "trailing_mean"
 
 #: One target day's forecast: ``(values, diagnostics)``.
 DayForecast = tuple[np.ndarray, dict[str, Any]]
+
+#: How a forecaster with a ``fit`` step is refit, recorded in its provenance.
+FIT_FOLD_RULE = (
+    "monthly walk-forward: one fit per local calendar month (the month of the decision's "
+    "cutoff), on history strictly before that month's first local day; every decision in "
+    "the month reuses that fit"
+)
+
+
+@dataclass(frozen=True)
+class FitRequest:
+    """What a forecaster's ``fit`` step may see for one walk-forward fold."""
+
+    history_load_kwh: np.ndarray
+    """Measured load at indices ``[0, fit_cutoff_idx)``, read-only."""
+
+    history_usable: np.ndarray
+    """Usability mask at indices ``[0, fit_cutoff_idx)``, read-only."""
+
+    days: Sequence[tuple[Any, int, int]]
+    """Local-day partition of the whole index space (calendar knowledge)."""
+
+    fit_cutoff_idx: int
+    """First index of the fold; equals ``len(history_load_kwh)``."""
+
+    fold: str
+    """The fold's local month, ``YYYY-MM``."""
 
 
 @dataclass(frozen=True)
@@ -97,10 +144,16 @@ class ForecastRequest:
     """The whole measured series, past the cutoff too.  ``None`` unless the forecaster
     is registered ``oracle=True``."""
 
+    fitted: Any = None
+    """The fold's fitted state for a forecaster registered with ``fit=``, else ``None``."""
+
+    fit_cutoff_idx: int | None = None
+    """First index of the fold the state was fitted before (``<= cutoff_idx``)."""
+
 
 @dataclass(frozen=True)
 class LoadForecaster:
-    """A registered forecaster: its function, default params and oracle flag."""
+    """A registered forecaster: its function, default params and capability flags."""
 
     name: str
     fn: Callable[..., list[DayForecast]]
@@ -109,16 +162,26 @@ class LoadForecaster:
     method: str
     fallback_rule: str
     description: str
+    fit: Callable[..., Any] | None = None
+    intraday_cutoff: bool = False
 
     def provenance(self, params: Mapping[str, Any]) -> dict[str, Any]:
-        """The record every artifact carries next to its lineage."""
-        return {
+        """The record every artifact carries next to its lineage.
+
+        The capability keys appear only when declared, so LF-0's record is unchanged.
+        """
+        record: dict[str, Any] = {
             "name": self.name,
             "params": dict(params),
             "oracle": self.oracle,
             "method": self.method,
             "description": self.description,
         }
+        if self.fit is not None:
+            record["fit"] = FIT_FOLD_RULE
+        if self.intraday_cutoff:
+            record["intraday_cutoff"] = True
+        return record
 
 
 @dataclass(frozen=True)
@@ -144,11 +207,19 @@ def register_forecaster(
     method: str | None = None,
     fallback_rule: str = "",
     description: str = "",
+    fit: Callable[..., Any] | None = None,
+    intraday_cutoff: bool = False,
 ) -> Callable[[Callable[..., list[DayForecast]]], Callable[..., list[DayForecast]]]:
     """Register ``fn(request, **params) -> list[DayForecast]`` under *name*.
 
     The function's keyword-only parameters, with their defaults, are the forecaster's
     params; every one must have a default so the forecaster is runnable by name alone.
+
+    Args:
+        fit: optional ``fit(FitRequest, **params) -> state``, called with the same params
+            as the forecaster, once per monthly walk-forward fold (:data:`FIT_FOLD_RULE`).
+        intraday_cutoff: the rolling-horizon rung hands this forecaster history up to
+            the event instant instead of the event's local midnight.
     """
 
     def decorate(fn: Callable[..., list[DayForecast]]) -> Callable[..., list[DayForecast]]:
@@ -169,6 +240,8 @@ def register_forecaster(
             method=method or name,
             fallback_rule=fallback_rule,
             description=description or (inspect.getdoc(fn) or "").split("\n", 1)[0],
+            fit=fit,
+            intraday_cutoff=bool(intraday_cutoff),
         )
         return fn
 
@@ -222,6 +295,74 @@ def _read_only_view(values: np.ndarray, stop: int) -> np.ndarray:
     return view
 
 
+def _label_date(label: Any) -> date:
+    return label if isinstance(label, date) else date.fromisoformat(str(label)[:10])
+
+
+def fold_start_idx(days: Sequence[tuple[Any, int, int]], cutoff_idx: int) -> tuple[int, str]:
+    """``(first index, "YYYY-MM")`` of the monthly fold a decision cut at *cutoff_idx* is in.
+
+    The fold is the local calendar month of the day holding *cutoff_idx* (the last day
+    when the cutoff is past the partition); its first index is that month's first local
+    day in the partition, never past *cutoff_idx*.
+    """
+    if not days:
+        raise ValueError("days is empty: there is no local day to fold")
+    probe = min(max(int(cutoff_idx), 0), int(days[-1][2]) - 1)
+    j = next((k for k, (_l, lo, hi) in enumerate(days) if lo <= probe < hi), len(days) - 1)
+    month = _label_date(days[j][0]).strftime("%Y-%m")
+    while j > 0 and _label_date(days[j - 1][0]).strftime("%Y-%m") == month:
+        j -= 1
+    return int(min(days[j][1], cutoff_idx)), month
+
+
+#: Fitted states, keyed by forecaster, params, fold cutoff and a digest of the history.
+_FIT_CACHE: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
+_FIT_CACHE_SIZE = 64
+
+
+def _fitted_state(
+    forecaster: LoadForecaster,
+    params: Mapping[str, Any],
+    load: np.ndarray,
+    keep: np.ndarray,
+    days: Sequence[tuple[Any, int, int]],
+    fit_cutoff: int,
+    fold: str,
+) -> Any:
+    """The fold's state: fitted once on ``[0, fit_cutoff)`` and cached by content."""
+    digest = hashlib.sha256()
+    digest.update(np.ascontiguousarray(load[:fit_cutoff]).tobytes())
+    digest.update(np.ascontiguousarray(keep[:fit_cutoff]).tobytes())
+    digest.update(repr([(str(label), lo, hi) for label, lo, hi in days]).encode())
+    key = (
+        forecaster.name,
+        id(forecaster.fit),
+        json.dumps(dict(params), sort_keys=True, default=str),
+        int(fit_cutoff),
+        digest.hexdigest(),
+    )
+    if key in _FIT_CACHE:
+        _FIT_CACHE.move_to_end(key)
+        return _FIT_CACHE[key]
+    if forecaster.fit is None:  # pragma: no cover - guarded by the caller
+        raise ValueError(f"load forecaster {forecaster.name!r} has no fit step")
+    state = forecaster.fit(
+        FitRequest(
+            history_load_kwh=_read_only_view(load, fit_cutoff),
+            history_usable=_read_only_view(keep, fit_cutoff),
+            days=days,
+            fit_cutoff_idx=int(fit_cutoff),
+            fold=fold,
+        ),
+        **params,
+    )
+    _FIT_CACHE[key] = state
+    while len(_FIT_CACHE) > _FIT_CACHE_SIZE:
+        _FIT_CACHE.popitem(last=False)
+    return state
+
+
 def run_forecaster(
     name: str,
     *,
@@ -270,6 +411,12 @@ def run_forecaster(
     for j in targets:
         if not 0 <= j < len(days):
             raise ValueError(f"target day index {j} is outside the partition of {len(days)}")
+    fitted: Any = None
+    fit_cutoff: int | None = None
+    fold: str | None = None
+    if forecaster.fit is not None:
+        fit_cutoff, fold = fold_start_idx(days, cutoff_idx)
+        fitted = _fitted_state(forecaster, resolved, load, keep, days, fit_cutoff, fold)
     request = ForecastRequest(
         history_load_kwh=_read_only_view(load, cutoff_idx),
         history_usable=_read_only_view(keep, cutoff_idx),
@@ -277,6 +424,8 @@ def run_forecaster(
         cutoff_idx=int(cutoff_idx),
         target_days=targets,
         measured_load_kwh=_read_only_view(load, load.size) if forecaster.oracle else None,
+        fitted=fitted,
+        fit_cutoff_idx=fit_cutoff,
     )
     out = forecaster.fn(request, **resolved)
     if len(out) != len(targets):
@@ -286,7 +435,7 @@ def run_forecaster(
     values = np.zeros(total, dtype=float)
     per_day: list[dict[str, Any]] = []
     for j, (day_values, record) in zip(targets, out, strict=True):
-        _label, start, stop = days[j]
+        label, start, stop = days[j]
         day_values = np.asarray(day_values, dtype=float).reshape(-1)
         if day_values.size != stop - start:
             raise ValueError(
@@ -296,10 +445,16 @@ def run_forecaster(
         if not np.isfinite(day_values).all():
             raise ValueError(f"load forecaster {name!r} returned a non-finite value")
         values[start:stop] = day_values
+        if "local_day" not in record:
+            # Callers key diagnostics by day; a forecaster need not repeat the label.
+            record = {**record, "local_day": str(label)}
         per_day.append(record)
     values.setflags(write=False)
     provenance = forecaster.provenance(resolved)
     provenance["cutoff_idx"] = int(cutoff_idx)
+    if fit_cutoff is not None:
+        provenance["fit_cutoff_idx"] = int(fit_cutoff)
+        provenance["fold"] = fold
     return ForecastResult(values=values, per_day=per_day, provenance=provenance)
 
 
@@ -345,6 +500,8 @@ def forecast_each_day_at_its_start(
             resolve_forecaster_params(name, overrides=params)
         )
     provenance["cutoff_idx"] = None
+    provenance.pop("fit_cutoff_idx", None)
+    provenance.pop("fold", None)
     provenance["cutoff_rule"] = "each target local day is cut at its own local-day start"
     values.setflags(write=False)
     return ForecastResult(values=values, per_day=per_day, provenance=provenance)
