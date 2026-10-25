@@ -12,6 +12,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from battery_optimizer._logging import quiet_http_loggers
+
 log = logging.getLogger(__name__)
 
 
@@ -33,7 +35,13 @@ def _add_common(p: argparse.ArgumentParser) -> None:
         help="Path to tariff config YAML (required for real runs; "
         "default: $BATTERY_OPTIMIZER_CONFIG or config/tariff.yaml relative to CWD)",
     )
-    p.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    p.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable debug logging, including httpx/httpcore per-request lines "
+        "(hidden by default: ~1 INFO line per HTTP request)",
+    )
 
 
 def _add_time_args(p: argparse.ArgumentParser) -> None:
@@ -72,6 +80,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help="Entity IDs — repeatable or comma-separated",
+    )
+    p_extract.add_argument(
+        "--allow-coverage-gaps",
+        action="store_true",
+        help="Exit 0 even when a run's manifest records coverage gaps (empty_chunk*, "
+        "chunk_accounting_mismatch, no_rows_*/no_samples_extracted, no_series_chunks, "
+        "series_without_samples_chunks).  For interactive/backfill use.  By default such a run "
+        "keeps its data and manifest but exits 3 (EXIT_COVERAGE_GAPS) with a summary on stderr; "
+        "1 is a failed run, 2 a usage error",
     )
 
     # -- validate ---------------------------------------------------------
@@ -513,6 +530,11 @@ def _redact_error(message: str) -> str:
 
 def cmd_extract(args: argparse.Namespace) -> int:
     """Extract source data to raw Parquet."""
+    from battery_optimizer.coverage import (
+        EXIT_COVERAGE_GAPS,
+        format_gap_summary,
+        manifest_coverage_gaps,
+    )
     from battery_optimizer.extract_ha import extract_ha_history
     from battery_optimizer.extract_prom import extract_prometheus
     from battery_optimizer.paths import resolve_data_dir
@@ -535,6 +557,12 @@ def cmd_extract(args: argparse.Namespace) -> int:
         log.info("extract: entities=default (source-specific)")
 
     manifests: list[Path] = []
+    gap_summaries: list[str] = []
+
+    def _record_gaps(label: str, manifest_path: Path) -> None:
+        gaps = manifest_coverage_gaps(manifest_path)
+        if gaps:
+            gap_summaries.append(format_gap_summary(label, manifest_path, gaps))
 
     if source in ("prometheus", "all"):
         try:
@@ -552,6 +580,8 @@ def cmd_extract(args: argparse.Namespace) -> int:
             log.error("extract: prometheus failed: %s", msg)
             print(f"extract: prometheus failed: {msg}", file=sys.stderr)
             return 1
+        else:
+            _record_gaps("prometheus", manifest_path)
 
     if source in ("ha-history", "all"):
         try:
@@ -569,10 +599,26 @@ def cmd_extract(args: argparse.Namespace) -> int:
             log.error("extract: ha-history failed: %s", msg)
             print(f"extract: ha-history failed: {msg}", file=sys.stderr)
             return 1
+        else:
+            _record_gaps("ha-history", manifest_path)
 
     print(f"extract: completed — {len(manifests)} manifest(s) written")
     for mp in manifests:
         print(f"  manifest: {mp}")
+    if gap_summaries:
+        # Judged after every manifest is written: the data stays, the exit code tells a
+        # scheduler that it is incomplete.  --allow-coverage-gaps downgrades it to a warning.
+        for summary in gap_summaries:
+            print(summary, file=sys.stderr)
+        if args.allow_coverage_gaps:
+            print("extract: coverage gaps ignored (--allow-coverage-gaps)", file=sys.stderr)
+            return 0
+        print(
+            f"extract: exiting {EXIT_COVERAGE_GAPS}: coverage gaps recorded "
+            "(pass --allow-coverage-gaps to accept them)",
+            file=sys.stderr,
+        )
+        return EXIT_COVERAGE_GAPS
     return 0
 
 
@@ -1272,6 +1318,7 @@ def main(argv: list[str] | None = None) -> int:
 
     level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+    quiet_http_loggers(verbose=getattr(args, "verbose", False))
 
     handler = _HANDLERS.get(args.command)
     if handler is None:

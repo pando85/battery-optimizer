@@ -74,10 +74,12 @@ def build_service(
 def run_server(service: ShadowService, *, host: str, port: int) -> None:
     import uvicorn
 
+    from battery_optimizer._logging import quiet_http_loggers
+
     from .api import create_app
 
     # httpx logs every request at INFO; the 60 s REST refresh would flood the log.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    quiet_http_loggers()
     app = create_app(service)
     server = uvicorn.Server(
         uvicorn.Config(
