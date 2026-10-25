@@ -46,6 +46,17 @@ offline tests. All files written with mode 0600, dirs with 0700.
 with the same directory layout and permission model. Migration is a `rsync` + a
 `--data-dir` flag flip; the package code is location-agnostic.
 
+### Passive archives of the resident service
+
+With the `archive:` section of `config/service.yaml` enabled, `serve` appends two private, append-only
+archives under `<data dir>/service/v1/`: `pvpc_snapshots/date=YYYY-MM-DD/pvpc_snapshots.jsonl` (every
+state change of the PVPC price sensor, raw attributes included) and
+`weather_forecasts/date=YYYY-MM-DD/weather_forecasts.jsonl` (the hourly Home Assistant weather forecast,
+fetched with `weather.get_forecasts`). Files are `0600`, directories `0700`, partitioned by UTC day.
+There is **no retention yet**: nothing prunes them. Keys, record schemas, metrics and failure behaviour:
+[shadow service](service.md#passive-archives). The weather fetch is the only Home Assistant service call the
+service can make; the token otherwise stays read-only.
+
 ### No recurring scheduler yet
 
 There is no recurring scheduler, cron job, or Kubernetes CronJob wired up for this toolkit yet.
