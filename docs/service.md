@@ -61,8 +61,11 @@ anywhere. Live actuation is Phase D and is neither built nor authorized.
   `dispatch.intents_from_schedule`, which re-checks the plan against the battery kernel.
 * **Battery parameters:** `benchmark.resolve_battery_assumptions` on `tariff.yaml` (`sqrt(RTE)` per
   leg, SOC window, import ceiling).
-* **Forecast:** `policies.forecast_load_trailing_slot_mean` with the usable mask cut at the local
-  midnight of the decision day — the `CausalForecastProvider` rule.
+* **Forecast:** the registered load forecaster `planning.load_forecaster` (default `trailing_mean`,
+  the 28-day same-slot mean `policies.forecast_load_trailing_slot_mean`), run through
+  `load_forecast.run_forecaster` with the information cut at the local midnight of the decision day,
+  which is the `CausalForecastProvider` rule. Config validation rejects oracle forecasters such as
+  `perfect`.
 * **History:** `extract_prom.query_range_vector` (instant queries over range vectors, never
   `query_range`), `build.stitch_series` / `counter_deltas` / `allocate_energy`.
 * **Execution clipping:** `policies._clip_plan_to_model_bounds`, used by the rolling-horizon benchmark

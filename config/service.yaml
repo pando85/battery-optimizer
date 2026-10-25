@@ -85,6 +85,9 @@ planning:
   min_horizon_slots: 4
   max_horizon_slots: 192
   forecast_window_days: 28
+  # Registered load forecaster (battery_optimizer.load_forecast). Oracles such as
+  # `perfect` are offline-only and refused here.
+  load_forecaster: trailing_mean
   # EUR/DC-kWh on end-of-horizon SOC: `trailing_mean` = mean PVPC over the history
   # window (the benchmark's default rule), or an explicit number.
   terminal_value: trailing_mean

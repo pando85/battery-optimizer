@@ -154,6 +154,8 @@ __all__ = [
     "policy_causal_price",
     "policy_day_ahead",
     "policy_no_battery",
+    "score_day_forecast",
+    "trailing_slot_mean_for_day",
 ]
 
 #: Default trailing window for the day-ahead load forecast, in local days.  The
@@ -589,76 +591,109 @@ def forecast_load_trailing_slot_mean(
 
     forecast = np.zeros(n, dtype=float)
     per_day: list[dict[str, Any]] = []
-    for j, (label, start, stop) in enumerate(days):
-        prior = days[max(0, j - int(window_days)) : j]
-        m = stop - start
-        sums = np.zeros(m, dtype=float)
-        counts = np.zeros(m, dtype=int)
-        pooled_sum = 0.0
-        pooled_count = 0
-        prior_with_data = 0
-        for _p_label, p_start, p_stop in prior:
-            positions = np.flatnonzero(keep[p_start:p_stop])
-            if positions.size == 0:
-                continue
-            prior_with_data += 1
-            values = load[p_start:p_stop]
-            pooled_sum += float(values[positions].sum())
-            pooled_count += int(positions.size)
-            shared = min(m, p_stop - p_start)
-            in_range = positions[positions < shared]
-            np.add.at(sums, in_range, values[in_range])
-            np.add.at(counts, in_range, 1)
-        pooled_mean = pooled_sum / pooled_count if pooled_count else 0.0
-
-        day_values = np.zeros(m, dtype=float)
-        slot_counts = counts.astype(int)
-        used_slot = slot_counts > 0
-        pooled_slots = (~used_slot) & (pooled_count > 0)
-        empty_slots = ~used_slot & ~pooled_slots
-        day_values[used_slot] = sums[used_slot] / slot_counts[used_slot]
-        day_values[pooled_slots] = pooled_mean
-        # ``empty_slots`` stay 0.0: no usable history at all for this day.
+    for j, (_label, start, stop) in enumerate(days):
+        day_values, record = trailing_slot_mean_for_day(load, keep, days, j, window_days)
         forecast[start:stop] = day_values
-
-        measured = keep[start:stop]
-        error = day_values[measured] - load[start:stop][measured]
-        error_stats = {
-            "mae_kwh": float(np.abs(error).mean()) if error.size else None,
-            "rmse_kwh": float(np.sqrt(np.mean(error**2))) if error.size else None,
-            "bias_kwh": float(error.mean()) if error.size else None,
-        }
-        fallback = "none"
-        if pooled_slots.any():
-            fallback = "pooled_window_mean"
-        if empty_slots.any():
-            fallback = "zero_no_history" if pooled_count == 0 else "mixed"
         per_day.append(
-            {
-                "local_day": str(label),
-                "intervals": int(m),
-                "usable_intervals": int(measured.sum()),
-                "window_days_requested": int(window_days),
-                "window_days_available": len(prior),
-                "window_days_with_usable_data": prior_with_data,
-                "slots_using_trailing_mean": int(used_slot.sum()),
-                "slots_pooled_fallback": int(pooled_slots.sum()),
-                "slots_zero_no_history": int(empty_slots.sum()),
-                "trailing_mean_samples_min": int(slot_counts[used_slot].min())
-                if used_slot.any()
-                else 0,
-                "trailing_mean_samples_max": int(slot_counts[used_slot].max())
-                if used_slot.any()
-                else 0,
-                "fallback": fallback,
-                "forecast_fallback_rule": FORECAST_FALLBACK_RULE,
-                "forecast_sum_kwh": float(day_values[measured].sum()),
-                "measured_sum_kwh": float(load[start:stop][measured].sum()),
-                **error_stats,
-            }
+            {**record, **score_day_forecast(day_values, load[start:stop], keep[start:stop])}
         )
     forecast.setflags(write=False)
     return forecast, per_day
+
+
+def trailing_slot_mean_for_day(
+    load: np.ndarray,
+    keep: np.ndarray,
+    days: Sequence[tuple[Any, int, int]],
+    j: int,
+    window_days: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """One local day of :func:`forecast_load_trailing_slot_mean`, without scoring.
+
+    The arithmetic kernel shared by the whole-array function above and by the
+    registered ``trailing_mean`` load forecaster
+    (:mod:`battery_optimizer.load_forecast`).  It reads ``days[j - window_days : j]``
+    only, through ``load`` and ``keep``; those arrays may be **shorter** than the
+    partition (history cut at a decision instant), in which case a prior day past their
+    end simply contributes nothing — exactly what a mask truncated at the same index
+    produces, so both callers get bit-identical values.
+
+    Returns ``(day_values, record)``: the forecast for ``days[j]`` and its per-day
+    provenance (window support and fallback counts).  Measured-load scoring is
+    :func:`score_day_forecast`, kept apart because it needs hindsight.
+    """
+    label, start, stop = days[j]
+    prior = days[max(0, j - int(window_days)) : j]
+    m = stop - start
+    sums = np.zeros(m, dtype=float)
+    counts = np.zeros(m, dtype=int)
+    pooled_sum = 0.0
+    pooled_count = 0
+    prior_with_data = 0
+    for _p_label, p_start, p_stop in prior:
+        positions = np.flatnonzero(keep[p_start:p_stop])
+        if positions.size == 0:
+            continue
+        prior_with_data += 1
+        values = load[p_start:p_stop]
+        pooled_sum += float(values[positions].sum())
+        pooled_count += int(positions.size)
+        shared = min(m, p_stop - p_start)
+        in_range = positions[positions < shared]
+        np.add.at(sums, in_range, values[in_range])
+        np.add.at(counts, in_range, 1)
+    pooled_mean = pooled_sum / pooled_count if pooled_count else 0.0
+
+    day_values = np.zeros(m, dtype=float)
+    slot_counts = counts.astype(int)
+    used_slot = slot_counts > 0
+    pooled_slots = (~used_slot) & (pooled_count > 0)
+    empty_slots = ~used_slot & ~pooled_slots
+    day_values[used_slot] = sums[used_slot] / slot_counts[used_slot]
+    day_values[pooled_slots] = pooled_mean
+    # ``empty_slots`` stay 0.0: no usable history at all for this day.
+
+    fallback = "none"
+    if pooled_slots.any():
+        fallback = "pooled_window_mean"
+    if empty_slots.any():
+        fallback = "zero_no_history" if pooled_count == 0 else "mixed"
+    record: dict[str, Any] = {
+        "local_day": str(label),
+        "intervals": int(m),
+        "window_days_requested": int(window_days),
+        "window_days_available": len(prior),
+        "window_days_with_usable_data": prior_with_data,
+        "slots_using_trailing_mean": int(used_slot.sum()),
+        "slots_pooled_fallback": int(pooled_slots.sum()),
+        "slots_zero_no_history": int(empty_slots.sum()),
+        "trailing_mean_samples_min": int(slot_counts[used_slot].min()) if used_slot.any() else 0,
+        "trailing_mean_samples_max": int(slot_counts[used_slot].max()) if used_slot.any() else 0,
+        "fallback": fallback,
+        "forecast_fallback_rule": FORECAST_FALLBACK_RULE,
+    }
+    return day_values, record
+
+
+def score_day_forecast(
+    day_values: np.ndarray, measured_load: np.ndarray, measured_usable: np.ndarray
+) -> dict[str, Any]:
+    """Retrospective per-day error of a forecast against the measured load.
+
+    Hindsight by definition: it is a measurement *of* the forecast, written into the
+    artifact after the fact, and no plan reads it.  Only usable intervals are scored.
+    """
+    measured = np.asarray(measured_usable, dtype=bool)
+    load = np.asarray(measured_load, dtype=float)
+    error = day_values[measured] - load[measured]
+    return {
+        "usable_intervals": int(measured.sum()),
+        "forecast_sum_kwh": float(day_values[measured].sum()),
+        "measured_sum_kwh": float(load[measured].sum()),
+        "mae_kwh": float(np.abs(error).mean()) if error.size else None,
+        "rmse_kwh": float(np.sqrt(np.mean(error**2))) if error.size else None,
+        "bias_kwh": float(error.mean()) if error.size else None,
+    }
 
 
 def _clip_plan_to_model_bounds(
