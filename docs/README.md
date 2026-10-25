@@ -1,8 +1,20 @@
 # Documentation
 
-Design records and planning for the battery optimizer. The project began in
+Guides, design records and planning for the battery optimizer. The project began in
 [`pando85/homelab`](https://github.com/pando85/homelab); see [provenance](provenance.md) for what moved,
-how identities map, and the caveats when comparing old artifacts.
+how identities map, and the caveats when comparing old artifacts. The project overview and quick start are in
+the [top-level README](../README.md).
+
+## Guides
+
+| Document | Purpose |
+|---|---|
+| [Configuration](configuration.md) | Environment variables, data directory, development and production locations, Home Assistant authentication, secrets policy |
+| [CLI reference](cli.md) | Every command, the `extract` exit codes and coverage gaps, `ha-states`, `inspect-sql` |
+| [Benchmark reference](benchmark.md) | `benchmark` flags, the five-rung policy ladder, battery assumptions, methodology notes |
+| [Architecture](architecture.md) | Module notes: dispatch intent contract, artifact integrity, economic sensitivity, replay runtime, shadow service |
+| [Container image](container.md) | Published tags, running the batch commands and `serve` from the image, provenance verification |
+| [Known issues](known-issues.md) | HA retention, per-chunk emptiness, row-level re-extraction dedup, `carry_in` flags |
 
 ## Architecture decision records
 
@@ -16,7 +28,8 @@ how identities map, and the caveats when comparing old artifacts.
 ## Service
 
 - [Resident shadow service](service.md): architecture, endpoints, metrics, configuration, failure modes and the
-  shadow-vs-native comparison method.
+  shadow-vs-native comparison method. Environment variables shared with the batch commands are in
+  [configuration](configuration.md#environment-variables).
 
 ## Planning
 
