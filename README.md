@@ -177,6 +177,39 @@ uv run battery-optimizer extract --source all --lookback-days 7
 Time window: either `--start`/`--end` (ISO-8601 UTC, end defaults to now) or
 `--lookback-days N` (start = N days ago at midnight UTC, end = now).
 
+#### Exit codes and coverage gaps
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success, with no coverage gap recorded (or `--allow-coverage-gaps` was passed) |
+| `1` | The run failed (extractor error, bad arguments or window); no manifest for that source |
+| `2` | Usage error (argparse) |
+| `3` | The run **completed and committed its data and manifest**, but the manifest records a coverage gap |
+
+Exit `3` exists so a scheduled job (the Kubernetes CronJob) does not look green while data has holes.
+The data and manifest stay on disk and inspectable; stderr names every gap flag (chunk windows
+included). With `--source all` both sources always run before the code is chosen, so a Prometheus
+gap never skips the non-re-extractable HA pull. Pass `--allow-coverage-gaps` for interactive or
+backfill runs (for example a window that starts before a series existed) to get exit `0`; the
+summary is still printed.
+
+Flags that are **gaps** (exit `3`): `empty_chunk:`, `empty_chunk_after_window_filter:`,
+`chunk_accounting_mismatch`, `no_rows_for_entity:`, `no_rows_extracted:all` (HA) and
+`no_samples_extracted:`, `no_series_chunks:`, `series_without_samples_chunks:` (Prometheus). A
+known-dead entity (`sensor.esios_pvpc_2`) is expected to be empty and never counts.
+
+Flags that stay **informational** (no exit change): `duplicate_rows_suppressed:`,
+`duplicate_rows_already_stored:`, `carry_in_classification_disagreement:`,
+`prior_part_unreadable:`, `duplicate_samples_dropped:`, `boundary_duplicates_dropped:`,
+`non_finite_samples_dropped:`, `overlapping_target_samples:`, `dead_duplicate_entity:`. They say how
+the run went, not that data is missing. An HA entity that simply did not change is *not* an empty
+chunk: the history API returns its state at the chunk start (the `carry_in` row), so a zero-row
+chunk means purged history or an absent entity.
+
+Per-request `httpx`/`httpcore` INFO lines are hidden by default so the pipeline's own progress lines
+stay readable in container logs; `-v`/`--verbose` shows them again (HA extraction still suppresses
+`httpx` itself, because its URLs name the recorder host).
+
 Re-running an overlapping or identical window is safe for the HA source: rows
 already in the store are not written again, and the manifest discloses how many
 were suppressed. See [Overlapping re-extraction is deduplicated at row
