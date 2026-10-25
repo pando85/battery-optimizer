@@ -13,48 +13,68 @@ compared with the native battery behaviour, and nothing is ever actuated.
 ## Architecture
 
 ```text
-+--------------------------------------+       +------------------------------+
-|            Home Assistant            |       |    Prometheus (long-term)    |
-|  recorder history | live states, PVPC|       |  hass_* counters and gauges  |
-+-------+----------------------+-------+       +-----+------------------+-----+
-        |                      |                     |                  |
-        | REST history         | WebSocket + REST GET|                  |
-        |                      | (ha_guard allowlist:|                  |
-        v                      |  read-only)         |                  |
-+------------------------+     |                     |                  |
-| Offline pipeline       |<----|---------------------+                  |
-| (nightly CronJob)      |     |                                        |
-|                        |     |                                        |
-|  extract -> validate   |     |                                        |
-|     -> build           |     |                                        |
-|     -> benchmark,report|     |                                        |
-+-----------+------------+     |                                        |
-            |                  |                                        |
-            v                  |                                        |
-  data_dir: raw/, manifests/,  |                                        |
-            analysis/          |                                        |
-                               v                                        v
-+-----------------------------------------------------------------------------+
-| Shadow service: `battery-optimizer serve` (one replica)                     |
-|                                                                             |
-|  ha_client --> entity_store --+--> PVPC prices, SOC ----+                   |
-|  (reconnect,   (source-time   |                         v                   |
-|   resync)       ordering,     |        history -----> planner               |
-|                 freshness)    |        (load           (MPC solve in a      |
-|                               |         forecast)       1-worker executor)  |
-|                               v                         |                   |
-|                           observer                      v                   |
-|                        (native slots)               shadow intents          |
-|                               |                    (recorded, never sent)   |
-|                               +--> virtual_battery <----+                   |
-|                                         |                                   |
-|                                         v                                   |
-|  api: /health/* /status /plan /metrics  sink --> data_dir/service/v1/       |
-+-------+-------------------------------------------------+-------------------+
-        |                                                 |
-        v                                                 v
-  Prometheus scrape -> alerts, Grafana           shadow-report (CLI)
++------------------------------------------------------------------------+
+| INPUTS: HA (PVPC, grid, states), Prometheus (history), tariff config   |
++-----------------------------------+------------------------------------+
+                                    |
+                                    v
++------------------------------------------------------------------------+
+| SENSE: data acquisition and validation                                 |
+|   Offline CronJob: daily extracts/validation; periodic build -> PVC    |
+|   Shadow service: HA WebSocket/REST + Prometheus -> fresh snapshot      |
++-----------------------------------+------------------------------------+
+                                    |
+                                    v
+
+                        DECIDE (planning components)
++----------------------+  +----------------------+  +--------------------+
+| 1. LOAD FORECASTER   |  | 2. PRICE OUTLOOK     |  | 3. BATTERY MODEL   |
+| service/history.py   |  | service/pvpc.py      |  | battery.py         |
+| policies.py          |  | Published PVPC only  |  | SOC, limits, RTE   |
+| 28-day causal mean   |  | No price model yet   |  | 0.80 assumed RTE   |
++----------+-----------+  +----------+-----------+  +---------+----------+
+           \                         |                        /
+            +------------------------+-----------------------+
+                                     |
+                                     v
+                  +-------------------------------------------+
+                  | 4. DISPATCH OPTIMIZER (MPC / HiGHS)       |
+                  | service/planner.py + oracle.py           |
+                  | Shared core with offline benchmarks      |
+                  +---------------------+---------------------+
+                                        |
+                                        v
+                  +-------------------------------------------+
+                  | DispatchPlan / DispatchIntent             |
+                  | Time-bounded economic decisions           |
+                  +---------------------+---------------------+
+                                        |
+                                        v
++------------------------------------------------------------------------+
+| LEARN / OBSERVE (implemented, no actuation)                             |
+| ShadowSink + virtual battery + shadow-report; offline benchmarks       |
+| /metrics -> Prometheus, alerts, Grafana                                 |
++------------------------------------------------------------------------+
+
+FUTURE ACT (NOT CONNECTED): DispatchIntent -> safety guard -> HA adapter
+                            -> Omnibattery PD -> Marstek Venus E
+Current SOC source: simulated; real battery/Omnibattery HA entities absent.
 ```
+
+**DECIDE** is decomposed into four *logical* components (not four services):
+**Load Forecaster**, **Price Outlook**, **Battery Model** and **Dispatch Optimizer**.
+The first three supply independent inputs to the optimizer. The battery model is
+shared with simulation and backtesting; it does **not** consume the forecasts.
+**Price Outlook** currently reads published PVPC prices, not predicted prices.
+The shadow service uses **simulated SOC** until the battery entities are available.
+There is no path to live actuation; the ACT line is a future design only.
+
+See [planning component responsibilities](docs/architecture.md#planning-components) and the
+**individual component roadmaps** for scoped improvements and acceptance gates:
+[Load Forecaster](docs/planning/components/load-forecaster.md),
+[Price Outlook](docs/planning/components/price-outlook.md),
+[Battery Model](docs/planning/components/battery-model.md), and
+[Dispatch Optimizer](docs/planning/components/dispatch-optimizer.md).
 
 The modules, the pipeline stages and the shadow service are described in
 [docs/architecture.md](docs/architecture.md) and the [ADRs](docs/adr/).
