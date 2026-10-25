@@ -44,6 +44,8 @@ update-changelog:	## prepend the unreleased commits to CHANGELOG.md as the next 
 	else \
 		$(UV) run --only-group tools git-cliff -t v$(PROJECT_VERSION) -u -o CHANGELOG.md; \
 	fi
+	@# git-cliff leaves trailing blank lines, which the end-of-file-fixer hook rejects.
+	@printf '%s\n' "$$(cat CHANGELOG.md)" > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
 
 .PHONY: release
 release:	## cut a release: make release [VERSION=X.Y.Z]
