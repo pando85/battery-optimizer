@@ -1,0 +1,10 @@
+# Allowlist: nothing enters the build context unless listed here, so .git, .venv,
+# data and local env files can never leak into an image.
+*
+!src/
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE.md
+**/__pycache__
+**/*.pyc
