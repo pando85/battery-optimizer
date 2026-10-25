@@ -31,6 +31,7 @@ from battery_optimizer.extract_prom import (
     DEFAULT_CHUNK_SECONDS,
     DEFAULT_ENTITY_IDS,
     ENTITY_SPECS,
+    FEATURE_ENTITY_IDS,
     PART_KIND,
     RANGE_PADDING_SECONDS,
     SOURCE,
@@ -1286,6 +1287,33 @@ class TestEntityRegistry:
         assert ENTITY_SPECS["sensor.shellyem_main_channel_1_power"].unit == "W"
         assert ENTITY_SPECS["sensor.esios_pvpc"].metric == "hass_sensor_unit_u0x20ac_per_kwh"
         assert ENTITY_SPECS["sensor.esios_pvpc"].unit == "EUR/kWh"
+
+    def test_feature_entities_are_registered_but_never_default(self) -> None:
+        assert FEATURE_ENTITY_IDS
+        for entity_id in FEATURE_ENTITY_IDS:
+            assert entity_id in ENTITY_SPECS
+            assert entity_id not in DEFAULT_ENTITY_IDS
+        assert "sensor.esios_pvpc_2" not in FEATURE_ENTITY_IDS
+        assert ENTITY_SPECS["sensor.shellypmmini_servers_power"].metric == "hass_sensor_power_w"
+        assert ENTITY_SPECS["sensor.aquarea_heat_power_consumed"].unit == "W"
+        assert ENTITY_SPECS["switch.aquarea_force_dhw_mode"].metric == "hass_switch_state"
+        # Resolving every feature entity must pass the charset validators (degree sign).
+        specs = resolve_entity_specs(list(FEATURE_ENTITY_IDS))
+        assert [s.entity_id for s in specs] == list(FEATURE_ENTITY_IDS)
+        temp = ENTITY_SPECS["sensor.aquarea_outside_ambient_temperature"]
+        assert temp.metric == "hass_sensor_unit_celsius"
+        assert temp.unit == "\u00b0C"
+
+    def test_degree_sign_unit_is_accepted_but_other_symbols_are_not(self) -> None:
+        assert resolve_entity_specs(["sensor.t:hass_sensor_unit_celsius:\u00b0C"])[0].unit == (
+            "\u00b0C"
+        )
+        with pytest.raises(ValueError, match="unsupported characters"):
+            resolve_entity_specs(["sensor.t:hass_sensor_unit_celsius:\u00b0;"])
+
+    def test_defaults_resolve_unchanged_with_feature_entities_registered(self) -> None:
+        resolved = [s.entity_id for s in resolve_entity_specs(None)]
+        assert resolved == list(DEFAULT_ENTITY_IDS)
 
     def test_none_and_empty_resolve_to_the_defaults(self) -> None:
         expected = tuple(ENTITY_SPECS[e] for e in DEFAULT_ENTITY_IDS)
