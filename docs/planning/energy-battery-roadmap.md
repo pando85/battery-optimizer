@@ -5,6 +5,12 @@
   state it is in, and how each one iterates from "working simply" to "fully improved".
   This replaces the phase-by-phase framing for day-to-day decisions; the phase list
   still lives in the [implementation plan](home-battery-optimizer-implementation.md).
+- **DECIDE component roadmaps:** [Load Forecaster](components/load-forecaster.md),
+  [Price Outlook](components/price-outlook.md),
+  [Battery Model](components/battery-model.md),
+  [Dispatch Optimizer](components/dispatch-optimizer.md). These own per-component next steps
+  and acceptance metrics; this file remains the cross-component summary and the
+  [implementation plan](home-battery-optimizer-implementation.md) owns production/safety gates.
 - **Related:** [ADR-0001 architecture](../adr/0001-home-battery-economic-dispatch.md),
   [ADR-0004 production architecture](../adr/0004-battery-optimizer-production-architecture.md),
   [ADR-0003 Phase 1 baseline](../adr/0003-phase1-measurement-and-baseline.md),

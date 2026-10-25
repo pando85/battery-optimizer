@@ -43,7 +43,11 @@ the [top-level README](../README.md).
 | Document | Purpose |
 |---|---|
 | [Implementation plan](planning/home-battery-optimizer-implementation.md) | Phased plan; [§16](planning/home-battery-optimizer-implementation.md#16-production-packaging-and-runtime-rollout) is the single production sequencing checklist (Phases A to D) |
-| [Battery roadmap](planning/energy-battery-roadmap.md) | Component-level progress summary |
+| [Battery roadmap](planning/energy-battery-roadmap.md) | Cross-component system progress summary and sequencing |
+| [Load Forecaster roadmap](planning/components/load-forecaster.md) | Baseline -> server/schedule/appliance features -> ML and predictive uncertainty, with economic promotion gates |
+| [Price Outlook roadmap](planning/components/price-outlook.md) | Exact PVPC -> historical publication snapshots -> selective unpublished-price forecasting |
+| [Battery Model roadmap](planning/components/battery-model.md) | Assumed RTE -> physical telemetry/calibration -> solver-compatible efficiency, standby and reserve behavior |
+| [Dispatch Optimizer roadmap](planning/components/dispatch-optimizer.md) | Shadow MPC -> calibrated objective/constraints -> robust scenarios and gated device handoff |
 | [Baseline progress](planning/energy-baseline-progress.md) | Phase 1 status, built datasets and benchmark runs |
 | [Forecast experiments](planning/energy-baseline-forecast-experiments.md) | Rolling-horizon and forecast experiment records |
 | [AppDaemon baseline context](planning/energy-baseline-appdaemon-baseline-context.md) | Context on the existing AppDaemon heating/DHW control the baseline is compared against |
