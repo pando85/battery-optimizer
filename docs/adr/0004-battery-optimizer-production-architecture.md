@@ -1,27 +1,27 @@
 # ADR-0004: Production runtime and independent source repository for the battery optimizer
 
-- **Status:** Proposed
+- **Status:** Proposed (extraction step implemented 2026-10-25 — see [provenance](../provenance.md))
 - **Date:** 2026-10-24
 - **Decision owners:** Homelab maintainers
 - **Extends:** [ADR-0001 — economic dispatch](0001-home-battery-economic-dispatch.md)
-- **Implementation and acceptance:** [Home battery optimizer implementation plan, §16](../../planning/home-battery-optimizer-implementation.md#16-production-packaging-and-runtime-rollout) (plus Phases 5–6)
-- **Current component state:** [Battery roadmap](../../planning/energy-battery-roadmap.md)
+- **Implementation and acceptance:** [Home battery optimizer implementation plan, §16](../planning/home-battery-optimizer-implementation.md#16-production-packaging-and-runtime-rollout) (plus Phases 5–6)
+- **Current component state:** [Battery roadmap](../planning/energy-battery-roadmap.md)
 
 ## Context
 
 [ADR-0001](0001-home-battery-economic-dispatch.md) already decides the economic MPC, single-writer Omnibattery ownership and safe-dispatch constraints. [ADR-0002](0002-appliance-aware-load-forecasting.md) and [ADR-0003](0003-phase1-measurement-and-baseline.md) cover forecasting inputs and the offline data pipeline. **This ADR only decides how the optimizer becomes a separately released production application.** It does not redefine physical dispatch or replace those decisions.
 
-The current `scripts/energy-baseline/` Python package can extract Prometheus/HA data, create reproducible offline datasets, compare policies and serialize typed dispatch intents. It has no live writer, runtime service or deployed safety guard. HA, AppDaemon, Prometheus, Grafana, Vault and ArgoCD already exist in the homelab.
+The `scripts/energy-baseline/` Python package (now `src/battery_optimizer/` in this repository) can extract Prometheus/HA data, create reproducible offline datasets, compare policies and serialize typed dispatch intents. It has no live writer, runtime service or deployed safety guard. HA, AppDaemon, Prometheus, Grafana, Vault and ArgoCD already exist in the homelab.
 
 Application code, test suite and container artifacts need an independent release lifecycle; homelab-specific cluster configuration must remain GitOps-managed. We want minimal new operational dependencies.
 
 ## Decision
 
-1. **Separate repositories, without moving code in this PR.** A future dedicated optimizer repository (working name `pando85/battery-optimizer`, not yet created) will own Python code, offline CLI, tests/fixtures, dependency lockfile, Dockerfile, CI and immutable OCI image releases. `pando85/homelab` will own the pinned image digest, ArgoCD/Helm manifests, HA entity mappings, secrets references, PVC, policies, dashboards and operator runbooks. Keep the current `scripts/energy-baseline/` implementation unchanged until a dedicated migration PR preserves tests, CLI and historical dataset provenance; its dataset IDs currently depend on the source repository commit.
+1. **Separate repositories, without moving code in this PR.** A future dedicated optimizer repository (working name `pando85/battery-optimizer`, not yet created) will own Python code, offline CLI, tests/fixtures, dependency lockfile, Dockerfile, CI and immutable OCI image releases. `pando85/homelab` will own the pinned image digest, ArgoCD/Helm manifests, HA entity mappings, secrets references, PVC, policies, dashboards and operator runbooks. Keep the current `scripts/energy-baseline/` implementation unchanged until a dedicated migration PR preserves tests, CLI and historical dataset provenance; its dataset IDs currently depend on the source repository commit. *Update 2026-10-25: this migration has been carried out with history preserved; the repository exists, the package is `battery_optimizer`, and the identity rules are recorded in [provenance](../provenance.md). The decision text above is kept as originally written.*
 
 2. **One small, continuously running Python service.** Deploy a single-replica `battery-optimizer` process in K3s, starting in **shadow mode**. Its modules consume current HA entity states/events through authenticated WebSocket/REST, use the Prometheus HTTP API for historical measurements, validate PVPC tariff publication times, compute forecast + receding-horizon MPC using the **same pure code as the offline benchmarks**, and emit validated `DispatchIntent` messages. Use Python 3.12+, `asyncio`/`httpx`, the existing SciPy/HiGHS stack, a small internal HTTP status/metrics API (FastAPI is a reasonable choice) and `prometheus-client`. Do not add a broker, cache cluster or dedicated DB solely for this workload. Keep blocking solves off the event loop.
 
-3. **Historical data remains batch.** Run `extract/validate/build` and optional benchmark/training as separate, read-only Jobs/CronJobs using private Parquet manifests and DuckDB, according to the [existing extraction plan](../../planning/energy-baseline-production-execution.md). An extract schedule must retain HA recorder events before its declared retention expires. Model training is optional and only promoted after chronological, out-of-sample **net savings** validation.
+3. **Historical data remains batch.** Run `extract/validate/build` and optional benchmark/training as separate, read-only Jobs/CronJobs using private Parquet manifests and DuckDB, according to the [existing extraction plan](https://github.com/pando85/homelab/blob/master/planning/energy-baseline-production-execution.md). An extract schedule must retain HA recorder events before its declared retention expires. Model training is optional and only promoted after chronological, out-of-sample **net savings** validation.
 
 4. **Planner intents are not physical setpoints.** Omnibattery in HA remains the sole Modbus writer and fast regulator using *fresh net-grid Shelly measurements*. The planner must not write Modbus concurrently. **Source review (2026-10-24) confirms a usable, preliminary public HA entity control surface** for runtime grid targets, power ceilings and per-battery directional permissions while retaining automatic PD ownership (details below). This is the preferred **first adapter candidate**, not a proven atomic/leased economic-intent interface. A supported high-level `DispatchIntent` API with atomic transitions and expiry is **not** currently established; an upstream-compatible extension may eventually be warranted. Omnibattery's battery manual mode removes it from the automatic pool and is not the intended first control path. **Shadow-first and the separate hardware safety gates remain unchanged.**
 
@@ -97,6 +97,6 @@ This mapping is a **hypothesis for integration tests, not a ready-to-execute pro
 
 Independent application versioning is cleaner, but deploying an app release now requires an explicit homelab digest bump. Tests and reproducible backtests move with the package; cluster and HA installation details remain local. The physical control interface and fail-safe behaviour are open **implementation blockers**, not solved by these technology choices.
 
-The steps, proposed Kubernetes resources, CI expectations, API/metrics and acceptance checks live **only** in the [existing implementation plan](../../planning/home-battery-optimizer-implementation.md#16-production-packaging-and-runtime-rollout). No PDR is maintained.
+The steps, proposed Kubernetes resources, CI expectations, API/metrics and acceptance checks live **only** in the [existing implementation plan](../planning/home-battery-optimizer-implementation.md#16-production-packaging-and-runtime-rollout). No PDR is maintained.
 
 **No separate repository, CI pipeline, image, Kubernetes Deployment, HA change, writer or live actuation is created or authorized by this ADR.**

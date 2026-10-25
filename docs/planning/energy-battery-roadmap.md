@@ -5,13 +5,13 @@
   state it is in, and how each one iterates from "working simply" to "fully improved".
   This replaces the phase-by-phase framing for day-to-day decisions; the phase list
   still lives in the [implementation plan](home-battery-optimizer-implementation.md).
-- **Related:** [ADR-0001 architecture](../docs/adr/0001-home-battery-economic-dispatch.md),
-  [ADR-0004 production architecture](../docs/adr/0004-battery-optimizer-production-architecture.md),
-  [ADR-0003 Phase 1 baseline](../docs/adr/0003-phase1-measurement-and-baseline.md),
-  [ADR-0002 appliance forecasting](../docs/adr/0002-appliance-aware-load-forecasting.md),
+- **Related:** [ADR-0001 architecture](../adr/0001-home-battery-economic-dispatch.md),
+  [ADR-0004 production architecture](../adr/0004-battery-optimizer-production-architecture.md),
+  [ADR-0003 Phase 1 baseline](../adr/0003-phase1-measurement-and-baseline.md),
+  [ADR-0002 appliance forecasting](../adr/0002-appliance-aware-load-forecasting.md),
   [progress and handoff](energy-baseline-progress.md),
   [forecast experiments](energy-baseline-forecast-experiments.md),
-  [package README](../scripts/energy-baseline/README.md)
+  [package README](../../README.md)
 
 No monetary figure appears in this file. Nothing described here is deployed, and no
 battery is actuated by any of it.
@@ -73,8 +73,8 @@ offline iteration safe, and it is why the absence of hardware blocks only one co
 | **Load forecast** | trailing slot mean, 28-day window | server baseline and AppDaemon schedules as explicit inputs | quantiles P10/P50/P90, then appliance-conditioned using the preserved HA enum history | No |
 | **Optimizer / MPC** | two-publication rolling horizon, ~34 h, two solves per local day — **done, and promoted: `rolling_horizon` is the fifth canonical rung (2026-10-24), the ladder is `no_battery`, `causal_price`, `day_ahead`, `rolling_horizon`, `oracle`, and `--policies all` runs all five** | 15-minute replan cadence over a 24–48 h horizon, executing only the next interval — **done as of 2026-10-24** (`replan_interval_slots` / `horizon_slots`; cadence 1 with `horizon_slots=96` is ADR-0001 §3), **now exercised on real data** across the four representative windows (the ladder 96 → 4 → 1 improves or ties monotonically), and roughly **48× the solve count** (about **37× the wall time**, since per-solve time is lower at a fine cadence). Causal load-forecast alignment **complete** (`--rolling-horizon-load-forecast-mode`): conservative event-local-day cutoff, entire horizon uses that cutoff, `"frozen"` preserved for goldens, `"causal"` now the benchmark and CLI default | degradation and throughput cost — **mechanism complete, uncalibrated**: `--throughput-cost-eur-per-kwh` planning flag, `economic_sensitivity.py` sweeps (user-supplied hypotheticals, no calibration, terminal optimization vs scoring separated). Then scenario or robust price handling | No |
 | **Battery model** | scalar round-trip efficiency, nameplate capacity and power, SOC window — **the scalar is now 0.80** (adopted 2026-10-24, bottom of the community-measured 0.80–0.84 range, superseding 0.88; still an assumption, not a measurement), and the shipped block is pinned by a test | measured efficiency-versus-power curve plus idle draw | SOC hysteresis and real physical rate limits | **Yes, from v2** |
-| **Dispatch contract** | absent — **no longer the state** | versioned schema: interval, mode, target power, SOC target, expected price, confidence, generation instant, expiry, sequence — **done 2026-10-24** (`src/energy_baseline/dispatch.py`, TODO-4.6): typed, validated, canonically serialized, physics delegated to `battery.py`, caller-supplied clock with no wall-clock fallback and an AST test proving it | acknowledged, one-in-flight, bounded retries | No — **the contract is not gated; the writer that would use it is** |
-| **Appliance states** | preserved in Parquet by `extract`, invisible to Prometheus — **and now readable**: `src/energy_baseline/ha_states.py` with the `ha-states` subcommand (2026-10-24), deduplicating at read time and answering as-of queries that cannot leak a later transition | feeding those states into the load forecast | appliance-conditioned forecasting / NILM | No |
+| **Dispatch contract** | absent — **no longer the state** | versioned schema: interval, mode, target power, SOC target, expected price, confidence, generation instant, expiry, sequence — **done 2026-10-24** (`src/battery_optimizer/dispatch.py`, TODO-4.6): typed, validated, canonically serialized, physics delegated to `battery.py`, caller-supplied clock with no wall-clock fallback and an AST test proving it | acknowledged, one-in-flight, bounded retries | No — **the contract is not gated; the writer that would use it is** |
+| **Appliance states** | preserved in Parquet by `extract`, invisible to Prometheus — **and now readable**: `src/battery_optimizer/ha_states.py` with the `ha-states` subcommand (2026-10-24), deduplicating at read time and answering as-of queries that cannot leak a later transition | feeding those states into the load forecast | appliance-conditioned forecasting / NILM | No |
 | **Device writer** | absent — Omnibattery native control only | single-writer adapter with lease and heartbeat | progressive power gates, observed → limited discharge → limited charge → full | **Yes** |
 | **Safety guard** | offline invariants only | staleness detection → safe idle at 0 W | kill switch, verified idle handoff, alerting with explicit acknowledgement | **Yes** |
 | **Observability** | offline artifacts (`benchmark.json`, `report.md`, schedules) | Grafana plan-versus-actual, forecast quality, opportunity cost | invoice reconciliation and realized savings against a matched baseline | Partly |
@@ -99,7 +99,7 @@ time pressure.
 
 The single largest architectural risk remains in the gated ACT column:
 ADR-0001 requires **exactly one Modbus/device writer** and reliable fault behaviour.
-The [ADR-0004 source audit](../docs/adr/0004-battery-optimizer-production-architecture.md#omnibattery-integration-contract--source-review-2026-10-24)
+The [ADR-0004 source audit](../adr/0004-battery-optimizer-production-architecture.md#omnibattery-integration-contract--source-review-2026-10-24)
 (2026-10-24) found *candidate public HA entities* for a dynamic grid target,
 optional charge/discharge power ceilings and per-battery direction permissions **without
 leaving Omnibattery's PD control**. This changes the preferred first adapter from

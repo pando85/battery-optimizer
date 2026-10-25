@@ -21,7 +21,7 @@
   during verification, fixed, and **the whole 81-configuration matrix was re-run**. §11 records the
   corrected run; every number written from an earlier run is superseded. The defect, its correction
   and one claim about it that turned out to be false are in §5.
-- **Related:** [Progress & Handoff](./energy-baseline-progress.md) §*Forecast experiments* and
+- **Related:** [Progress & Handoff](energy-baseline-progress.md) §*Forecast experiments* and
   §*2026-10-24 pass*
 
 This document specifies the offline experiment protocol that compared a two-publication ~36-hour
@@ -50,7 +50,7 @@ window.
 
 The holdout is frozen: load profiles are fit once before the holdout starts and never updated with
 test-period observations. This is distinct from the previous full-2025 rolling forecast-window sweep
-documented in [Progress §Forecast experiments](./energy-baseline-progress.md#forecast-experiments),
+documented in [Progress §Forecast experiments](energy-baseline-progress.md#forecast-experiments),
 which allowed recent test-period observations to update the forecast. Both experiments change history
 length; only the holdout experiment freezes the profile.
 
@@ -94,7 +94,7 @@ trailing means at each slot position.
 ### 3.1 Baseline: `day_ahead` (single publication)
 
 One MILP per local day, solved at midnight using archived realised prices for the full day. This is
-the policy from the authoritative run `b0a9b59aa846…` (see [Progress](./energy-baseline-progress.md)).
+the policy from the authoritative run `b0a9b59aa846…` (see [Progress](energy-baseline-progress.md)).
 
 ### 3.2 New: `two_pub` (two publications, ~36h horizon)
 
@@ -339,17 +339,17 @@ was needed: the canonical flags live on `benchmark` (`--rolling-horizon-replan-i
 
 | File | Role |
 |------|------|
-| `scripts/energy-baseline/src/energy_baseline/rolling_horizon.py` | The policy module, now canonical: two-publication logic **plus** a configurable replan cadence (`replan_interval_slots` / `horizon_slots`, implementing ADR-0001 §3), clock-derived slot positioning (`_clock_slot_position`), synthetic noise with two channels, event-driven execution, and a single publication rule so the information set is derived from the decision instant and cannot drift between cadences |
-| `scripts/energy-baseline/hack/compare_forecasts.py` | Comparison script: runs baseline and two-publication on the frozen holdout, computes metrics; carries the cadence flags |
-| `scripts/energy-baseline/tests/test_rolling_horizon.py` | **112** tests (63 when this section was first written): price noise, day-level bias, frozen profile and slot positioning, event computation, warmup splitting, DST, integration, plus the golden-digest tests that prove the legacy cadence is bit-identical and the cadence-mode tests |
-| `scripts/energy-baseline/tests/test_compare_forecasts_cli.py` | **22** tests running the CLI as a subprocess against a synthetic dataset (16 before the cadence work: +6 subprocess tests for the cadence flags, the multiplicity pair, true-price scoring, and the three validation refusals) |
-| `scripts/energy-baseline/src/energy_baseline/benchmark.py` | Where the rung is registered: `POLICY_NAMES`, canonical defaults, flag validation, artifact blocks, comparison flags |
-| `scripts/energy-baseline/hack/ROLLING_HORIZON_STATUS.md` | Status document for the rolling-horizon code — defect list, slot-positioning rule and test inventory live there |
+| `src/battery_optimizer/rolling_horizon.py` | The policy module, now canonical: two-publication logic **plus** a configurable replan cadence (`replan_interval_slots` / `horizon_slots`, implementing ADR-0001 §3), clock-derived slot positioning (`_clock_slot_position`), synthetic noise with two channels, event-driven execution, and a single publication rule so the information set is derived from the decision instant and cannot drift between cadences |
+| `hack/compare_forecasts.py` | Comparison script: runs baseline and two-publication on the frozen holdout, computes metrics; carries the cadence flags |
+| `tests/test_rolling_horizon.py` | **112** tests (63 when this section was first written): price noise, day-level bias, frozen profile and slot positioning, event computation, warmup splitting, DST, integration, plus the golden-digest tests that prove the legacy cadence is bit-identical and the cadence-mode tests |
+| `tests/test_compare_forecasts_cli.py` | **22** tests running the CLI as a subprocess against a synthetic dataset (16 before the cadence work: +6 subprocess tests for the cadence flags, the multiplicity pair, true-price scoring, and the three validation refusals) |
+| `src/battery_optimizer/benchmark.py` | Where the rung is registered: `POLICY_NAMES`, canonical defaults, flag validation, artifact blocks, comparison flags |
+| `hack/ROLLING_HORIZON_STATUS.md` | Status document for the rolling-horizon code — defect list, slot-positioning rule and test inventory live there |
 
 **Test suite:** **1201 passed** when this section was written (1194 before the slot-positioning fix, +7
 positioning and boundary tests), `ruff check` and `ruff format --check` clean on 35 files. **Today:
 1444 passing**, ruff clean on **39** files. The growth is the cadence work, the fifth-rung registration,
-the HA enum reader and the dispatch contract — see [Progress §*2026-10-24 pass*](./energy-baseline-progress.md).
+the HA enum reader and the dispatch contract — see [Progress §*2026-10-24 pass*](energy-baseline-progress.md).
 
 ## 7. Status
 
@@ -366,7 +366,7 @@ the HA enum reader and the dispatch contract — see [Progress §*2026-10-24 pas
 | Leakage review | **not done** | An independent check of the fit-before-test and shared-noise invariants has **not** been performed on the *executed corrected* artifacts. The §5 defect is fixed and pinned by tests, but that is self-verification, not the outstanding independent review — so this row stays open and no result below may be cited as accepted. It bears less on the canonical rung than it did on the grid: the rung's defaults are the noise-free arm, and its promotion did not wait on this review |
 | Artifact identities | **superseded** | Dataset `da2ac07a…` is **no longer current**: the 0.80 config change supersedes it; the replacement is `2e01620ba72777ee8c25e5d8967151c095d2d5371450b85aecdbf7a8da69afd9` (70,176 rows, analysis content byte-identical to its 0.88 predecessor). Run directory `/tmp/opencode/energy-baseline/holdout-final-20261024T035727/` (`summary.json` + 81 rolling schedules + 3 `window_*_day_ahead.json` = 84 files). Outside git and outside the canonical store, so **not** immutable: re-derive to cite later. The earlier `holdout-bias-20261024T023833/`, `holdout-full-*` and `holdout-sigma0-*` directories predate the fix and are superseded (§11) |
 | Adoption decision | **taken — the policy is canonical** | This row read "**not done** — no adoption is recommended. One held-out quarter plus a few synthetic seeds is a screen, and §7's own review row is still open". That judgement is kept on record because it was the honest reading of a *screen*, and it still is one. What changed is that the adoption taken was adoption of the **mechanism** — a replanning rung with an earlier and longer information set — registered at exact prices on the legacy cadence, which is the arm that does not depend on synthetic noise at all. It is not an endorsement of §11's magnitudes, and it retires neither the leakage review nor the re-derivation the efficiency correction forces |
-| Final comparison table | **done, 0.88-era** | See §11 below. Every figure there was computed at `round_trip_efficiency: 0.88` on a dataset that config change has superseded, and before the rung was promoted: corrected full-year ladder figures are in [progress](./energy-baseline-progress.md) (run `f816306cb8ad46afbb49a77e73e5ff1a`); the 81-configuration holdout grid has not been re-executed at 0.80 |
+| Final comparison table | **done, 0.88-era** | See §11 below. Every figure there was computed at `round_trip_efficiency: 0.88` on a dataset that config change has superseded, and before the rung was promoted: corrected full-year ladder figures are in [progress](energy-baseline-progress.md) (run `f816306cb8ad46afbb49a77e73e5ff1a`); the 81-configuration holdout grid has not been re-executed at 0.80 |
 
 ## 8. Validation commands
 
@@ -566,7 +566,7 @@ given `(seed, date)` by construction, which is what isolates the profile effect.
    (σ, bias σ) combinations only two have all three seeds agree on second place. The gap between those
    two windows never approaches either the policy margin or the noise penalty. Record the contrast with
    the earlier rolling full-2025 sweep ([Progress §Forecast
-   experiments](./energy-baseline-progress.md#forecast-experiments)), where the 28-day window had the
+   experiments](energy-baseline-progress.md#forecast-experiments)), where the 28-day window had the
    lowest dispatch cost and longer history did not improve it. The two experiments differ in whether
    recent observations update the forecast, so they are not comparable and neither establishes a general
    ranking. **Forecast accuracy and dispatch value are different metrics** — any adoption rule keyed on
@@ -669,7 +669,7 @@ the grid supports; it is an offline conclusion about a simulated controller — 
 
 The prices published between 20:15 and 20:20 on day D−1 for delivery day D are the prices realised.
 This is the assumption `day_ahead` was recorded as making without evidence
-(§*Known issues §3* in [Progress](./energy-baseline-progress.md); ADR-0003 *Open validation item:
+(§*Known issues §3* in [Progress](energy-baseline-progress.md); ADR-0003 *Open validation item:
 day-ahead publication versus realised archive*). The owner assertion resolves that open validation
 item: published ≡ realised is now an owner-stated fact, `verified_from_data: false`.
 
@@ -703,15 +703,15 @@ margin figures are 0.88-era. A lower round-trip efficiency penalises cycling, wh
 information ladder and can reorder rungs; **whether it reorders this experiment's rolling-versus-`day_ahead`
 verdict is not known**, because the re-derivation has not run. Corrected dataset id:
 `2e01620ba72777ee8c25e5d8967151c095d2d5371450b85aecdbf7a8da69afd9`; corrected figures for the
-full-year ladder are in [progress](./energy-baseline-progress.md) but the 81-configuration holdout
+full-year ladder are in [progress](energy-baseline-progress.md) but the 81-configuration holdout
 grid has not been re-executed at 0.80. Full record in
-[Progress §*Round-trip efficiency applied (2026-10-24)*](./energy-baseline-progress.md) and ADR-0003
+[Progress §*Round-trip efficiency applied (2026-10-24)*](energy-baseline-progress.md) and ADR-0003
 §*Round-trip efficiency: 0.88 → 0.80, applied*.
 
 ## 13. References
 
-- [Progress & Handoff](./energy-baseline-progress.md) — authoritative run, acceptance conditions,
+- [Progress & Handoff](energy-baseline-progress.md) — authoritative run, acceptance conditions,
   rolling-history sensitivity
-- [ADR-0003 — Phase 1 measurement and baseline](../docs/adr/0003-phase1-measurement-and-baseline.md)
-- [Production execution plan](./energy-baseline-production-execution.md)
-- [Implementation plan](./home-battery-optimizer-implementation.md)
+- [ADR-0003 — Phase 1 measurement and baseline](../adr/0003-phase1-measurement-and-baseline.md)
+- [Production execution plan](https://github.com/pando85/homelab/blob/master/planning/energy-baseline-production-execution.md)
+- [Implementation plan](home-battery-optimizer-implementation.md)

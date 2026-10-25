@@ -4,7 +4,7 @@
 - **Date:** 2026-10-23
 - **Decision owners:** Homelab maintainers
 - **Extends:** [ADR-0001 — Forecast-informed economic dispatch](0001-home-battery-economic-dispatch.md)
-- **Implementation plan:** [Home battery optimizer](../../planning/home-battery-optimizer-implementation.md)
+- **Implementation plan:** [Home battery optimizer](../planning/home-battery-optimizer-implementation.md)
 - **Scope:** Phase 1 instrumentation/data contract and optional Phase 3 forecasting improvements; Phase 4 offline economic evaluation. No live dispatch change.
 
 ## Context
@@ -184,9 +184,9 @@ Test missing HA integrations, incomplete/misclassified events, paused/restarted/
 ## References
 
 - [ADR-0001 — Battery economic dispatch](0001-home-battery-economic-dispatch.md)
-- [Battery optimizer implementation plan](../../planning/home-battery-optimizer-implementation.md)
-- [Existing Home Assistant installation](../../apps/home-assistant/values.yaml)
-- [AppDaemon scheduler configuration](../../apps/home-assistant/appdaemon/apps/apps.yaml)
+- [Battery optimizer implementation plan](../planning/home-battery-optimizer-implementation.md)
+- [Existing Home Assistant installation](https://github.com/pando85/homelab/blob/master/apps/home-assistant/values.yaml)
+- [AppDaemon scheduler configuration](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/apps.yaml)
 - [Home Assistant REST API](https://developers.home-assistant.io/docs/api/rest/)
 - [Home Assistant WebSocket API](https://developers.home-assistant.io/docs/api/websocket/)
 - [NILMTK — Non-Intrusive Load Monitoring Toolkit](https://github.com/nilmtk/nilmtk)

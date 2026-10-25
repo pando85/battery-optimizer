@@ -8,8 +8,8 @@
   variant](#considered-and-deferred-a-day-ahead-informed-variant) was "considered and deferred".
   **This is superseded as of 2026-10-23:** the user approved implementation of a day-ahead policy
   (B2) as a new rung between causal and oracle. The policy is implemented in
-  `scripts/energy-baseline/src/energy_baseline/policies.py` (`policy_day_ahead`) and is **committed
-  at `c1569314`**. [ADR-0003](../docs/adr/0003-phase1-measurement-and-baseline.md) was amended the
+  `src/battery_optimizer/policies.py` (`policy_day_ahead`) and is **committed
+  at `c1569314`**. [ADR-0003](../adr/0003-phase1-measurement-and-baseline.md) was amended the
   same day: its set is now four policies *(five since 2026-10-24 — see the supersession note
   below)* and its status is **Accepted**, so every three-policy statement below is historical — and
   so are the four-policy ones, once that later date is accounted for. The analysis itself remains
@@ -17,7 +17,7 @@
   battery policy — but the day-ahead price
   variant it motivated is no longer deferred. The two **UNRESOLVED** items below
   (`min_hours_per_day` and the ESIOS day-boundary semantics) stay unresolved and now constrain how the
-  new rung may be read. See [energy-baseline-progress.md](./energy-baseline-progress.md) for current
+  new rung may be read. See [energy-baseline-progress.md](energy-baseline-progress.md) for current
   status.
 - **Supersession note (2026-10-24):** ADR-0003's ladder no longer has four rungs. `POLICY_NAMES` is
   the five-name tuple `('no_battery', 'causal_price', 'day_ahead', 'rolling_horizon', 'oracle')`, with
@@ -27,14 +27,14 @@
   it. This is an **insertion at rung 4, not a renumbering of rung 3** — `day_ahead` is still rung 3.
   Each four-rung statement below stays accurate for the date it carries and stale as a description of
   today, so they are kept as dated history with a note beside them rather than rewritten. See
-  [energy-baseline-progress.md](./energy-baseline-progress.md) and
-  [ADR-0003](../docs/adr/0003-phase1-measurement-and-baseline.md) for the current ladder.
-- **Extends:** [ADR-0003](../docs/adr/0003-phase1-measurement-and-baseline.md)
-- **Related:** [Production execution plan](./energy-baseline-production-execution.md), [Implementation plan](./home-battery-optimizer-implementation.md), [Progress & handoff](./energy-baseline-progress.md)
+  [energy-baseline-progress.md](energy-baseline-progress.md) and
+  [ADR-0003](../adr/0003-phase1-measurement-and-baseline.md) for the current ladder.
+- **Extends:** [ADR-0003](../adr/0003-phase1-measurement-and-baseline.md)
+- **Related:** [Production execution plan](https://github.com/pando85/homelab/blob/master/planning/energy-baseline-production-execution.md), [Implementation plan](home-battery-optimizer-implementation.md), [Progress & handoff](energy-baseline-progress.md)
 
 ## Purpose
 
-[ADR-0003](../docs/adr/0003-phase1-measurement-and-baseline.md) fixes exactly three benchmark
+[ADR-0003](../adr/0003-phase1-measurement-and-baseline.md) fixes exactly three benchmark
 policies: no-battery, causal simple price-based, and perfect-information oracle. **(Superseded
 2026-10-23: ADR-0003 now has four rungs; the day-ahead variant was adopted as rung 3. The analysis
 below remains valid as baseline context.)** **(Superseded again 2026-10-24: five rungs —
@@ -54,16 +54,16 @@ No code changes resulted from this investigation. See [Scope decision](#scope-de
 ## Verified findings
 
 Two apps under `apps/home-assistant/appdaemon/apps/` make price-based decisions. A third,
-[`last_connection_sensor.py`](../apps/home-assistant/appdaemon/apps/last_connection_sensor.py), is a
+[`last_connection_sensor.py`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/last_connection_sensor.py), is a
 one-minute heartbeat that writes `sensor.last_appdaemon_connection` and contains no price logic.
 
 Both decision apps read the **same entity**, `sensor.esios_pvpc`
-([`apps.yaml:10`](../apps/home-assistant/appdaemon/apps/apps.yaml),
-[`apps.yaml:28`](../apps/home-assistant/appdaemon/apps/apps.yaml)) — the `pvpc_updated` HACS
+([`apps.yaml:10`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/apps.yaml),
+[`apps.yaml:28`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/apps.yaml)) — the `pvpc_updated` HACS
 integration — and both read its **attribute dict `price_00h`…`price_23h`**, i.e. the full day-ahead
 curve for the current day, *not* the live state value.
-[`climate_control.py:73-91`](../apps/home-assistant/appdaemon/apps/climate_control.py) and
-[`dhw_control.py:76-94`](../apps/home-assistant/appdaemon/apps/dhw_control.py) each iterate
+[`climate_control.py:73-91`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py) and
+[`dhw_control.py:76-94`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py) each iterate
 `price_{i:02d}h` for `i in range(24)`.
 
 A grep for `battery|charge|discharge|soc|thermal|tank|water` across the appdaemon tree returns
@@ -73,82 +73,82 @@ A grep for `battery|charge|discharge|soc|thermal|tank|water` across the appdaemo
 
 | App | Actuator entity | Rule | Constants | Cadence | Causal? |
 |-----|-----------------|------|-----------|---------|---------|
-| `ClimateControl` ([`climate_control.py:31`](../apps/home-assistant/appdaemon/apps/climate_control.py)) | `input_select.heishamon_heatmode` — aerotherm HVAC mode ([`apps.yaml:14-18`](../apps/home-assistant/appdaemon/apps/apps.yaml)) | 7-day historical mean × 2/3 threshold; if fewer than `min_hours` clear it, fall back to pure rank `sorted(...)[:min_hours]` | threshold factor `2/3` ([`climate_control.py:197`](../apps/home-assistant/appdaemon/apps/climate_control.py)); `days=7` ([`climate_control.py:175`](../apps/home-assistant/appdaemon/apps/climate_control.py)); fallback price `0.09` €/kWh ([`apps.yaml:19`](../apps/home-assistant/appdaemon/apps/apps.yaml), [`climate_control.py:199`](../apps/home-assistant/appdaemon/apps/climate_control.py)) | daily `00:00:40` ([`climate_control.py:45`](../apps/home-assistant/appdaemon/apps/climate_control.py)) + on enable toggle | **Look-ahead** — full 24 h curve read at decision time |
-| `DHWControl` ([`dhw_control.py:34`](../apps/home-assistant/appdaemon/apps/dhw_control.py)) | `switch.aquarea_force_dhw_mode` — DHW tank boost ([`apps.yaml:32-34`](../apps/home-assistant/appdaemon/apps/apps.yaml)) | pure per-window argmin: split the day into fixed blocks, boost at the cheapest hour of each | `interval_hours` default 24, **deployed value 12** ([`apps.yaml:37`](../apps/home-assistant/appdaemon/apps/apps.yaml)); valid set `{1,2,3,4,6,8,12,24}` ([`dhw_control.py:154`](../apps/home-assistant/appdaemon/apps/dhw_control.py)) | daily `00:00:30` ([`dhw_control.py:48`](../apps/home-assistant/appdaemon/apps/dhw_control.py)) + on enable toggle | **Look-ahead** — full 24 h curve read at decision time |
+| `ClimateControl` ([`climate_control.py:31`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)) | `input_select.heishamon_heatmode` — aerotherm HVAC mode ([`apps.yaml:14-18`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/apps.yaml)) | 7-day historical mean × 2/3 threshold; if fewer than `min_hours` clear it, fall back to pure rank `sorted(...)[:min_hours]` | threshold factor `2/3` ([`climate_control.py:197`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)); `days=7` ([`climate_control.py:175`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)); fallback price `0.09` €/kWh ([`apps.yaml:19`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/apps.yaml), [`climate_control.py:199`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)) | daily `00:00:40` ([`climate_control.py:45`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)) + on enable toggle | **Look-ahead** — full 24 h curve read at decision time |
+| `DHWControl` ([`dhw_control.py:34`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py)) | `switch.aquarea_force_dhw_mode` — DHW tank boost ([`apps.yaml:32-34`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/apps.yaml)) | pure per-window argmin: split the day into fixed blocks, boost at the cheapest hour of each | `interval_hours` default 24, **deployed value 12** ([`apps.yaml:37`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/apps.yaml)); valid set `{1,2,3,4,6,8,12,24}` ([`dhw_control.py:154`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py)) | daily `00:00:30` ([`dhw_control.py:48`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py)) + on enable toggle | **Look-ahead** — full 24 h curve read at decision time |
 
 ### `climate_control.py` — hybrid threshold + rank
 
 - The historical pull is `get_history(entity_id=…, days=7, minimal_response=True, no_attributes=True)`
-  ([`climate_control.py:172-184`](../apps/home-assistant/appdaemon/apps/climate_control.py)), averaged
+  ([`climate_control.py:172-184`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)), averaged
   at line 194 and thresholded at line 197.
 - `price_10dma = mean([...])`
-  ([`climate_control.py:194`](../apps/home-assistant/appdaemon/apps/climate_control.py)) — **the
+  ([`climate_control.py:194`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)) — **the
   variable is misnamed: it is a 7-day mean, not a 10-day moving average.** Only `days=7` is passed
   and no windowing is applied to the list it averages.
 - `cheap_price_limit = price_10dma * 2 / 3`
-  ([`climate_control.py:197`](../apps/home-assistant/appdaemon/apps/climate_control.py)).
+  ([`climate_control.py:197`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)).
 - `cheapest_prices = list(filter(lambda x: x.value < cheap_price_limit, prices))` — strict `<`
-  ([`climate_control.py:206`](../apps/home-assistant/appdaemon/apps/climate_control.py)).
+  ([`climate_control.py:206`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)).
 - Branch: if `len(cheapest_prices) >= min_hours` → schedule exactly those hours; otherwise →
   `_cheaper_hours(prices, min_hours)`, which is `sorted(prices, key=lambda x: x.value)[:min_hours]`
   — pure rank, no threshold
-  ([`climate_control.py:110-111`](../apps/home-assistant/appdaemon/apps/climate_control.py),
-  [`climate_control.py:206-226`](../apps/home-assistant/appdaemon/apps/climate_control.py)).
+  ([`climate_control.py:110-111`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py),
+  [`climate_control.py:206-226`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)).
 - Past hours of the current day are skipped at execution, not re-run
-  ([`climate_control.py:272-276`](../apps/home-assistant/appdaemon/apps/climate_control.py)).
+  ([`climate_control.py:272-276`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)).
 
 ### `dhw_control.py` — pure argmin per fixed window
 
 - `interval_hours` is read with default 24
-  ([`dhw_control.py:153`](../apps/home-assistant/appdaemon/apps/dhw_control.py)); the **deployed
-  value is 12** ([`apps.yaml:37`](../apps/home-assistant/appdaemon/apps/apps.yaml)); anything outside
+  ([`dhw_control.py:153`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py)); the **deployed
+  value is 12** ([`apps.yaml:37`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/apps.yaml)); anything outside
   `{1,2,3,4,6,8,12,24}` is coerced back to 24
-  ([`dhw_control.py:154-156`](../apps/home-assistant/appdaemon/apps/dhw_control.py)).
+  ([`dhw_control.py:154-156`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py)).
 - `chunk_list(prices, interval_hours)` then `min(chunk, key=lambda x: x.value)` per block
-  ([`dhw_control.py:152-160`](../apps/home-assistant/appdaemon/apps/dhw_control.py)). No threshold,
+  ([`dhw_control.py:152-160`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py)). No threshold,
   no history, no mean — with `interval_hours: 12` the tank is boosted once in 00-11 h and once in
   12-23 h, at each block's cheapest hour.
 
 ### Cadence and causality
 
 Both apps schedule **once per day** — `00:00:40` for climate
-([`climate_control.py:45`](../apps/home-assistant/appdaemon/apps/climate_control.py)) and `00:00:30`
-for DHW ([`dhw_control.py:48`](../apps/home-assistant/appdaemon/apps/dhw_control.py)) — plus
+([`climate_control.py:45`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)) and `00:00:30`
+for DHW ([`dhw_control.py:48`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py)) — plus
 re-registration when the enable toggle flips. At that moment each fetches the full 24-hour curve and
 registers `run_at` timers for every future hour of the day.
 
 **This is look-ahead within the day:** at decision time the app already knows all 24 prices for that
 day. Neither app is strictly causal in the sense ADR-0003 requires of policy 2 ("uses only
 information causally available at decision time: current price and past state",
-[line 144](../docs/adr/0003-phase1-measurement-and-baseline.md); input rule at
-[line 100](../docs/adr/0003-phase1-measurement-and-baseline.md)).
+[line 144](../adr/0003-phase1-measurement-and-baseline.md); input rule at
+[line 100](../adr/0003-phase1-measurement-and-baseline.md)).
 
 ### Fallbacks
 
 - Climate
-  [`_register_fallback_schedule()`](../apps/home-assistant/appdaemon/apps/climate_control.py)
+  [`_register_fallback_schedule()`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)
   (call-site and retry at lines 153-164, definition at lines 250-257) runs the HVAC for `min_hours`
   from the *current* hour, then retries after 600 s.
 - On historical-data failure `cheap_price_limit` falls back to
   `fallback_cheap_electricity_price = 0.09` €/kWh
-  ([`apps.yaml:19`](../apps/home-assistant/appdaemon/apps/apps.yaml),
-  [`climate_control.py:199`](../apps/home-assistant/appdaemon/apps/climate_control.py)) with a
+  ([`apps.yaml:19`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/apps.yaml),
+  [`climate_control.py:199`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)) with a
   Telegram notice.
 - DHW fallback
-  ([`dhw_control.py:175-186`](../apps/home-assistant/appdaemon/apps/dhw_control.py)) forces every
+  ([`dhw_control.py:175-186`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py)) forces every
   window start, or fires immediately if all window starts have already passed
-  ([`dhw_control.py:183-184`](../apps/home-assistant/appdaemon/apps/dhw_control.py)).
+  ([`dhw_control.py:183-184`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py)).
 
 ### Negative prices are accepted, not rejected
 
 `negative_price_notification(prices)`
-([`utils.py:36-58`](../apps/home-assistant/appdaemon/apps/utils.py)) is purely informational and is
-called at [`climate_control.py:168-170`](../apps/home-assistant/appdaemon/apps/climate_control.py);
+([`utils.py:36-58`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/utils.py)) is purely informational and is
+called at [`climate_control.py:168-170`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py);
 DHW's `min(...)` naturally selects the most negative hour. Nothing filters on `>= 0`. This is the
 opposite of the dashboard `>= 0` guard ADR-0003 identifies as defective (line 31). Pinned by
-[`test_climate_control.py:168-202`](../apps/home-assistant/appdaemon/apps/tests/test_climate_control.py),
-[`test_dhw_control.py:96-102`](../apps/home-assistant/appdaemon/apps/tests/test_dhw_control.py),
-[`test_utils.py:75-108`](../apps/home-assistant/appdaemon/apps/tests/test_utils.py).
+[`test_climate_control.py:168-202`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/tests/test_climate_control.py),
+[`test_dhw_control.py:96-102`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/tests/test_dhw_control.py),
+[`test_utils.py:75-108`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/tests/test_utils.py).
 
 ### Not covered by any test
 
@@ -161,18 +161,18 @@ source, not by a test contract, so it can drift without a test failing.
 ### `min_hours_per_day` runtime value — UNRESOLVED
 
 `min_hours` comes from `input_number.appdaemon_climate_min_hours_per_day`
-([`climate_control.py:209`](../apps/home-assistant/appdaemon/apps/climate_control.py)). Its helper
+([`climate_control.py:209`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)). Its helper
 definition
-([`config/integrations/appdaemon_climate.yaml:7-11`](../apps/home-assistant/config/integrations/appdaemon_climate.yaml))
+([`config/integrations/appdaemon_climate.yaml:7-11`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/config/integrations/appdaemon_climate.yaml))
 sets `min: 0`, `max: 24`, `step: 1` with **no `initial`** key and no `restore` key either. The repo
 therefore declares a *range*, not a value. The live value is whatever the running Home Assistant
 instance holds — set at runtime through the UI/API, persisted in Home Assistant state that is not
 committed to this git repository.
 
 Evidence pointing to **15**:
-[`docs/troubleshooting/pvpc-updated-esios-api-zip-response.md:11`](../docs/troubleshooting/pvpc-updated-esios-api-zip-response.md)
+[`docs/troubleshooting/pvpc-updated-esios-api-zip-response.md:11`](https://github.com/pando85/homelab/blob/master/docs/troubleshooting/pvpc-updated-esios-api-zip-response.md)
 logs `Less than 15 hours of data available`, which is the exact message template emitted at
-[`climate_control.py:211-212`](../apps/home-assistant/appdaemon/apps/climate_control.py) with
+[`climate_control.py:211-212`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py) with
 `min_hours` interpolated.
 
 Weaknesses of that evidence, stated plainly:
@@ -182,11 +182,11 @@ Weaknesses of that evidence, stated plainly:
 - The message fires only on the `len(prices) < min_hours` path, i.e. during the ESIOS ZIP outage, so
   it reflects the value as at that incident — a value the UI can change at any time.
 - `min_hours` is re-read from HA state on every run
-  ([`climate_control.py:209`](../apps/home-assistant/appdaemon/apps/climate_control.py),
-  [`climate_control.py:251`](../apps/home-assistant/appdaemon/apps/climate_control.py)); nothing
+  ([`climate_control.py:209`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py),
+  [`climate_control.py:251`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)); nothing
   freezes it.
 - The test suite mocks it as `"4"`
-  ([`test_climate_control.py:560`](../apps/home-assistant/appdaemon/apps/tests/test_climate_control.py)),
+  ([`test_climate_control.py:560`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/tests/test_climate_control.py)),
   which is a fixture value and carries no information about production.
 
 **This is recorded as unresolved.** 15 is the best available inference, not an established fact, and
@@ -197,10 +197,10 @@ must not be written into any policy parameter or test fixture as if it were.
 Whether the sensor's `price_00h…price_23h` attributes at ~00:00 describe the day that has just
 started or the next day is not determinable from this repo. The AppDaemon code assumes whichever set
 the sensor delivers and re-labels it onto `datetime(now.year, now.month, now.day)` plus `i` hours
-([`climate_control.py:85`](../apps/home-assistant/appdaemon/apps/climate_control.py),
-[`dhw_control.py:88`](../apps/home-assistant/appdaemon/apps/dhw_control.py)), so the code cannot
+([`climate_control.py:85`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py),
+[`dhw_control.py:88`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py)), so the code cannot
 answer the question. It is already tracked as **TODO-0.4** in
-[`planning/home-battery-optimizer-implementation.md:45`](./home-battery-optimizer-implementation.md)
+[`planning/home-battery-optimizer-implementation.md:45`](home-battery-optimizer-implementation.md)
 ("whether today's/tomorrow's arrays match their validity interval"). It stays unresolved here, and it
 matters: the day-boundary convention decides which calendar day a reconstructed day-ahead curve
 belongs to.
@@ -214,8 +214,8 @@ this phase. The AppDaemon rule is recorded above as baseline context only.**
 policies — five since 2026-10-24, when `rolling_horizon` was promoted as rung 4 between `day_ahead`
 and `oracle`; see the supersession note above. The analysis above remains valid as baseline context
 for the `no_battery` and `causal_price` rungs, and the unresolved items below constrain how the new
-`day_ahead` rung may be read. See [ADR-0003](../docs/adr/0003-phase1-measurement-and-baseline.md) and
-[energy-baseline-progress.md](./energy-baseline-progress.md) for current status.)**
+`day_ahead` rung may be read. See [ADR-0003](../adr/0003-phase1-measurement-and-baseline.md) and
+[energy-baseline-progress.md](energy-baseline-progress.md) for current status.)**
 
 ### The premise was incorrect
 
@@ -282,8 +282,8 @@ statement about "AppDaemon already doing battery arbitrage" would be a category 
 **Status:** *Adopted 2026-10-23* — the day-ahead policy is now rung 3 of ADR-0003's ladder, which
 then had four rungs and has five since 2026-10-24; rung 3 is unchanged by that insertion (see the
 supersession note above).
-The analysis below is retained as historical context; see [ADR-0003](../docs/adr/0003-phase1-measurement-and-baseline.md)
-and [energy-baseline-progress.md](./energy-baseline-progress.md) for the current implementation.
+The analysis below is retained as historical context; see [ADR-0003](../adr/0003-phase1-measurement-and-baseline.md)
+and [energy-baseline-progress.md](energy-baseline-progress.md) for the current implementation.
 
 The household **demonstrably already has day-ahead prices available**. Both apps consume
 `price_00h…price_23h` on `sensor.esios_pvpc` at midnight, which is a full 24-point day-ahead curve
@@ -337,15 +337,15 @@ interpretation of the new rung.)**
 
 ## References
 
-- [ADR-0003 — Phase 1 measurement and baseline](../docs/adr/0003-phase1-measurement-and-baseline.md)
-- [ADR-0001 — Forecast-informed economic dispatch](../docs/adr/0001-home-battery-economic-dispatch.md)
-- [ADR-0002 — Appliance-aware load forecasting](../docs/adr/0002-appliance-aware-load-forecasting.md)
-- [Home battery optimizer implementation plan](./home-battery-optimizer-implementation.md)
-- [Production execution plan](./energy-baseline-production-execution.md)
-- [AppDaemon climate control source](../apps/home-assistant/appdaemon/apps/climate_control.py)
-- [AppDaemon DHW control source](../apps/home-assistant/appdaemon/apps/dhw_control.py)
-- [AppDaemon shared utilities](../apps/home-assistant/appdaemon/apps/utils.py)
-- [AppDaemon app configuration](../apps/home-assistant/appdaemon/apps/apps.yaml)
-- [AppDaemon helpers input_number definition](../apps/home-assistant/config/integrations/appdaemon_climate.yaml)
-- [AppDaemon negative prices](../docs/troubleshooting/appdaemon-pvpc-negative-prices.md)
-- [ESIOS ZIP response incident — source of the `min_hours` inference](../docs/troubleshooting/pvpc-updated-esios-api-zip-response.md)
+- [ADR-0003 — Phase 1 measurement and baseline](../adr/0003-phase1-measurement-and-baseline.md)
+- [ADR-0001 — Forecast-informed economic dispatch](../adr/0001-home-battery-economic-dispatch.md)
+- [ADR-0002 — Appliance-aware load forecasting](../adr/0002-appliance-aware-load-forecasting.md)
+- [Home battery optimizer implementation plan](home-battery-optimizer-implementation.md)
+- [Production execution plan](https://github.com/pando85/homelab/blob/master/planning/energy-baseline-production-execution.md)
+- [AppDaemon climate control source](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py)
+- [AppDaemon DHW control source](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py)
+- [AppDaemon shared utilities](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/utils.py)
+- [AppDaemon app configuration](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/apps.yaml)
+- [AppDaemon helpers input_number definition](https://github.com/pando85/homelab/blob/master/apps/home-assistant/config/integrations/appdaemon_climate.yaml)
+- [AppDaemon negative prices](https://github.com/pando85/homelab/blob/master/docs/troubleshooting/appdaemon-pvpc-negative-prices.md)
+- [ESIOS ZIP response incident — source of the `min_hours` inference](https://github.com/pando85/homelab/blob/master/docs/troubleshooting/pvpc-updated-esios-api-zip-response.md)

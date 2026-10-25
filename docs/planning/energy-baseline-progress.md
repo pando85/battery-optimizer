@@ -36,8 +36,8 @@
 | **Rolling-horizon policy** | **committed, five-policy run complete** | `rolling_horizon` is now the **fifth canonical policy** (`POLICY_NAMES` = `no_battery, causal_price, day_ahead, rolling_horizon, oracle`; `all` includes it), promoted from the [forecast experiments](energy-baseline-forecast-experiments.md) to ADR-0003's *Strategy comparison* rung 4. Canonical defaults: exact prices (`sigma = 0.0`, `bias_sigma = 0.0`, `seed = 0`) on the legacy two-publication cadence, horizon 96 slots. Five-policy run `f816306cb8ad…` executed on the rebuilt dataset `2e01620ba727…`, oracle certified. The causal load-forecast alignment has since landed and is the default load basis at the benchmark and CLI layer |
 | **Configurable replan cadence** | **committed, not validated on real data** | `replan_interval_slots` / `horizon_slots` implement ADR-0001 §3's "re-solve every 15 minutes over a rolling 24–48 h horizon, execute only the current interval". `replan_interval_slots=None` is the legacy schedule and is proven **bit-identical** to it by golden digests extracted from `HEAD` with `git show`; cadence 1 with `horizon_slots=96` is roughly **48× the solve count** (about **37× the wall time** — per-solve time is *lower* at a fine cadence, ~20 ms against ~25 ms, so wall time grows more slowly than solve count) |
 | **Oracle reference** | completed (0.88 era) | Certified in the earlier 11-month reference run **and** in the authoritative run (gap inside the 1e-06 tolerance at a 900 s limit) — see [Acceptance](#acceptance-conditional-accept). Certification is a property of the time limit, not of the efficiency, so the gate still works; the certified *numbers* are superseded |
-| **B3: HA enum state reader** | **done (no longer deferred)** | `src/energy_baseline/ha_states.py` plus the `ha-states` CLI subcommand. Reads the preserved appliance enum history and deduplicates **at read time** on `(entity, last_changed, last_updated, state, attributes_json)`; as-of queries are inclusive at the transition boundary and cannot leak a later transition into an earlier snapshot (ADR-0002's requirement). Verified live, read-only, against the real store: `parts=12 rows_before_dedup=51 rows_after_dedup=39 duplicates=12 entities=2`. Read-side only — it does not feed `build`, does not change `dataset_id`, and no appliance modelling, NILM or forecasting was built on it |
-| **Dispatch intent contract (TODO-4.6)** | **done, contract only** | `src/energy_baseline/dispatch.py`: typed, validated, canonically serialized `DispatchIntent` / `DispatchPlan` (interval, mode, target power, SOC target, expected price, confidence, generation instant, expiry, sequence). The clock is a **required caller argument with no default** — there is no fallback path to a wall clock, and a test walks the module's AST to prove no clock call and no `time`/`timeit` import, which holds against future edits rather than only against its author. Physics delegated to `battery.py`; the import ceiling stays an **observation**, never a rejection; `confidence` and `expected_buy_price_eur_per_kwh` are optional with absence distinguishable from a value. **No writer, no I/O, no CLI subcommand** |
+| **B3: HA enum state reader** | **done (no longer deferred)** | `src/battery_optimizer/ha_states.py` plus the `ha-states` CLI subcommand. Reads the preserved appliance enum history and deduplicates **at read time** on `(entity, last_changed, last_updated, state, attributes_json)`; as-of queries are inclusive at the transition boundary and cannot leak a later transition into an earlier snapshot (ADR-0002's requirement). Verified live, read-only, against the real store: `parts=12 rows_before_dedup=51 rows_after_dedup=39 duplicates=12 entities=2`. Read-side only — it does not feed `build`, does not change `dataset_id`, and no appliance modelling, NILM or forecasting was built on it |
+| **Dispatch intent contract (TODO-4.6)** | **done, contract only** | `src/battery_optimizer/dispatch.py`: typed, validated, canonically serialized `DispatchIntent` / `DispatchPlan` (interval, mode, target power, SOC target, expected price, confidence, generation instant, expiry, sequence). The clock is a **required caller argument with no default** — there is no fallback path to a wall clock, and a test walks the module's AST to prove no clock call and no `time`/`timeit` import, which holds against future edits rather than only against its author. Physics delegated to `battery.py`; the import ceiling stays an **observation**, never a rejection; `confidence` and `expected_buy_price_eur_per_kwh` are optional with absence distinguishable from a value. **No writer, no I/O, no CLI subcommand** |
 | **Battery-assumption guard** | **done** | `tests/test_benchmark.py::TestResolveBatteryAssumptions::test_shipped_tariff_battery_assumptions_are_pinned` pins the shipped battery block; see *Round-trip efficiency applied (2026-10-24)* |
 | **Round-trip efficiency 0.80** | **applied; dataset rebuilt** | `config/tariff.yaml` now ships `round_trip_efficiency: 0.80`; `config_hash` `41fdc30b…` → `7a901801…`; rebuilt as dataset `2e01620ba727…` — see *Round-trip efficiency applied (2026-10-24)* |
 | **Data extraction (Prometheus)** | completed | validate740: 4198469 rows, all pass |
@@ -322,7 +322,7 @@ five-policy run come after the commit that lands this change; their dataset and 
 were pending, and `--policies all` now selects five rungs rather than four. The rebuild has since completed: dataset `2e01620ba727…`, run `f816306cb8ad…`.
 
 ```bash
-cd scripts/energy-baseline
+cd scripts/energy-baseline   # historical: in this repository run from the repository root
 export ENERGY_BASELINE_DATA_DIR="$HOME/data/energy-baseline"
 DS="$ENERGY_BASELINE_DATA_DIR/analysis/v1/da2ac07a7a39affc43ef9e94523fb6a154ee6213d590086d8c261b265d957140"
 
@@ -340,6 +340,10 @@ uv run --locked energy-baseline report \
   --dataset "$DS" \
   --benchmark "$DS/benchmarks/b0a9b59aa846487a82d08fc4ba718708"
 ```
+
+In this repository the equivalent invocation is `uv run --locked battery-optimizer benchmark|report ...` with
+`BATTERY_OPTIMIZER_DATA_DIR` (the old `energy-baseline` entry point and `ENERGY_BASELINE_DATA_DIR` remain accepted as
+deprecated fallbacks; see [provenance](../provenance.md#environment-variable-and-cli-renames)).
 
 Neither command takes `--output`, and `build` takes `--start`/`--end`, not `--manifest`: artifacts are
 written under the data directory at content-addressed paths and only those paths are printed. The
@@ -386,7 +390,7 @@ One additive change; nothing else in the module was touched:
   now say five, with the four-rung wording left visible as the prior state. Neither amendment changed
   the ADR's Status line or its Definition-of-done semantics.
 - **B3 (HA appliance-state reader) is no longer deferred — it was built on 2026-10-24.** What exists is
-  `src/energy_baseline/ha_states.py` and the `ha-states` CLI subcommand: read-time dedup on the same
+  `src/battery_optimizer/ha_states.py` and the `ha-states` CLI subcommand: read-time dedup on the same
   `(entity, last_changed, last_updated, state, attributes_json)` identity the extractor uses, and
   as-of queries inclusive at the transition boundary so a snapshot structurally cannot see a later
   transition (ADR-0002's requirement). Verified live against the real store, read-only: `parts=12
@@ -403,7 +407,7 @@ One additive change; nothing else in the module was touched:
   not re-extractable. Now **readable** (see the B3 item above), and still consumed by nothing today;
   see ADR-0003 §*Appliance enum telemetry — resolved*
 - **A dispatch intent writer, device I/O, and a CLI subcommand for the contract.** The contract itself
-  (TODO-4.6) was built on 2026-10-24 as `src/energy_baseline/dispatch.py`; deliberately nothing writes,
+  (TODO-4.6) was built on 2026-10-24 as `src/battery_optimizer/dispatch.py`; deliberately nothing writes,
   nothing does I/O, and no subcommand was added, because the contract only has to be *capable* of
   supporting them. That remains the boundary ADR-0001 draws: the planner emits **requested** setpoints,
   one component may write setpoints at a time, and no hardware is authorized.
@@ -594,7 +598,7 @@ solve does not, at any cadence.
 
 ### Read-side HA enum reader, and the dispatch intent contract
 
-`src/energy_baseline/ha_states.py` (CLI subcommand `ha-states`) closes the long-deferred B3 item. It
+`src/battery_optimizer/ha_states.py` (CLI subcommand `ha-states`) closes the long-deferred B3 item. It
 reads the preserved Home Assistant appliance enum history and **deduplicates at read time** on
 `(entity, last_changed, last_updated, state, attributes_json)` — part files are immutable, so the 12
 known pre-dedup duplicate rows were deliberately left in place rather than rewriting history. As-of
@@ -605,7 +609,7 @@ read-only: `parts=12 rows_before_dedup=51 rows_after_dedup=39 duplicates=12 enti
 it does not feed `build`, does not change `dataset_id`, and no appliance modelling, NILM or forecasting
 was built on it.
 
-`src/energy_baseline/dispatch.py` closes TODO-4.6 as a **contract only**: a typed, validated, canonically
+`src/battery_optimizer/dispatch.py` closes TODO-4.6 as a **contract only**: a typed, validated, canonically
 serialized `DispatchIntent` / `DispatchPlan` carrying interval, mode (`idle`/`charge`/`discharge`),
 target power, SOC target, expected price, confidence, generation instant, expiry and sequence. Its clock
 is a **required caller argument with no default**, so there is no fallback path to a wall clock — and a
@@ -648,7 +652,7 @@ passing** at `90feb857`); the milestone itself is **1848 tests passing**. Nothin
 | Throughput-cost planning flag | `benchmark.py` / `oracle.py` / `--throughput-cost-eur-per-kwh` | Planning-only term; `0.0` default leaves plans bit-identical; never enters reported cost |
 | Artifact integrity | `artifact_integrity.py`, `hack/verify_artifacts.py` | Manifest sidecars. **Detects integrity, not authenticity** (no signature claim). Wired into the canonical benchmark and report writers |
 | Economic sensitivity | `economic_sensitivity.py`, `hack/economic_sensitivity.py` | Sweeps under **user-supplied hypothetical** costs; terminal optimization vs scoring separated; **no calibration**. Experiment module |
-| Replay runtime | `replay_runtime.py`, `src/energy_baseline/hack/replay_runtime_demo.py` | Deterministic plan content; record ids are per-run random (`generation_id` is `uuid.uuid4()`). **Recording-only sink; no writer, no HA adapter, not deployed** |
+| Replay runtime | `replay_runtime.py`, `src/battery_optimizer/hack/replay_runtime_demo.py` | Deterministic plan content; record ids are per-run random (`generation_id` is `uuid.uuid4()`). **Recording-only sink; no writer, no HA adapter, not deployed** |
 | Pre-migration validation runner | `hack/validate_pre_migration.py` | Multi-arm comparison harness (frozen vs causal, cadence 1/4/96/optional 192); quality gate in `report` mode. Executed |
 
 **Suite at this milestone:** **1848 tests passing**; `ruff check` clean; `ruff format --check` clean.
@@ -903,11 +907,11 @@ Protocol and limitations: [forecast experiments](energy-baseline-forecast-experi
 
 ## References
 
-- [ADR-0003 — Phase 1 measurement and baseline](../docs/adr/0003-phase1-measurement-and-baseline.md)
-- [ADR-0001 — Forecast-informed economic dispatch](../docs/adr/0001-home-battery-economic-dispatch.md)
+- [ADR-0003 — Phase 1 measurement and baseline](../adr/0003-phase1-measurement-and-baseline.md)
+- [ADR-0001 — Forecast-informed economic dispatch](../adr/0001-home-battery-economic-dispatch.md)
 - [Battery controller component roadmap](energy-battery-roadmap.md) — the component view of the same
   work: what each piece is, its state, and what is hardware-gated
 - [Forecast experiments protocol and results](energy-baseline-forecast-experiments.md)
-- [AppDaemon baseline context](./energy-baseline-appdaemon-baseline-context.md)
-- [Production execution plan](./energy-baseline-production-execution.md)
-- [Implementation plan](./home-battery-optimizer-implementation.md)
+- [AppDaemon baseline context](energy-baseline-appdaemon-baseline-context.md)
+- [Production execution plan](https://github.com/pando85/homelab/blob/master/planning/energy-baseline-production-execution.md)
+- [Implementation plan](home-battery-optimizer-implementation.md)
