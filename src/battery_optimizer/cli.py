@@ -95,6 +95,45 @@ def _add_forecast_eval_parser(subs: Any) -> None:
     p.add_argument("--seed", type=int, default=None, help="Bootstrap seed (20261025)")
 
 
+def _add_price_eval_parser(subs: Any) -> None:
+    """The ``price-eval`` subcommand (PO-A of the price-outlook plan)."""
+    p = subs.add_parser(
+        "price-eval",
+        help="Pre-registered price-outlook evaluation: paired EUR against exact and "
+        "published_only, action differences and estimate metrics",
+    )
+    _add_common(p)
+    p.add_argument("--dataset", required=True, help="Built dataset directory")
+    p.add_argument(
+        "--name",
+        required=True,
+        help="Run name; the run is written to <dataset>/price-eval/<name>-<UTC timestamp>",
+    )
+    p.add_argument(
+        "--outlook",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help="Registered price outlook to evaluate (repeatable; default: exact, "
+        "published_only, persistence). exact and published_only are always the references",
+    )
+    p.add_argument(
+        "--period",
+        action="append",
+        default=None,
+        metavar="LABEL",
+        help="Evaluation period label (repeatable; default: every P0 period: 2025, 2026-01..09)",
+    )
+    p.add_argument(
+        "--reference-summary",
+        default=None,
+        help="forecast-eval summary.json: its trailing_mean benchmark runs are checked for "
+        "bit-identity against this run's exact rolling-horizon schedule",
+    )
+    p.add_argument("--resamples", type=int, default=None, help="Bootstrap resamples (10000)")
+    p.add_argument("--seed", type=int, default=None, help="Bootstrap seed (20261025)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -194,6 +233,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- forecast-eval ----------------------------------------------------
     _add_forecast_eval_parser(subs)
+
+    # -- price-eval -------------------------------------------------------
+    _add_price_eval_parser(subs)
 
     # -- benchmark --------------------------------------------------------
     p_bench = subs.add_parser("benchmark", help="Run policy benchmarks on a dataset")
@@ -414,6 +456,17 @@ def build_parser() -> argparse.ArgumentParser:
         "ORACLE that hands the planner the measured load, for headroom measurement only. "
         "--day-ahead-forecast-window-days feeds any forecaster with a window. Recorded in "
         "the run lineage, and in the run identity whenever it is not the default",
+    )
+    p_bench.add_argument(
+        "--rolling-horizon-price-outlook",
+        default=None,
+        metavar="NAME",
+        help="Registered price outlook for the unpublished part of each rolling-horizon plan "
+        "(default: exact, tomorrow's realized prices at 14:00, an upper bound). "
+        "'published_only' plans only through the last published price, like the live "
+        "service; 'persistence' estimates tomorrow as today's price at the same local time. "
+        "Non-default outlooks need the legacy cadence and zero sigma/bias, and enter the run "
+        "identity",
     )
     p_bench.add_argument(
         "--throughput-cost-eur-per-kwh",
@@ -986,6 +1039,31 @@ def cmd_forecast_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_price_eval(args: argparse.Namespace) -> int:
+    """Run a pre-registered price-outlook evaluation into the private data dir."""
+    from battery_optimizer import forecast_eval, price_eval
+    from battery_optimizer.config import resolve_config_path
+
+    known = {p.label: p for p in forecast_eval.DEFAULT_PERIODS}
+    labels = args.period or list(known)
+    unknown = [label for label in labels if label not in known]
+    if unknown:
+        raise ValueError(f"unknown period(s) {unknown}; known: {sorted(known)}")
+    run_dir = price_eval.run_price_eval(
+        dataset=args.dataset,
+        config_path=resolve_config_path(args.config),
+        name=args.name,
+        outlooks=args.outlook or list(price_eval.DEFAULT_OUTLOOKS),
+        periods=[known[label] for label in labels],
+        reference_summary=args.reference_summary,
+        resamples=_or_default(args.resamples, forecast_eval.DEFAULT_RESAMPLES),
+        seed=_or_default(args.seed, forecast_eval.DEFAULT_SEED),
+        data_dir=args.data_dir,
+    )
+    print(f"price-eval: run directory: {run_dir}")
+    return 0
+
+
 def _or_default(value: float | int | None, default: float | int) -> float | int:
     """Take the module's default when the flag was not given (0 is a real value)."""
     return default if value is None else value
@@ -1054,6 +1132,9 @@ def _benchmark_kwargs(args: argparse.Namespace, benchmark: Any) -> dict[str, Any
         ),
         "throughput_cost_eur_per_kwh": _or_default(args.throughput_cost_eur_per_kwh, 0.0),
         "load_forecaster": args.load_forecaster or benchmark.DEFAULT_LOAD_FORECASTER,
+        "rolling_horizon_price_outlook": (
+            args.rolling_horizon_price_outlook or benchmark.DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK
+        ),
         "eval_end": args.eval_end,
         "data_dir": args.data_dir,
     }
@@ -1423,6 +1504,7 @@ _HANDLERS = {
     "build-features": cmd_build_features,
     "decompose-load": cmd_decompose_load,
     "forecast-eval": cmd_forecast_eval,
+    "price-eval": cmd_price_eval,
     "benchmark": cmd_benchmark,
     "report": cmd_report,
     "inspect-sql": cmd_inspect_sql,

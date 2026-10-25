@@ -117,6 +117,13 @@ from .policies import (
     _clip_plan_to_model_bounds,
     contiguous_day_bounds,
 )
+from .price_outlook import (
+    DEFAULT_PRICE_OUTLOOK,
+    get_price_outlook,
+    published_end_idx,
+    resolve_price_outlook_params,
+    run_price_outlook,
+)
 
 __all__ = [
     "LOAD_FORECAST_MODE_CAUSAL",
@@ -1515,6 +1522,8 @@ def run_rolling_horizon(
     forecast_window_days: int = 28,
     load_forecaster: str = DEFAULT_LOAD_FORECASTER,
     load_forecaster_params: Mapping[str, Any] | None = None,
+    price_outlook: str = DEFAULT_PRICE_OUTLOOK,
+    price_outlook_params: Mapping[str, Any] | None = None,
 ) -> RollingResult:
     """Run the rolling horizon dispatcher.
 
@@ -1574,6 +1583,16 @@ def run_rolling_horizon(
     refused there rather than silently ignored, and so are ``load_forecaster_params``
     (overrides of that forecaster's params).
 
+    ``price_outlook`` (default ``"exact"``) names the registered price outlook
+    (:mod:`battery_optimizer.price_outlook`) that fills the unpublished part of each plan.
+    ``exact`` is the canonical upper bound and keeps the run bit-identical to the
+    pre-seam code, the sigma / bias noise channels included.  Any other outlook gets only
+    the prices published at the decision instant (PVPC for D+1 from
+    :data:`~battery_optimizer.price_outlook.PVPC_NEXT_DAY_PUBLISHED_FROM`), and each plan
+    stops at the first slot the outlook marks ``unavailable``: the energy left there is
+    valued at ``terminal_value_eur_per_kwh``, like the live service at its last published
+    price.  Non-``exact`` outlooks need the legacy cadence and no synthetic noise.
+
     Cost is always computed against TRUE prices and actual grid import.
 
     **Cost of a run is visible in the artifact**: ``telemetry["solve_count"]``
@@ -1600,6 +1619,21 @@ def run_rolling_horizon(
     if forecast_window_days < 1:
         raise ValueError(f"forecast_window_days must be >= 1, got {forecast_window_days}")
     get_forecaster(load_forecaster)  # unknown names fail before any work
+    outlook = get_price_outlook(price_outlook)
+    outlook_params = resolve_price_outlook_params(price_outlook, price_outlook_params)
+    exact_outlook = price_outlook == DEFAULT_PRICE_OUTLOOK and not outlook_params
+    if not exact_outlook:
+        if sigma != 0.0 or bias_sigma != 0.0:
+            raise ValueError(
+                f"price_outlook={price_outlook!r} needs sigma=0 and bias_sigma=0: the synthetic "
+                "noise channels model an estimate of the exact outlook only"
+            )
+        if replan_interval_slots is not None:
+            raise ValueError(
+                f"price_outlook={price_outlook!r} needs the legacy 14:00 / 20:30 cadence: a "
+                "finer cadence would put decisions between the 20:15 publication and the "
+                "20:30 boundary the noise model uses"
+            )
     if load_forecast_mode != LOAD_FORECAST_MODE_CAUSAL and (
         load_forecaster != DEFAULT_LOAD_FORECASTER or load_forecaster_params
     ):
@@ -1665,6 +1699,7 @@ def run_rolling_horizon(
 
     # Generate noisy prices for the full dataset
     day_bounds = contiguous_day_bounds(list(local_days))
+    outlook_totals = {"estimated": 0, "unavailable": 0, "events_truncated": 0}
     noisy_prices, noise_meta = generate_price_noise(
         prices,
         local_days,
@@ -1715,8 +1750,33 @@ def run_rolling_horizon(
     planned_multiplicity = np.zeros(n_eval, dtype=int)
 
     for ev in events:
+        # The price outlook decides how far this plan may reach.  ``exact`` reaches the
+        # whole event horizon (prices built below exactly as before the seam); any other
+        # outlook stops at its first unavailable slot.
+        plan_end_idx = ev.plan_end_idx
+        outlook_result = None
+        if not exact_outlook:
+            outlook_result = run_price_outlook(
+                price_outlook,
+                prices=prices,
+                published_end_idx=published_end_idx(
+                    interval_starts_utc[ev.start_idx], day_bounds, tz
+                ),
+                decision_idx=ev.start_idx,
+                plan_end_idx=ev.plan_end_idx,
+                interval_starts_utc=interval_starts_utc,
+                days=day_bounds,
+                tz=tz,
+                params=outlook_params,
+            )
+            plan_end_idx = outlook_result.usable_end_idx
+            if plan_end_idx < ev.exec_end_idx:
+                raise ValueError(
+                    f"price outlook {price_outlook!r} leaves event {ev.index} ({ev.kind}, "
+                    f"{ev.local_day}) without prices for part of its execution window"
+                )
         lo = ev.start_idx - eval_start_idx  # relative to eval window
-        plan_end_rel = ev.plan_end_idx - eval_start_idx
+        plan_end_rel = plan_end_idx - eval_start_idx
         exec_end_rel = ev.exec_end_idx - eval_start_idx
         exact_end_rel = ev.prices_exact_end_idx - eval_start_idx
 
@@ -1745,9 +1805,20 @@ def run_rolling_horizon(
             "degradation": "none",
             "note": None,
         }
+        if outlook_result is not None:
+            counts = outlook_result.counts()
+            record["estimated_price_intervals"] = counts["estimated"]
+            record["unavailable_price_intervals"] = counts["unavailable"]
+            record["planned_through_idx"] = plan_end_idx
+            record["plan_prices_sha256"] = hashlib.sha256(
+                np.ascontiguousarray(outlook_result.usable_values, dtype=">f8").tobytes()
+            ).hexdigest()
+            outlook_totals["estimated"] += counts["estimated"]
+            outlook_totals["unavailable"] += counts["unavailable"]
+            outlook_totals["events_truncated"] += int(plan_end_idx < ev.plan_end_idx)
 
         # Check usability
-        plan_usable = usable[ev.start_idx : ev.plan_end_idx]
+        plan_usable = usable[ev.start_idx : plan_end_idx]
         if not plan_usable.any():
             counters["skipped_no_usable"] += 1
             record["degradation"] = "skipped_no_usable"
@@ -1760,20 +1831,23 @@ def run_rolling_horizon(
             per_event.append(record)
             continue
 
-        # Build planning prices: exact until prices_exact_end_idx, noisy after
-        plan_prices = np.empty(m, dtype=float)
-        exact_m = exact_end_rel - lo
-        exact_m = max(0, min(exact_m, m))
-        plan_prices[:exact_m] = prices[ev.start_idx : ev.start_idx + exact_m]
-        if exact_m < m:
-            plan_prices[exact_m:] = noisy_prices[ev.start_idx + exact_m : ev.plan_end_idx]
+        if outlook_result is not None:
+            plan_prices = np.array(outlook_result.usable_values, dtype=float)
+        else:
+            # Build planning prices: exact until prices_exact_end_idx, noisy after
+            plan_prices = np.empty(m, dtype=float)
+            exact_m = exact_end_rel - lo
+            exact_m = max(0, min(exact_m, m))
+            plan_prices[:exact_m] = prices[ev.start_idx : ev.start_idx + exact_m]
+            if exact_m < m:
+                plan_prices[exact_m:] = noisy_prices[ev.start_idx + exact_m : ev.plan_end_idx]
 
         # Build load forecast: causal mode computes per-event, frozen uses precomputed array
         if causal_provider is not None:
             # Causal mode: compute forecast for this event using only data before the
             # event's local-day start (conservative day-ahead basis; no future vintage).
             event_forecast, event_forecast_meta = causal_provider.forecast_for_event(ev)
-            plan_forecast = event_forecast[ev.start_idx : ev.plan_end_idx]
+            plan_forecast = event_forecast[ev.start_idx : plan_end_idx]
             causal_events_served += 1
             # B8: Count events with zero usable training support (visible, not refused).
             if not event_forecast_meta.get("training_usable_support", True):
@@ -1798,7 +1872,7 @@ def run_rolling_horizon(
                 forecast_metadata["first_event_kind"] = ev.kind
         else:
             # Frozen mode: use the precomputed array
-            plan_forecast = frozen_load[ev.start_idx : ev.plan_end_idx]
+            plan_forecast = frozen_load[ev.start_idx : plan_end_idx]
 
         # Construct spec with carried SOC
         carried_frac = min(max(carried_kwh / capacity, soc_min_frac), soc_max_frac)
@@ -1816,8 +1890,8 @@ def run_rolling_horizon(
         # Measured horizon (for clipping and scoring)
         measured_horizon = Horizon(
             interval_seconds=interval_seconds,
-            prices=prices[ev.start_idx : ev.plan_end_idx],
-            load_kwh=load_kwh[ev.start_idx : ev.plan_end_idx],
+            prices=prices[ev.start_idx : plan_end_idx],
+            load_kwh=load_kwh[ev.start_idx : plan_end_idx],
             usable=plan_usable,
             import_limit_kw=import_limit_kw,
         )
@@ -1987,6 +2061,14 @@ def run_rolling_horizon(
         "load_forecast_mode": load_forecast_mode,
         "per_event": per_event,
     }
+    if not exact_outlook:
+        # Only a non-default outlook adds keys, so the canonical telemetry is unchanged.
+        telemetry["price_outlook"] = {
+            **outlook.provenance(outlook_params),
+            "estimated_price_intervals_planned": outlook_totals["estimated"],
+            "unavailable_price_intervals_dropped": outlook_totals["unavailable"],
+            "events_planned_short_of_their_horizon": outlook_totals["events_truncated"],
+        }
 
     return RollingResult(
         schedule=traced,
