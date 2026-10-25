@@ -1,0 +1,52 @@
+name: Pre-commit
+
+"on":
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # Check the PR head itself, not the synthetic merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: ./.github/actions/setup-uv
+
+      - name: Cache pre-commit hooks
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit-
+
+      - name: Run commit-msg hooks for PR commits
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          msg_file=$(mktemp)
+          for commit in $(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA"); do
+            echo "Checking commit $commit"
+            git show --no-patch --format=%B "$commit" > "$msg_file"
+            uv run --only-group tools pre-commit run --hook-stage commit-msg \
+              --commit-msg-filename "$msg_file" --verbose
+          done
+
+      - name: Run pre-commit
+        run: uv run --only-group tools pre-commit run --all-files --show-diff-on-failure --verbose
