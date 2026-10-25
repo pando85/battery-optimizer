@@ -673,7 +673,7 @@ def _manifest_claimed_parts(root: Path, index: StoredRowIndex) -> set[str]:
     for path in sorted(manifests_dir.glob("*.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         if not isinstance(data, dict) or data.get("source") != SOURCE:
             continue

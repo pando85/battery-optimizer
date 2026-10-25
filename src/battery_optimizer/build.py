@@ -2092,7 +2092,7 @@ def _parse_window_bound(value: object) -> datetime | None:
         return None
     try:
         return parse_utc(value, name="window")
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
 
@@ -2289,7 +2289,7 @@ def _fold_into_audit(
         key = (row["entity"], row["metric"])
         try:
             labels = json.loads(row["labels_json"])
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         if not isinstance(labels, dict):
             continue

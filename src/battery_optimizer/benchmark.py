@@ -822,7 +822,7 @@ def _float_of(value: Any) -> float | None:
         return None
     try:
         out = float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     return out if math.isfinite(out) else None
 
@@ -1762,7 +1762,7 @@ def _oracle_kwargs(
     kwargs: dict[str, Any] = {"time_limit_s": time_limit_s, "mip_rel_gap": rel, "mip_abs_gap": abs_}
     try:
         params = inspect.signature(solve_oracle).parameters
-    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+    except TypeError, ValueError:  # pragma: no cover - exotic callables
         params = {}
     if "throughput_cost_eur_per_kwh" in params:
         kwargs["throughput_cost_eur_per_kwh"] = float(throughput_cost_eur_per_kwh)

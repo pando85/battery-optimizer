@@ -568,7 +568,7 @@ def _horizon_scope_note(run: _Run) -> str:
                 datetime.fromisoformat(start).astimezone(zone),
                 datetime.fromisoformat(end).astimezone(zone),
             )
-        except (ValueError, TypeError, ZoneInfoNotFoundError):  # pragma: no cover
+        except ValueError, TypeError, ZoneInfoNotFoundError:  # pragma: no cover
             bounds = None
     if bounds is None:  # pragma: no cover - payload without a pinned timezone
         return (

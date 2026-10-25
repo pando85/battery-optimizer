@@ -179,7 +179,7 @@ def _get_code_version() -> tuple[str | None, bool | None]:
         )
         dirty = bool(dirty_output.strip())
         return rev, dirty
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except subprocess.CalledProcessError, FileNotFoundError:
         return _build_time_code_version() or (None, None)
 
 

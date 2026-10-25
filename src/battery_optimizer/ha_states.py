@@ -200,7 +200,7 @@ def _parse_attributes(attributes_json: str | None) -> dict | None:
         if isinstance(result, dict):
             return result
         return None
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except json.JSONDecodeError, TypeError, ValueError:
         return None
 
 

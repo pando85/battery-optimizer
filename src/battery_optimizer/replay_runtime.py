@@ -845,7 +845,7 @@ class ReplayRuntime:
             if task is not None and not task.done():
                 try:
                     await asyncio.shield(task)
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError, Exception:
                     pass
 
         try:

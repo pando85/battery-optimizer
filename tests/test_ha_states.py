@@ -53,7 +53,7 @@ def _make_state(
             parsed = json.loads(attributes_json)
             if isinstance(parsed, dict):
                 attrs = parsed
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except json.JSONDecodeError, TypeError, ValueError:
             pass
     return HAState(
         entity=entity,
