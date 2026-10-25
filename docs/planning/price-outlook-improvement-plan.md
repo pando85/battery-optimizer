@@ -1,9 +1,11 @@
 # Price Outlook — improvement plan
 
 - **Status (2026-10-25):** PO-A done, **gate GA failed**: knowing tomorrow's prices at 14:00 is worth
-  very little to dispatch. PO-B shipped in 0.3.0 and is collecting. The OMIE source is extracted and
-  backfilled (`extract --source omie`). PO-C, PO-D and PO-E are **deferred**; Load Forecaster P4
-  proceeds without them. Refines the
+  very little to dispatch. PO-B shipped in 0.3.0 and is collecting. **PO-C was restarted the same
+  day** because Load Forecaster P4 met its restart condition (the 14:00 schedule guess on
+  `persistence` prices misses 17-24 % of the measured climate energy, see the
+  [Load Forecaster plan](load-forecaster-improvement-plan.md)); it is built (`omie_outlook.py`) and
+  evaluated, **gate GC passed** (see §PO-C). PO-D and PO-E stay **deferred**. Refines the
   [Price Outlook roadmap](components/price-outlook.md) stages PO-1…PO-4 into executable phases.
 - **Why now:** P4 of the [Load Forecaster plan](load-forecaster-improvement-plan.md) replays
   AppDaemon's price-driven heat-pump schedule. At the 14:00 decision tomorrow's PVPC is not
@@ -71,14 +73,73 @@ PO-D scenarios (optional) ──────────────────
   Both are read-only, and the weather archive needs the `ha_guard` allowlist to permit
   `weather.get_forecasts`.
 
-### PO-C — OMIE-based next-day estimator (offline, ≈3–4 days) — deferred after GA
+### PO-C — OMIE-based next-day estimator (offline) — restarted and built 2026-10-25
 
-> Deferred 2026-10-25. Revisit only if Load Forecaster P4 shows that its 14:00 guess of tomorrow's
-> heat-pump schedule (from `persistence` prices) costs material money. The OMIE extract source and
-> its 2024-01-01 onward backfill already exist (`extract --source omie`, `omie_prices.py`, as-of
-> 13:30 local), so restarting PO-C needs only the estimator and its evaluation.
+> Deferred after GA on 2026-10-25 and restarted the same day: Load Forecaster P4 showed that its
+> 14:00 guess of tomorrow's heat-pump schedule (from `persistence` prices) is what keeps the
+> structured forecaster from winning in the heating season. The OMIE extract source and its
+> 2024-01-01 onward backfill already existed (`extract --source omie`, `omie_prices.py`, as-of
+> 13:30 local), so the work was the estimators and their evaluation.
 
-- **Data:**
+**Built** (`omie_outlook.py`, registered in the price-outlook seam; evaluated by `price-eval`):
+
+| Name | Built | Notes |
+|---|---|---|
+| `omie_period` | yes | `PVPC_hour = beta * mean(OMIE ES over the hour) + intercept(2.0TD period)`: one slope and one intercept per period (P3 is also weekends and the nine national fixed-date holidays), least squares on the hourly prices of the last 28 fully published local days |
+| `omie_period_month` | yes | The same with a level offset per calendar month of a 120-day window, predicted at the latest month's level |
+| `omie_quantile` | **no** | It exists to feed PO-D, which stays deferred after GA |
+
+- **Seam.** An outlook registered with `needs_omie=True` receives the OMIE series as a side input
+  (`OutlookSide`), cut by the seam at the first OMIE day not yet usable at the decision
+  (`omie_end_idx`, D+1 from 13:30 local on D), as it cuts the published PVPC. Before 13:30 the event
+  falls back to `published_only`. A missing side input, a missing OMIE quarter in a target hour, or
+  fewer than 7 published days in the fit window leaves the slot `unavailable` (the
+  `published_only` behaviour), with the reason recorded per event and counted in the telemetry.
+- **Leakage tests** (`tests/test_omie_outlook.py`): an OMIE day that is not usable at the decision,
+  and any realized PVPC after the publication boundary, cannot change the estimate; D+1's OMIE
+  changes it from 13:30 and not before; the seam's cut and `omie_prices.omie_usable_from` are one
+  rule; the dispatcher plans on the estimate and records the side input.
+- **Fit windows chosen on 2024 data only, before the 2025 and 2026 evaluation was run.** On the
+  274 days of 2024-04-01 to 2024-12-31 (14:00 events, price metrics of `price-eval`; no 2025 or 2026
+  row was read for this): `omie_period` windows 14, 28, 56 and 91 days gave a price MAE within
+  8 % of each other, the lowest at 28 days (14 days a close second); within-day Spearman and the
+  cheapest-10 overlap were equal to two decimals, so **28 days** was kept. `omie_period_month`
+  windows 56, 91 and 120 days gave MAE decreasing with the window, so **120 days** was kept (the
+  longest the 2024 history allows before the first evaluated day, so the grid edge, not an
+  interior optimum). On the same 2024 days `persistence` had an MAE about four times larger.
+  The choice rule (lowest MAE; ties on rank metrics go to the shorter window) was stated after
+  looking at the 2024 table, not before; it only used 2024 rows.
+
+**Result (2026-10-25, private run `price-eval/po-c-*`, pre-registered with gate GC before any
+benchmark ran; relative figures only).** 2025 and 2026-01...09, 14:00 events, OMIE complete over both
+periods (no fallback event).
+
+- **Gate GC passed** for both estimators: in both periods each beats `persistence` on within-day
+  rank, on the cheapest-10 overlap, on the replayed climate-mask overlap and on the climate energy
+  inside the replayed mask. The dispatch criterion of the gate is not applied because GA failed.
+- **Price estimate.** The mean absolute error of `omie_period` is about half of `persistence`'s
+  (51 % in 2025, 46 % in 2026), with a small bias (a slight over-estimate in 2026, under a quarter
+  of the error). Within-day Spearman, mean (median): 0.95 (0.98) in 2025 and 0.93 (0.97) in 2026,
+  against 0.70 (0.84) and 0.75 (0.87) for `persistence`. Overlap of the 10 cheapest hours: 93 % and
+  92 % against 74 % and 76 %; of the 4 most expensive: 90 % and 90 % against 73 % and 77 %. On the
+  four 2026 days with a negative price the error is about a third of `persistence`'s. On the three
+  DST days of the periods the estimators are **not** better than `persistence` (a sample of three).
+- **Overlap with the AppDaemon rule's hours (what P4 needs).** Replaying `climate_control` on the
+  estimate against on the realized prices, over the 223-227 days per period with a schedule: mean
+  hour overlap (Jaccard) 0.89 and 0.93 against 0.67 and 0.76 for `persistence`. The share of measured
+  climate energy that falls inside the replayed hours is **92 % and 94 %** against **76 % and 83 %**
+  for `persistence`; with the realized prices it would be 97 % and 98 %. So `omie_period` closes
+  about three quarters of the gap between persistence and perfect price knowledge, in both periods.
+- **Variants.** `omie_period_month` is indistinguishable on every metric (mask overlap 93 % and
+  94 % of the climate energy, price error within 5 % of `omie_period`), so the simpler `omie_period`
+  stays the one P4 uses.
+- **Dispatch (information only).** In 2025 `omie_period` captures about 70 % of the GA gap, with an
+  interval that touches zero; in 2026 it captures none, but that period's gap is itself
+  indistinguishable from zero. GA stays failed: the estimate is for the load forecaster, not the MPC.
+
+**Original spec (kept for reference).**
+
+- **Data** (built before, PR #24):
   - A new `extract` source `omie` writes the public day-ahead files into the raw store with
     manifests and hashes, covering 2024-01 to now.
   - Parse the hourly files before 2025-10 and the quarter-hour files after it, map them to UTC

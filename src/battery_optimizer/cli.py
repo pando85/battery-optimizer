@@ -153,6 +153,18 @@ def _add_price_eval_parser(subs: Any) -> None:
         help="forecast-eval summary.json: its trailing_mean benchmark runs are checked for "
         "bit-identity against this run's exact rolling-horizon schedule",
     )
+    p.add_argument(
+        "--features",
+        default=None,
+        metavar="ID",
+        help="Feature set id (build-features): adds the replayed AppDaemon climate-mask "
+        "overlap of each outlook's estimate against the realized prices",
+    )
+    p.add_argument(
+        "--label",
+        default=None,
+        help="Free text recorded in the pre-registration (for example the role of the run)",
+    )
     p.add_argument("--resamples", type=int, default=None, help="Bootstrap resamples (10000)")
     p.add_argument("--seed", type=int, default=None, help="Bootstrap seed (20261025)")
 
@@ -492,7 +504,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Registered price outlook for the unpublished part of each rolling-horizon plan "
         "(default: exact, tomorrow's realized prices at 14:00, an upper bound). "
         "'published_only' plans only through the last published price, like the live "
-        "service; 'persistence' estimates tomorrow as today's price at the same local time. "
+        "service; 'persistence' estimates tomorrow as today's price at the same local time; "
+        "'omie_period' and 'omie_period_month' estimate it from OMIE's day-ahead price (usable "
+        "from 13:30 local, read from the verified OMIE store). "
         "Non-default outlooks need the legacy cadence and zero sigma/bias, and enter the run "
         "identity",
     )
@@ -1132,6 +1146,8 @@ def cmd_price_eval(args: argparse.Namespace) -> int:
         resamples=_or_default(args.resamples, forecast_eval.DEFAULT_RESAMPLES),
         seed=_or_default(args.seed, forecast_eval.DEFAULT_SEED),
         data_dir=args.data_dir,
+        features=args.features,
+        label=args.label,
     )
     print(f"price-eval: run directory: {run_dir}")
     return 0

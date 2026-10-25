@@ -499,6 +499,8 @@ and that perturbing tomorrow's realized prices leaves the 14:00 plan unchanged.
 | `exact` (default) | **Offline oracle**, the upper bound: tomorrow's realized prices, degraded by `--rolling-horizon-sigma` / `--rolling-horizon-bias-sigma` when those are set. Bit-identical to the pre-seam rung |
 | `published_only` | Nothing: the plan ends at midnight, the last published price, and the remaining energy is valued at the terminal value. This is the live service |
 | `persistence` | Today's price at the same local wall-clock time. On a fall-back target day both repeated hours take today's value; a spring-forward source day lends its missing hour from the day before |
+| `omie_period` | **PO-C.** Tomorrow's PVPC from tomorrow's OMIE day-ahead price: `PVPC_hour = beta * mean(OMIE ES over the hour) + intercept(2.0TD period)`, one slope and one intercept per period (P3 covers weekends and the nine national fixed-date holidays), fitted by least squares on the hourly prices of the last 28 fully published local days. OMIE for D+1 is usable from 13:30 local on D, so the 14:00 event uses it |
+| `omie_period_month` | `omie_period` with a level offset per calendar month of a longer window (120 days), predicted at the latest month's level. It follows drift of the regulated and futures components instead of averaging it |
 
 The default adds nothing to the run identity and leaves the per-event telemetry unchanged. Any other
 outlook enters the identity as `rolling_horizon_price_outlook`, records `price_outlook` provenance and
@@ -510,6 +512,20 @@ between the 20:15 publication and the 20:30 boundary the noise model keeps. To a
 one function decorated with `@register_price_outlook("name")`. An outlook whose inputs only exist from
 a local time of day (OMIE day-ahead prices, usable from `OMIE_NEXT_DAY_USABLE_FROM` = 13:30) declares
 `inputs_usable_from=`; before that time the seam does not call it and falls back to `published_only`.
+
+**OMIE side input (`needs_omie=True` outlooks).** The OMIE estimators read a series the dataset does
+not hold. `benchmark` loads it from the verified OMIE store (`omie_prices.load_omie_es_prices`, hash
+checked, 15-minute UTC grid, `NaN` where a day is not stored) as an `OutlookSide` aligned to the
+dataset grid, and the seam cuts it for every decision at the first OMIE day that is not yet usable
+(`omie_end_idx`: D+1 from 13:30 local on D), exactly as it cuts the published PVPC. The estimator
+therefore cannot see a later OMIE day or an unpublished PVPC. The fit window and the estimate use
+only the published days before the decision. If the side input is missing, an OMIE hour of the target
+day is missing in any quarter, or fewer than 7 published days are in the window, the affected slots
+are `unavailable` (the `published_only` behaviour) and the reason is recorded per event
+(`price_outlook_fallback`) and counted in the telemetry (`price_outlook.fallback_events`). The side
+input's identity (date range, missing days, fingerprint of the values) enters the run identity and
+the `price_outlook.side_input` record. `omie_quantile` of the plan is not built: it exists to feed
+PO-D, which stays deferred. The fit windows (28 and 120 days) were chosen on 2024 data only.
 
 `--eval-end` cuts the dataset at an instant before anything else runs. The run is then the run on a
 dataset that ends there, with the same rows, partitions and terminal values, and the cut enters the
@@ -603,7 +619,20 @@ and pre-registration machinery of `forecast-eval`. All its output is private and
 - **Price-estimate metrics.** On the slots an outlook estimated at the 14:00 events, from the same
   seam call the planner used: MAE and bias (estimate minus realized), and per fully estimated local
   day, on hourly prices, the Spearman rank correlation and the overlap of the 10 cheapest and the 4
-  most expensive hours.
+  most expensive hours. It also reports the MAE on days with a negative price and on DST days, and
+  how often an estimator fell back and why.
+- **Climate-mask overlap (`--features`).** At each 14:00 event, AppDaemon's `climate_control` is
+  replayed for the fully estimated day twice: on the outlook's prices and on the realized prices
+  (rule version of the day, enable flag and `min_hours_per_day` as of the decision, trailing mean
+  from published prices). The report gives the mean hour overlap (Jaccard) of the two masks and the
+  share of the day's measured heat-pump heat and cool energy that falls inside each mask. This is
+  what the P4 structured forecaster needs from a price outlook.
+- **Gate GC.** Pre-registered when an OMIE outlook is evaluated. An estimator passes only if, in
+  every period, it beats `persistence` on mean and median within-day Spearman, on the cheapest-10
+  overlap, on the mask Jaccard and on the climate energy inside the estimated mask. The dispatch
+  criterion of the plan is not applied because GA failed; the share of the GA gap captured is
+  reported for information. Without `--features` the rule-hour criteria are not computed and the
+  verdict is `UNDETERMINED`.
 - **Reference reproduction.** With `--reference-summary`, the `exact` rolling-horizon schedule is
   compared column by column with the `trailing_mean` run of a `forecast-eval` summary.
 

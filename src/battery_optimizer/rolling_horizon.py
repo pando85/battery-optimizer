@@ -120,6 +120,7 @@ from .policies import (
 )
 from .price_outlook import (
     DEFAULT_PRICE_OUTLOOK,
+    OutlookSide,
     get_price_outlook,
     published_end_idx,
     resolve_price_outlook_params,
@@ -1539,6 +1540,7 @@ def run_rolling_horizon(
     price_outlook: str = DEFAULT_PRICE_OUTLOOK,
     price_outlook_params: Mapping[str, Any] | None = None,
     load_forecaster_side: SideInputs | None = None,
+    price_outlook_side: OutlookSide | None = None,
 ) -> RollingResult:
     """Run the rolling horizon dispatcher.
 
@@ -1716,6 +1718,7 @@ def run_rolling_horizon(
     # Generate noisy prices for the full dataset
     day_bounds = contiguous_day_bounds(list(local_days))
     outlook_totals = {"estimated": 0, "unavailable": 0, "events_truncated": 0}
+    outlook_fallbacks: dict[str, int] = {}
     noisy_prices, noise_meta = generate_price_noise(
         prices,
         local_days,
@@ -1784,6 +1787,7 @@ def run_rolling_horizon(
                 days=day_bounds,
                 tz=tz,
                 params=outlook_params,
+                side=price_outlook_side,
             )
             plan_end_idx = outlook_result.usable_end_idx
             if plan_end_idx < ev.exec_end_idx:
@@ -1832,6 +1836,10 @@ def run_rolling_horizon(
             outlook_totals["estimated"] += counts["estimated"]
             outlook_totals["unavailable"] += counts["unavailable"]
             outlook_totals["events_truncated"] += int(plan_end_idx < ev.plan_end_idx)
+            reason = outlook_result.diagnostics.get("fallback")
+            if reason:
+                record["price_outlook_fallback"] = str(reason)
+                outlook_fallbacks[str(reason)] = outlook_fallbacks.get(str(reason), 0) + 1
 
         # Check usability
         plan_usable = usable[ev.start_idx : plan_end_idx]
@@ -2090,6 +2098,11 @@ def run_rolling_horizon(
             "unavailable_price_intervals_dropped": outlook_totals["unavailable"],
             "events_planned_short_of_their_horizon": outlook_totals["events_truncated"],
         }
+        if price_outlook_side is not None:
+            telemetry["price_outlook"]["side_input"] = price_outlook_side.describe()
+        if outlook_fallbacks:
+            # Events whose outlook fell back to published_only, by recorded reason.
+            telemetry["price_outlook"]["fallback_events"] = dict(sorted(outlook_fallbacks.items()))
 
     return RollingResult(
         schedule=traced,
