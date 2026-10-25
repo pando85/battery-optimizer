@@ -39,7 +39,11 @@ image:	## build the container image locally (IMAGE=name:tag)
 
 .PHONY: update-changelog
 update-changelog:	## prepend the unreleased commits to CHANGELOG.md as the next version
-	$(UV) run --only-group tools git-cliff -t v$(PROJECT_VERSION) -u -p CHANGELOG.md
+	@if [ -f CHANGELOG.md ]; then \
+		$(UV) run --only-group tools git-cliff -t v$(PROJECT_VERSION) -u -p CHANGELOG.md; \
+	else \
+		$(UV) run --only-group tools git-cliff -t v$(PROJECT_VERSION) -u -o CHANGELOG.md; \
+	fi
 
 .PHONY: release
 release:	## cut a release: make release [VERSION=X.Y.Z]
