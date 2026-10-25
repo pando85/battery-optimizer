@@ -1,0 +1,238 @@
+# Load Forecaster — improvement plan
+
+- **Status (2026-10-25):** proposed, nothing implemented. Refines the
+  [Load Forecaster roadmap](components/load-forecaster.md) stages LF-1…LF-4 into executable phases.
+- **Question:** can a better household load forecast reduce the planned battery's net cost, and by
+  how much? Answer it with the least machinery first. Stop as soon as the evidence says the remaining
+  gain is not worth the maintenance.
+- **Scope:** offline evaluation first. Then a **forecast-only** shadow in the existing service, which
+  needs no battery. Read-only throughout: no actuation and no new write credentials. Raw and
+  predicted series stay in the private data dir, and no monetary figure goes into this repo.
+
+## 1. Where we start
+
+**LF-0 (production and benchmark):** `forecast_load_trailing_slot_mean`. For each 15-minute slot
+position it takes the mean of the same position over the previous 28 local days, cut at the
+decision's local midnight. It uses no weekday, holiday, temperature or schedule information.
+
+Evidence already on record:
+
+| Finding | Source | Implication |
+|---|---|---|
+| Ranking windows by MAE gives the opposite order to ranking them by dispatch cost (7 d best MAE, 28 d cheapest; on the frozen holdout, 28 d best MAE, 365 d cheapest) | [progress §Forecast experiments](energy-baseline-progress.md#forecast-experiments), [experiments §11](energy-baseline-forecast-experiments.md) | Never select a forecaster on MAE. EUR is the primary metric. |
+| About 24 % of planned discharge is clipped because measured load fell below the forecast | [progress](energy-baseline-progress.md) | Forecast error does reach execution, but its EUR value has never been isolated. |
+| The ordering of `rolling_horizon` against `day_ahead` flipped with the load-forecast basis (frozen vs causal) | progress, *bounded pre-migration milestone* | The ladder is sensitive to the load basis, so the experiments need paired comparisons. |
+| The 81-arm grid has no pinned evaluation code | progress, *provenance blast radius* | New runs must stamp code and config identity. |
+
+**Signals verified in long-term Prometheus on 2026-10-25 (read-only):**
+
+| Signal | Series | History from | Notes |
+|---|---|---|---|
+| Main meter | `sensor.shellyem_main_channel_1_*` | 2024-01 | Already the canonical gross load (battery absent). |
+| Servers | `sensor.shellypmmini_servers_power` (`hass_sensor_power_w`) | 2024-01-29 | 30-day mean about 215–245 W. That is consistent with the owner's "~250 W" estimate, a little lower. |
+| Heat pump, electrical input | `sensor.aquarea_{heat,dhw,cool}_power_consumed` | 2024-01-29 | Split into heating, DHW and cooling. The total `sensor.aquarea_power_consumed` only exists from 2025-12-10. |
+| Outdoor temperature | `sensor.aquarea_outside_ambient_temperature` (`hass_sensor_unit_celsius`) | 2024-01-29 | Measured, not forecast. Using it as a feature for future slots leaks future information (see P4). |
+| AppDaemon controls | `input_boolean.appdaemon_climate_enable`, `input_number.appdaemon_climate_min_hours_per_day`, `switch.aquarea_force_dhw_mode` | 2024-01-29 | `climate_control` selects the cheapest hours at 00:00:40. `dhw_control` forces DHW every 12 h at the cheapest slot. Both are price-driven, so the rule can be replayed. |
+| Washer submeter (candidate) | `sensor.smart_plug_v2_terrace_power`, `sensor.terrace_lavadora_energy_today` | unverified | Probably the washer's plug, which would give per-cycle energy labels. The owner should confirm. |
+| Appliance enums | `sensor.lavadora_*`, `sensor.lavavajillas_*` (status, remaining, delayed start/end) | HA recorder only, extracted since 2026-10-15 | Prometheus has only `hass_entity_info` for the enum states, so history is short and has to be accumulated. |
+
+## 2. Phases
+
+```
+P0 headroom ──► P1 harness ──► P2 cheap baselines ──► P4 structured ──► P6 ML/quantiles ──► P7 shadow
+                   ▲                                    ▲                   ▲
+P3 data audit ─────┴────────────────────────────────────┘                   │
+P5 appliance data (passive accumulation starts now) ────────────────────────┘
+```
+
+P0 and P3 can run in parallel. P5 only collects data until it has enough history. Each phase ends
+at a gate. Failing a gate stops the plan there, with the simpler forecaster kept and the negative
+result recorded.
+
+### P0 — Headroom: what is perfect load knowledge worth? (≈1 day)
+
+The aim is to bound the prize before building anything.
+
+- Add an offline-only `load_forecast_mode: perfect`. It feeds the measured load of the target day
+  to `day_ahead` and `rolling_horizon` as the forecast. Prices, battery, SOC seed, terminal value
+  and solver stay identical. The service must reject this mode.
+- Run `causal` (LF-0) against `perfect` on the full 2025 year and on 2026-01…09.
+- Report:
+  - the EUR gap per year, per month and per season;
+  - the change in clipped charge/discharge kWh;
+  - the per-day distribution of the gap, to see whether it comes from a few days or from everywhere;
+  - which slots carry it (price tercile × hour).
+- **Gate G0:** the owner writes down a minimum worthwhile annual gain before seeing the result. If
+  the whole gap is below it, stop after P2, because only near-zero-cost tweaks are justified. Every
+  later phase reports its result as a **share of this gap captured**.
+
+### P1 — Evaluation harness (≈2–3 days)
+
+This makes every candidate cheap to compare and impossible to leak future data.
+
+- **Forecaster seam:** introduce a small callable contract,
+  `forecast(history_until_cutoff, as_of, target_slots) -> LoadForecast` with provenance. LF-0 is the
+  first implementation. Select it by name in the benchmark CLI and in `service.yaml`
+  (`planner.load_forecaster`, default `trailing_mean`). Planner and MPC internals stay unchanged.
+- **Walk-forward folds:** use monthly folds from 2025-01 to 2026-09, which gives 21 folds covering
+  every season twice. Each fold fits only on data before each decision's cutoff. Decision instants
+  are the policy's real events: 00:00 for `day_ahead`, and 14:00 and 20:30 for `rolling_horizon`.
+- **Forecast metrics:**
+  - MAE, WAPE, bias and P95 absolute error;
+  - each of those by horizon bucket (0–6 h, 6–24 h, 24–36 h), price tercile, weekday/weekend and season;
+  - a **price-weighted error** `Σ price·|error|` as a cheap EUR proxy. Check that it agrees with real EUR before trusting it.
+- **Economic metric:** paired EUR difference against LF-0 on identical days, with a **weekly block
+  bootstrap** 95 % interval, plus the share of the P0 gap captured.
+- **Provenance:** every run stamps the git commit, dirty flag, config hash, dataset id and
+  forecaster name and parameters. This closes the provenance gap in the 81-arm grid.
+- **Pre-registration:** a short file in the private run dir lists the candidates, folds and
+  thresholds before the first candidate runs.
+- **Gate G1:** LF-0 passed through the seam reproduces the canonical five-policy run bit-for-bit
+  (golden digest), and a leakage test passes. The test perturbs every post-cutoff value and checks
+  that the forecast does not change.
+
+### P2 — Cheap statistical candidates, no new data (≈2 days)
+
+All of these are variations of the existing function:
+
+| Candidate | Idea |
+|---|---|
+| `window_N` | N ∈ {7, 14, 28, 56}, re-run on the folds rather than one year |
+| `median` / `trimmed_mean` | Robust to occasional appliance spikes; the median is the MAE-optimal point estimate |
+| `ewma_h` | Exponentially weighted over days, half-life h ∈ {3, 7, 14} |
+| `daytype` | Separate profiles for weekday, Saturday and Sunday/holiday. Holidays come from the `holidays` package (Spain plus a configured subdivision). |
+| `level_adjusted` | Profile × (last 24 h measured ÷ last 24 h profile), clipped. At 14:00 and 20:30 events it also uses today's observed slots. |
+| `blend` | Weighted mix of recent and same-season-last-year profiles |
+
+**Gate G2:** keep the best candidate only if its bootstrap interval for EUR is entirely better than
+LF-0's and it captures a meaningful share of the gap. In that case it becomes the new reference for
+P4. Otherwise LF-0 remains the reference.
+
+### P3 — Sub-load data audit and extraction (≈2 days, parallel with P0–P2)
+
+This phase finds out which part of the load is predictable and where the error comes from.
+
+- Extend `extract_prom.ENTITY_SPECS` with:
+  - servers power;
+  - heat-pump heat, DHW and cool consumed power;
+  - outdoor temperature;
+  - the AppDaemon enable, min-hours and DHW switch series.
+
+  Write them to a **separate feature table** (`analysis/v1/features/`) so the canonical `dataset_id`
+  and the golden runs stay unchanged.
+- Quality checks:
+  - units and sample cadence;
+  - gaps, using the same quality mask as the meter;
+  - `servers + heat_pump ≤ main` per slot, with a tolerance and a count of violations;
+  - that `*_consumed` is electrical input and not thermal output.
+- **Decomposition report** (private): for each season, the share of kWh and the share of LF-0 error
+  variance that come from servers, the heat pump and the residual. Error during expensive slots is
+  reported separately.
+- **Gate G3:** P4 goes ahead only if the heat pump (or another observable component) carries a
+  material share of the error. If the residual dominates, skip to P5 or P6.
+
+### P4 — Structured component forecaster (LF-1, ≈4–5 days)
+
+`forecast = servers + heat_pump + residual`. The residual model is trained on
+`main − servers − heat_pump`, which prevents double counting.
+
+- **Servers:** the trailing 7-day mean, which is nearly constant. Step changes such as a new node
+  are detected and the model refits.
+- **Heat pump, scheduled hours:** replay the `climate_control` and `dhw_control` rules from the
+  day's PVPC prices, `min_hours_per_day` and the enable flags as known at the decision time.
+  - Today's schedule is fixed at 00:00:40.
+  - Tomorrow's can be reconstructed once prices are published (~20:15). At 14:00 it is estimated
+    from the PVPC estimate.
+  - Validate the replay against the observed heat mode and DHW switch history. Version the replayed
+    rule and fall back to LF-0 for this component when they disagree.
+- **Heat pump, energy per scheduled hour:** a binned or degree-hour regression on outdoor
+  temperature and hour, fitted on history. The temperature input must be an as-of forecast.
+  1. **Default, no new source:** persistence, meaning the same hour yesterday as measured.
+  2. **Owner option:** start archiving HA `weather.forecast_home` hourly forecasts now. This needs
+     `weather.get_forecasts`, a service call with a response, so the `ha_guard` allowlist must be
+     reviewed first.
+  3. **Owner option:** backfill from Open-Meteo's historical-forecast archive. This is an external
+     call that sends the home's coordinates.
+- **Residual:** the best P2 model applied to the residual series.
+- **Gate G4:** the paired EUR result beats the P2 reference with a bootstrap interval that excludes
+  zero, and the result holds in at least one heating and one non-heating season. A mid-run change to
+  the AppDaemon rule is handled by versioning, not by refitting silently.
+
+### P5 — Appliance-aware signals (LF-2, collect now, evaluate later)
+
+- Data accumulates passively starting now. Keep `extract_ha` running for the washer and dishwasher
+  enums, because the recorder only keeps 8 days of lookback. Confirm the terrace plug is the washer
+  so it can serve as an energy label.
+- **The highest-value feature is a *known future start*.** A dishwasher `delayed_start` or a washer
+  `delayed_end` that has been programmed is a load at a known time and fully available as-of. The
+  next most useful is the remaining energy of a cycle already running. Probabilities of unknown
+  future starts come last.
+- Evaluate once there are about 3 months of cycles. The split is session-disjoint, and results are
+  reported separately for short horizons (0–6 h), where most of the benefit is expected.
+- **Gate G5:** same EUR rule as G4. Classification accuracy or MAE alone do not count.
+
+### P6 — ML challenger and quantiles (LF-3, only if gap remains)
+
+Start only if P2–P5 leave a large share of the P0 gap uncaptured.
+
+- LightGBM on:
+  - slot of day, day type and holiday;
+  - lags at 24 h and 168 h;
+  - temperature (as-of forecast);
+  - the replayed schedule mask;
+  - appliance states.
+- Train with quantile objectives for P10/P50/P90.
+- Only P50 feeds the deterministic MPC. Quantiles are reported for calibration and kept for a future
+  risk-aware planner. Wheels exist for amd64 and arm64, but adding the dependency to the image needs
+  owner sign-off.
+- **Gate G6:** improvement over P4 holds across folds and seasons, and P10/P90 coverage is within
+  ±5 points. Otherwise keep the simpler model.
+
+### P7 — Forecast-only shadow and promotion (LF-4, ≈2 days + 4 weeks)
+
+**This phase does not need the battery.** Forecast accuracy can be shadowed live today.
+
+- The service computes LF-0 and the candidate on each plan. Only the configured forecaster feeds the
+  planner.
+- Once each slot's measurement is in, record realized errors. Expose them as
+  `battery_optimizer_load_forecast_abs_error_kwh{forecaster,horizon_bucket}` and add a Grafana panel.
+- Fall back to LF-0 when any input is stale or missing (temperature, schedule replay, appliance
+  state). The fallback reason goes on the existing provenance and is exported as a counter.
+- After 4 weeks of shadow in which the live error ordering matches the offline one, promote by
+  changing `planner.load_forecaster` in `config/service.yaml`, re-vendored into the homelab chart.
+  Rollback is the reverse one-line change.
+- **Revalidate after battery commissioning:** gross load becomes
+  `import − export + discharge − charge`. Re-run the P1 harness on the post-commissioning data
+  before trusting the forecaster on it.
+
+## 3. Decision gates summary
+
+| Gate | Pass condition | If it fails |
+|---|---|---|
+| G0 | P0 gap ≥ owner's predeclared minimum | Do only P2, then stop |
+| G1 | LF-0 through the seam is bit-identical; leakage test passes | Fix the harness before any candidate runs |
+| G2 | A P2 candidate's EUR bootstrap interval is entirely better than LF-0's | Keep LF-0 as reference |
+| G3 | An observable component carries material error | Skip P4 |
+| G4 | P4 beats the reference with an interval excluding zero, in ≥2 seasons | Keep the P2 reference |
+| G5 | Appliance features add EUR on top of the reference | Keep collecting, or drop |
+| G6 | ML is stable across folds and quantiles are calibrated | Keep the simpler model |
+| G7 | 4-week live shadow is consistent with offline results | Do not promote |
+
+## 4. Risks
+
+- **Small prize:** the battery is 5.12 kWh, and a perfect forecast may be worth little. P0 exists to
+  find this out first.
+- **Behaviour drift:** occupancy, new servers and changes to AppDaemon rules. Mitigated by walk-forward
+  folds, rule versioning and the live shadow error metric.
+- **Temperature leakage:** only as-of forecasts are allowed, and the leakage test covers feature
+  inputs as well as load.
+- **Dataset churn:** sub-load features live in a separate table, so canonical runs stay reproducible.
+
+## 5. Owner decisions needed
+
+1. G0 minimum worthwhile annual gain (kept private, outside the repo).
+2. The temperature source for P4: persistence only, archiving the HA weather forecast, or the
+   Open-Meteo backfill.
+3. Whether the terrace plug meters the washer.
+4. The holiday subdivision for `daytype`.
+5. Whether LightGBM may be added as an image dependency (P6 only).
