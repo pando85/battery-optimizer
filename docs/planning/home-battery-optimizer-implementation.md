@@ -1,6 +1,6 @@
 # Home battery optimizer: phased implementation plan
 
-**Status:** IN PROGRESS — the offline machinery is built and tested (Phase 1 **accepted**; Phases 2–4 partly delivered, including the dispatch-intent contract TODO-4.6, the configurable replan cadence, the five-rung policy ladder, and a bounded pre-migration milestone now **complete** with **1848 tests passing**: artifact-integrity sidecars wired into the canonical writers, economic-sensitivity sweeps with a throughput-cost planning flag, a replay-only dispatch runtime (recording only), and the causal load-forecast alignment for the fifth rung, validated on the 0.80 dataset). Battery hardware has been bought (owner statement, 2026-10-24), which moots device *selection* but not device *verification*. **The milestone is committed and the suite is green, but no deployment exists and no battery actuation is built or authorized** — the ACT column is entirely unbuilt. Component-level status and iteration plan: [the battery roadmap](energy-battery-roadmap.md).
+**Status (2026-10-25):** IN PROGRESS. Offline measurement, MPC, causal validation, immutable artifacts and replay are built; the former pre-migration milestone passed its historical **1,848-test** checkpoint. **Phase A** is packaged and released (v0.2.1; CI, wheel/sdist, multi-arch image and scanning succeeded). **Phase B** has a GitOps CronJob and an independently documented successful first manual run, but its repeated-schedule, alert-failure and backup-restore **exit gate is not yet evidenced**. **Phase C** has a deployed shadow-only service and tests, but the actual Venus E/Omnibattery entities are absent and the required two-week native comparison **cannot yet pass**. **Phase D/live actuation remains unimplemented and unauthorized.** These are source-controlled and runbook-reported milestones, not a fresh inspection of Kubernetes live health. See the [component roadmap](energy-battery-roadmap.md) and [homelab deployment runbook](https://github.com/pando85/homelab/blob/master/docs/deployment/battery-optimizer.md).
 
 **Architecture decisions:** [ADR-0001 — Forecast-informed economic dispatch](../adr/0001-home-battery-economic-dispatch.md); [ADR-0002 — Appliance-aware load forecasting](../adr/0002-appliance-aware-load-forecasting.md); [ADR-0004 — Production runtime and independent source repository](../adr/0004-battery-optimizer-production-architecture.md)
 
@@ -209,13 +209,13 @@ The project remains successful even if the result is *do not automate*: an offli
 
 | Unit | Proposed design | Current gate |
 |---|---|---|
-| Python application | One long-running process with HA WebSocket/REST subscription, reconnect and state resynchronization; Prometheus range-query adapter; publication-aware PVPC adapter; snapshot/forecast/HiGHS MPC; typed intent generator; shadow sink by default | Built (shadow only, read-only adapters, no writer): `battery_optimizer.service`, see [service docs](../service.md). Not deployed (PROD-4) |
-| Internal HTTP endpoint | FastAPI/ASGI, `GET /health/live`, `/health/ready`, `/status`, `/plan`, `/metrics`; ClusterIP only, no public ingress or unauthenticated writable commands | Built (`serve`, port 8080, GET-only); deployment is PROD-4 |
-| Extraction and offline jobs | Separate CronJob/Job for `extract → validate → build`, plus on-demand benchmark and optional training; immutable private Parquet manifests/DuckDB on a backed-up ZFS/OpenEBS PVC | Follow existing manual extraction policy until independently scheduled |
+| Python application | One long-running process with HA WebSocket/REST subscriptions, reconnect/resync; Prometheus load history, publication-aware PVPC, causal forecast, shared HiGHS kernel and shadow intents | **Built and configured in homelab as `battery-optimizer-service` (v0.2.1)**. Simulation SOC is used before battery commissioning; no real-device adapter/writer. See [service docs](../service.md) and [deployment runbook](https://github.com/pando85/homelab/blob/master/docs/deployment/battery-optimizer.md) |
+| Internal HTTP endpoint | FastAPI/ASGI, `GET /health/live`, `/health/ready`, `/status`, `/plan`, `/metrics`; ClusterIP only, no public ingress or unauthenticated writable commands | **Built and GitOps-configured:** `serve` on port 8080; readiness exposed separately from liveness; see homelab runbook for probe/scrape settings |
+| Extraction and offline jobs | Daily `battery-optimizer-pipeline` CronJob: extract HA/Prometheus, validate, periodically build immutable Parquet datasets on a ZFS/OpenEBS PVC; benchmark/training remain on demand | **GitOps-configured:** `30 3 * * *` UTC, first manually triggered Job succeeded in 5m46s; monthly dataset build schedule documented in homelab. Scheduled-run series and backup restore still need validation |
 | Actuator integration | Prefer existing Omnibattery **HA entity adapter** (directional permission switches, grid-target and optional positive power caps), preserving single Modbus writer and fast Shelly feedback. Readback/reconcile ordered multi-entity changes; keep lease as optimizer-side data only. Optional upstream atomic intent API only if needed. | Entity availability, competing modes, physical response and HA-outage behaviour must be proved; **no live writer** |
-| Observability | prometheus-client, ServiceMonitor, Grafana and alerts on stale sources, forecast/plan age, command reconciliation, import/export anomalies and missed extraction | Plan before live enablement |
+| Observability | Prometheus metrics, long-term ServiceMonitor, Grafana shadow dashboard and separate pipeline/service alert rules; no physical command-reconciliation metrics yet | **Configured in homelab**. Confirm metrics/alert rule behavior operationally, especially induced failure and multiweek shadow windows, before claiming exit gates B/C |
 
-Keep physics, optimization and forecast functions importable and pure so CLI, replay and service consume **the same package**. Use Python 3.12+, `asyncio`/`httpx`, SciPy/HiGHS and the existing DuckDB/PyArrow data format; only introduce CatBoost/LightGBM if net held-out EUR savings justify it. Never block the subscription/freshness event loop on solver CPU time; use a bounded executor/worker and discard obsolete plans. Replan every 15 minutes or at significant changes with debounce. Missing source fields and stale entities must degrade safely and be reported; do not manufacture phase/program attributes for appliances.
+Keep physics, optimization and forecast functions importable and pure so CLI, replay and service consume **the same package**. Use Python **3.14+** in the implemented package (`pyproject.toml`), `asyncio`/`httpx`, SciPy/HiGHS and the existing DuckDB/PyArrow data format; only introduce CatBoost/LightGBM if net held-out EUR savings justify it. Never block the subscription/freshness event loop on solver CPU time; use a bounded executor/worker and discard obsolete plans. Replan every 15 minutes or at significant changes with debounce. Missing source fields and stale entities must degrade safely and be reported; do not manufacture phase/program attributes for appliances.
 
 ### Production sequencing (single checklist)
 
@@ -236,26 +236,44 @@ secrets references, storage, policies, dashboards and runbooks. The history impo
   fallback) and added a build-time code identity (`BATTERY_OPTIMIZER_GIT_SHA`) for images without git. Historical
   dataset and benchmark identities stay immutable and resolve in homelab history; new identities are SHAs of this
   repository. No existing dataset was migrated or re-minted. See [provenance](../provenance.md).
-- [ ] **PROD-2 — Build independently.** CI runs Ruff, pytest (unit and property tests), chronological replay/golden
-  tests and, once Phase C code exists, HA/Prometheus fake-adapter integration tests. Hardware-in-the-loop tests need
-  explicit supervision and are never required in public CI. *In progress (tooling/CI).*
-- [ ] **PROD-3 — Release artifacts.** Pinned wheel and immutable OCI image (e.g. GHCR) with recorded digest,
-  dependency/image scanning and SBOM/provenance where practical, first release **v0.1.0**. Private energy traces and
-  credentials never enter CI artifacts or image layers. *In progress (image/release).*
-- **Exit gate A:** CI green on `main`, v0.1.0 image published by digest, no private data in the repository or image.
+- [x] **PROD-2 — Build independently.** CI runs Ruff and pytest on Python 3.14, including replay/golden and
+  fake HA/Prometheus adapter tests; Python 3.15 is experimental/non-gating. CI and pre-commit
+  completed successfully for v0.2.1 (2026-10-25). Hardware-in-the-loop tests still require supervision.
+  **Residual release-policy issue:** image publication on push and the separate CI workflow run concurrently;
+  the publisher does **not** currently await a successful CI run, so do not infer CI-gated promotion.
+- [x] **PROD-3 — Release artifacts.** v0.1.0, v0.2.0 and **v0.2.1** GitHub releases include wheel and sdist;
+  the image workflow successfully pushed multi-arch `ghcr.io/pando85/battery-optimizer` images by digest,
+  with SBOM, provenance attestation, smoke test and a separate Trivy scan (success on v0.2.1).
+  The code and image build deliberately exclude private energy data; data/credential leakage must still be
+  monitored as a continuous security obligation. **Residual release-policy issue:** the release job
+  depends on the image job, not on the Trivy scan job.
+- **Exit gate A — functional packaging achieved (2026-10-25):** CI green on v0.2.1 and OCI digest,
+  wheel and sdist published. Source/image separation is established. **Policy hardening remains open:**
+  production image promotion is not yet gated on the independent CI workflow, and the release job does
+  not await the vulnerability scan. Treat those as release governance follow-ups, not as proof
+  that the currently published v0.2.1 artifacts failed checks (the checks passed).
 
 #### Phase B — Scheduled extraction CronJob (homelab)
 
-- [ ] **PROD-B1 — Offline pipeline as a CronJob.** A read-only `extract → validate → build` CronJob in
-  `pando85/homelab` (`apps/battery-optimizer/`), image pinned by **digest**, schedule consistent with the
-  homelab production execution plan so HA recorder events are extracted before their declared retention expires.
-- [ ] **PROD-B2 — Storage and credentials.** Private, backed-up ZFS/OpenEBS PVC for the Parquet manifests and DuckDB
-  (labelled for the `backup` policy); the Home Assistant token comes from an `ExternalSecret` backed by Vault
-  and is **read-scoped**; nothing sensitive in git.
-- [ ] **PROD-B3 — Heartbeat alerts.** Alerts on a missed or failed extraction, a stale last-success timestamp and
-  validation failures; a successful run emits a heartbeat metric/last-success timestamp.
-- **Exit gate B:** several consecutive scheduled runs complete and validate, alerts fire in a deliberate failure
-  test, and the PVC restores from backup.
+- [x] **PROD-B1 — Offline pipeline as a CronJob.** In homelab `apps/battery-optimizer/`, pinned image
+  **v0.2.1 by digest**, daily `30 3 * * *` UTC, HA history 8-day lookback and Prometheus 3-day
+  lookback with initial history bootstrap; `extract → validate → build` where immutable dataset
+  build happens only at the start of a month. The *first manually triggered* Job succeeded;
+  unattended cadence acceptance is still open.
+- [x] **PROD-B2 — Storage and credentials provisioned.** Local `openebs-zfspv` PVC on prusik,
+  SnapshotSchedule and a Vault-backed ExternalSecret configured in GitOps; protected private data
+  directories, no credentials committed. The HA token is **non-admin** and used through read-only
+  application adapters: do not assume Home Assistant long-lived access tokens enforce method-level
+  read-only scopes. Backup **restore** still requires an explicit test.
+- [x] **PROD-B3 — Heartbeat/alert rules configured.** Homelab's PrometheusRule includes failed Job,
+  missing/stale successful run, pipeline suspension and storage health cases; `extract` now exits
+  non-zero on coverage gaps (v0.2.1). **Do not count this as an alarm-drill pass** until a deliberate
+  failed or missed extraction is observed and a notification is received.
+- **Exit gate B — OPEN:** first manual run reported successful, but multiple consecutive scheduled
+  executions, deliberate alert delivery and actual PVC restoration have not yet been evidenced.
+  The [homelab execution plan](https://github.com/pando85/homelab/blob/master/planning/energy-baseline-production-execution.md)
+  and [deployment runbook](https://github.com/pando85/homelab/blob/master/docs/deployment/battery-optimizer.md)
+  own those operational checks.
 
 #### Phase C — Resident shadow service (no actuation)
 
@@ -274,15 +292,18 @@ secrets references, storage, policies, dashboards and runbooks. The history impo
 - [x] **PROD-C3 — Fake-adapter tests.** Disconnect/reconnect, duplicate and out-of-order updates, stale SOC and stale
   grid readings, DST transitions and old (expired) intents, plus failed acknowledgements, all in CI.
   *Built 2026-10-25: `tests/test_service_*.py` (fake HA server, fake clock, no network).*
-- [ ] **PROD-4 — Homelab deployment.** Only `pando85/homelab` owns `apps/battery-optimizer/`: a **one-replica,
-  `Recreate`** Deployment (no HPA, no overlapping rollout pods), ClusterIP Service, **NetworkPolicy without any
-  Modbus path**, ServiceMonitor, alerts and a Grafana dashboard, image pinned by digest, and **no write
-  credentials** (read-only HA token only). A one-replica Deployment is not a device lock; ownership is enforced at
-  the HA/Omnibattery boundary.
-- [ ] **PROD-5 — Verify shadow operation.** Start in `shadow` after reconnect/reconciliation; no actuator
-  credentials or writes. Compare planned actions with the native battery behaviour. Expose freshness, plan age,
-  model/config version and rejected/fallback decisions; metrics must not carry high-cardinality plan IDs or private
-  household activity.
+- [x] **PROD-4 — Homelab shadow deployment configured.** `pando85/homelab` owns the existing
+  `apps/battery-optimizer/` chart with v0.2.1 pinned by digest, one-replica `Recreate` Deployment,
+  ClusterIP, egress-only NetworkPolicy with **no Modbus destination**, ServiceMonitor, alerts and Grafana
+  dashboard. The application enforces read-only HA WebSocket/REST requests, with a non-admin token in a
+  Vault-backed secret file. **No device-write path exists.** Physical battery commissioning and any
+  Kubernetes availability/recovery checks are separate from manifest delivery.
+- [ ] **PROD-5 — Verify shadow operation against native battery behaviour.** Start/reconnect in
+  `shadow`, record plans and events locally, expose freshness, plan age, model/config version and
+  fallbacks without high-cardinality metrics. **Service is deployed/configured, but SOC currently comes
+  from a simulated battery**: that is an engineering pre-commissioning test, **not** a comparison
+  with a real Marstek/Omnibattery. Map genuine battery telemetry and complete two representative
+  weeks before declaring Phase C accepted.
 - **Exit gate C:** at least **two weeks** of shadow plans compared against native battery behaviour (the Phase 5
   window), with the economic gain, stale-source behaviour and alert quality reviewed. If the gain does not justify a
   permanent system, stop here (see §15).
@@ -305,4 +326,4 @@ secrets references, storage, policies, dashboards and runbooks. The history impo
 - The hardware/BMS/anti-islanding protections remain authoritative, and AppDaemon owns aerothermal/DHW schedules. Never use the 15-minute economic planner as the no-export feedback controller or assume HA can stop an inverter after HA itself fails.
 - Keep the extraction CronJob/retention details in the [homelab production execution plan](https://github.com/pando85/homelab/blob/master/planning/energy-baseline-production-execution.md); do not duplicate its schedule or change it from this document. Promote any new model only after reproducible, like-for-like economic tests.
 
-**No resource described in §16 is deployed, and no live actuation is authorized by this documentation change.**
+**Phases B and C now have GitOps-managed resources in `pando85/homelab` (2026-10-25). Deployment and the first manual pipeline run are reported in the homelab runbook, while gates B/C remain open. No live actuation, physical command writer or Phase D authorization exists.**
