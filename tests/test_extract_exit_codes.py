@@ -46,6 +46,10 @@ GAP_FLAGS = [
     "no_samples_extracted:all",
     "no_series_chunks:sensor.x:2/9",
     "series_without_samples_chunks:sensor.x:1/9",
+    "omie_missing:2026-01-15: HTML response instead of a price file",
+    "omie_parse_error:2026-01-15: 23 periods do not fit",
+    "omie_fetch_failed:2026-01-15: HTTP 503 after 4 attempt(s)",
+    "omie_part_unreadable:2026-01-15: omie-day-x.parquet: OSError",
 ]
 INFORMATIONAL_FLAGS = [
     f"{DUPLICATE_ROWS_FLAG_PREFIX}:total: rows_seen=3",
@@ -57,6 +61,9 @@ INFORMATIONAL_FLAGS = [
     "non_finite_samples_dropped:sensor.x:2",
     "overlapping_target_samples:sensor.x:1",
     "dead_duplicate_entity:sensor.esios_pvpc_2",
+    "omie_not_published_yet:2026-01-16: HTML response instead of a price file",
+    "omie_orphan_part_adopted:2026-01-15: omie-day-x.parquet",
+    "omie_price_outside_expected_range:2026-01-15: 1 price(s) outside [-500, 4000] EUR/MWh",
 ]
 
 
