@@ -14,6 +14,7 @@ The modules that have no CLI surface are described in [Architecture](architectur
 | `build-features` | **functional** | Build the slot-aligned sub-load feature table, apart from the canonical dataset |
 | `decompose-load` | **functional** | Private report: share of load and of LF-0 error per sub-load |
 | `forecast-eval` | **functional** | Pre-registered load-forecaster evaluation: accuracy and paired EUR against LF-0 |
+| `price-eval`   | **functional** | Pre-registered price-outlook evaluation: paired EUR against `exact` and `published_only` |
 | `benchmark`    | **functional** | Run policy benchmarks on a dataset             |
 | `report`       | **functional** | Generate monthly reconciliation report         |
 | `inspect-sql`  | **functional** | Inspect DuckDB SQL queries                     |
@@ -197,6 +198,29 @@ It writes a private run to `<dataset>/forecast-eval/<name>-<UTC timestamp>/`:
 The method (decision instants, metrics, block bootstrap, gate, folds) is described in
 [Benchmark reference § Forecast evaluation](benchmark.md#forecast-evaluation-forecast-eval).
 `benchmark --eval-end` is the flag the harness uses to cut a period out of a longer dataset.
+
+## `price-eval`
+
+```bash
+uv run battery-optimizer price-eval \
+  --dataset ~/data/energy-baseline/analysis/v1/<dataset_id> \
+  --name po-a \
+  --reference-summary ~/data/energy-baseline/analysis/v1/<dataset_id>/forecast-eval/<g1 run>/summary.json
+```
+
+The evaluation harness of PO-A in the [price-outlook plan](planning/price-outlook-improvement-plan.md).
+Each `--outlook` (repeatable) is a registered price outlook; the default is `exact`,
+`published_only` and `persistence`, and the two references `exact` (upper bound) and
+`published_only` (the live service) are always included. `--period`, `--resamples` and `--seed`
+work as in `forecast-eval`. `--reference-summary` names a `forecast-eval` summary whose
+`trailing_mean` benchmark runs are compared slot by slot with this run's `exact` rolling-horizon
+schedule, which shows that the default outlook reproduces the pre-seam result.
+
+It writes a private run to `<dataset>/price-eval/<name>-<UTC timestamp>/`: `preregistration.json`
+(written before any benchmark runs), and `summary.json` / `summary.md` with the paired economic
+result, the action differences at the 14:00 events, the price-estimate metrics, the reference
+reproduction and provenance. The method is described in
+[Benchmark reference § Price-outlook evaluation](benchmark.md#price-outlook-evaluation-price-eval).
 
 ## `benchmark`
 

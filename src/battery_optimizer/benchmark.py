@@ -221,6 +221,13 @@ DEFAULT_ROLLING_HORIZON_LOAD_FORECAST_MODE = "causal"
 #: out here because this module imports the numeric core lazily.
 DEFAULT_LOAD_FORECASTER = "trailing_mean"
 
+#: Registered price outlook (:mod:`battery_optimizer.price_outlook`) that fills the
+#: unpublished part of each rolling-horizon plan.  ``exact`` (tomorrow's realized prices at
+#: 14:00) is the canonical upper bound; with it the run identity carries no outlook key, so
+#: pre-seam run identities are unchanged.  Same value as
+#: ``price_outlook.DEFAULT_PRICE_OUTLOOK`` (pinned by a test).
+DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK = "exact"
+
 #: Information-set text for a rung run with an ``oracle=True`` load forecaster.
 _ORACLE_LOAD_DISCLOSURE = (
     "ORACLE load forecaster: the planner was handed the MEASURED load of the slots it "
@@ -1352,6 +1359,7 @@ def _validate_rolling_horizon_knobs(
     bias_sigma: float,
     replan_interval_slots: int | None,
     horizon_slots: int | None,
+    price_outlook: str = DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK,
 ) -> None:
     """Refuse an impossible rolling-horizon configuration, one clean line each.
 
@@ -1391,6 +1399,24 @@ def _validate_rolling_horizon_knobs(
             "the legacy two-event schedule derives its horizon from the local-day partition "
             "and does not accept an explicit horizon length"
         )
+    from battery_optimizer.price_outlook import get_price_outlook
+
+    try:
+        get_price_outlook(price_outlook)
+    except ValueError as exc:
+        raise BenchmarkInputError(str(exc)) from exc
+    if price_outlook != DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK:
+        if sigma != 0.0 or bias_sigma != 0.0:
+            raise BenchmarkInputError(
+                f"rolling_horizon_price_outlook={price_outlook!r} needs rolling_horizon_sigma=0 "
+                "and rolling_horizon_bias_sigma=0: the synthetic noise channels model an "
+                "estimate of the exact outlook only"
+            )
+        if replan_interval_slots is not None:
+            raise BenchmarkInputError(
+                f"rolling_horizon_price_outlook={price_outlook!r} needs the legacy 14:00 / "
+                "20:30 cadence (no rolling_horizon_replan_interval_slots)"
+            )
 
 
 def prepare_rolling_horizon(
@@ -1417,6 +1443,7 @@ def prepare_rolling_horizon(
     load_forecast_mode: str = DEFAULT_ROLLING_HORIZON_LOAD_FORECAST_MODE,
     load_forecaster: str = DEFAULT_LOAD_FORECASTER,
     load_forecaster_params: Mapping[str, Any] | None = None,
+    price_outlook: str = DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK,
 ) -> tuple[RollingHorizonInputs, dict[str, Any]]:
     """Build the load forecast inputs and resolve the planning terminal value.
 
@@ -1463,6 +1490,7 @@ def prepare_rolling_horizon(
         bias_sigma=bias_sigma,
         replan_interval_slots=replan_interval_slots,
         horizon_slots=horizon_slots,
+        price_outlook=price_outlook,
     )
     if load_forecast_mode not in ("frozen", "causal"):
         raise BenchmarkInputError(
@@ -1564,7 +1592,11 @@ def prepare_rolling_horizon(
         forecast_window_days=forecast_window_days,
         load_forecaster=load_forecaster,
         load_forecaster_params=dict(load_forecaster_params or {}),
+        price_outlook=price_outlook,
     )
+    from battery_optimizer.price_outlook import get_price_outlook
+
+    outlook = get_price_outlook(price_outlook)
 
     cadence_text, horizon_text = _rh_cadence_text(
         replan_interval_slots, horizon_slots, interval_seconds
@@ -1640,12 +1672,20 @@ def prepare_rolling_horizon(
                 "telemetry, because such an event makes the run depend on machine speed"
             ),
         },
+        "price_outlook": outlook.provenance({}),
         "information_set": {
             "prices": (
                 "at 20:30 on D-1 the policy already sees day D's exact prices (published the "
                 "evening before), which day_ahead does not see until D's midnight; the horizon "
                 "spans to the end of D rather than stopping at it.  The policy is therefore "
                 "more informed than day_ahead on prices"
+                if price_outlook == DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK
+                else f"price outlook {price_outlook!r}: each event sees only the prices "
+                "published at its decision instant (D+1 from 20:15 local on D) plus what the "
+                "outlook estimates from them, and plans only up to the first slot the "
+                "outlook leaves unavailable, valuing the energy left there at the planning "
+                "terminal value.  The 14:00 event therefore does not see tomorrow's realized "
+                "prices"
             ),
             "load": (
                 _ORACLE_LOAD_DISCLOSURE
@@ -1943,6 +1983,7 @@ class RollingHorizonInputs:
     forecast_window_days: int = 28
     load_forecaster: str = DEFAULT_LOAD_FORECASTER
     load_forecaster_params: dict[str, Any] = field(default_factory=dict)
+    price_outlook: str = DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK
 
 
 def _rh_cadence_text(
@@ -2118,6 +2159,7 @@ def _run_policies(
                     forecast_window_days=rolling_horizon.forecast_window_days,
                     load_forecaster=rolling_horizon.load_forecaster,
                     load_forecaster_params=rolling_horizon.load_forecaster_params or None,
+                    price_outlook=rolling_horizon.price_outlook,
                 )
                 # The returned schedule comes from simulate() with solver_status="not_applicable"
                 # (a traced plan).  But the rolling horizon IS a solver-based policy (many MILP
@@ -3041,6 +3083,7 @@ def benchmark_dataset(
     throughput_cost_eur_per_kwh: float = 0.0,
     load_forecaster: str = DEFAULT_LOAD_FORECASTER,
     load_forecaster_params: Mapping[str, Any] | None = None,
+    rolling_horizon_price_outlook: str = DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK,
     eval_end: datetime | str | None = None,
     data_dir: Path | str | None = None,
 ) -> Path:
@@ -3154,6 +3197,11 @@ def benchmark_dataset(
         load_forecaster_params: overrides of *load_forecaster*'s params on top of its
             defaults and ``day_ahead_forecast_window_days``.  Unknown keys are refused;
             given, they enter the run identity with the forecaster name.
+        rolling_horizon_price_outlook: registered price outlook
+            (:mod:`battery_optimizer.price_outlook`) for the unpublished part of each
+            rolling-horizon plan.  ``"exact"`` (default) is the canonical upper bound and
+            adds nothing to the run identity; any other name enters it.  Non-default
+            outlooks need the legacy cadence and zero sigma / bias.
         eval_end: optional exclusive end of the evaluation window.  The dataset is cut
             there **before anything else runs**, so the run is the run on a dataset
             that ends at *eval_end* (same rows, same partitions, same terminal values).
@@ -3225,6 +3273,7 @@ def benchmark_dataset(
             bias_sigma=rolling_horizon_bias_sigma,
             replan_interval_slots=rolling_horizon_replan_interval_slots,
             horizon_slots=rolling_horizon_horizon_slots,
+            price_outlook=rolling_horizon_price_outlook,
         )
     forecaster_overrides = dict(load_forecaster_params or {})
     forecaster_record = _load_forecaster_record(
@@ -3442,6 +3491,7 @@ def benchmark_dataset(
             load_forecast_mode=rolling_horizon_load_forecast_mode,
             load_forecaster=load_forecaster,
             load_forecaster_params=forecaster_overrides,
+            price_outlook=rolling_horizon_price_outlook,
         )
     records, solver_info, plans = _run_policies(
         core=core,
@@ -3578,6 +3628,10 @@ def benchmark_dataset(
             if day_ahead_terminal_value_eur_per_kwh is not None
             else TERMINAL_VALUE_DEFAULT_RULE
         )
+        # The price outlook enters only when it is not the canonical ``exact``, so every
+        # pre-seam rolling-horizon identity is reproduced unchanged by the default.
+        if rolling_horizon_price_outlook != DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK:
+            identity["rolling_horizon_price_outlook"] = rolling_horizon_price_outlook
     # The load forecaster enters the identity only when it is not LF-0, so every
     # pre-seam run identity is reproduced unchanged by the default (G1); a run on another
     # forecaster is a different measurement and must never share a run id with LF-0.
