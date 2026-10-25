@@ -5,7 +5,9 @@
   [Benchmark reference](../benchmark.md#forecast-evaluation-forecast-eval)) are built. The P0 run
   is done and its results are private. P4 is built and evaluated: **G4 failed**, with the gain
   concentrated in the cooling season and on days whose prices are published, and a loss in the
-  heating season (see §P4). The plan refines the
+  heating season (see §P4). A **second look** with the OMIE price estimate and a disabled-day fix
+  **failed G4 again**: it repairs the 14:00 mask but not the heating loss, which sits in the hot-water
+  part (see §P4, second look). The plan refines the
 - **Question:** can a better household load forecast reduce the planned battery's net cost, and by
   how much? Answer it with the least machinery first. Stop as soon as the evidence says the remaining
   gain is not worth the maintenance.
@@ -21,7 +23,7 @@
 | P1 harness | Seam **done** (#14); harness in review (#16) | `load_forecast.py`, `forecast-eval` | G1: seam passed (bit-identical, leakage test) |
 | P2 cheap candidates | **Done, G2 failed** | this document, §P2 | G2 |
 | P3 sub-load audit | **Done** | #15: `build-features`, `load_decomposition.py`; private feature set and P3 report | **G3 passed** |
-| P4 structured forecaster | **Done, G4 failed** | `structured_forecast.py`; private run `forecast-eval/p4-structured-*` | G4 failed: cooling holds, heating does not |
+| P4 structured forecaster | **Done, G4 failed twice** | `structured_forecast.py`; private runs `forecast-eval/p4-structured-*` and `p4b-second-look-*` | G4 failed: cooling holds (2026 only in the second look), heating never |
 | P5–P7 | Not started (P5 collection continues passively) | — | — |
 
 All phases run on the refreshed private dataset `dd5a2178…`, which covers 2024-01-01 to 2026-10-01.
@@ -355,6 +357,35 @@ reproduce):
   and at least one cooling season instance (seed 20261025, 10,000 resamples). Beside them, as
   non-gating diagnostics, the first P4 candidate (a regression check that it still reproduces),
   OMIE only, disabled fix only (attribution), and LF-0 `trailing_median`.
+
+**Second-look result (private run `forecast-eval/p4b-second-look-*`; relative figures only; shares are of
+that period's P0 gap).**
+- **G4 fails again.** Primary (structured + OMIE + disabled fix), `rolling_horizon`, season instances:
+  cooling about +2.5 % (interval includes zero) in 2025 and **+9.6 % (interval above zero)** in 2026;
+  heating about -3.8 % (interval includes zero) in 2025 and -7.2 % (interval entirely below zero) in 2026.
+  Whole periods -2.4 % and +2.6 %, intervals include zero. The first P4 run had cooling holding in both
+  years; in 2025 it no longer does (the disabled-day fix costs about 2 % of the gap there and gains about 1 %
+  in 2026).
+- **The two diagnosed causes are fixed as accuracy.** The share of measured climate energy inside the
+  replayed hours on estimated-price days rises from 76 % and 83 % to **92 % and 94 %** (published days stay at
+  98-99 %); the climate WAPE on those days falls from about 100 % to 83 % and 71 %; every 14:00 event now has an
+  estimate (13 fallbacks to `prices_unavailable` in 2025 are gone). Whole WAPE under `rolling_horizon`: 43.5 % to
+  42.0 % (2025), 42.1 % to 39.0 % (2026), against 46.7 % and 46.0 % for LF-0. Against the first P4 candidate the
+  primary is about 2.1 % of the gap better in 2026, with an interval above zero, and level in 2025
+  (about -1.7 %, interval includes zero).
+- **But the money does not follow, and heating is not climate.** OMIE alone moves the paired saving by less than
+  0.3 % of the gap. The seasonal hybrid (LF-0 for the climate part in Nov-Mar) is **worse** than the primary in
+  heating, in both years (about -2.4 % and -1.1 % of the gap), so the heating loss is not in the climate part. The
+  only component the hybrid leaves structured in heating is hot water, which was already worse than LF-0 in P4 and
+  still is (WAPE about 134 % against 125 % in 2025, 153 % against 148 % in 2026). That is an inference from
+  the paired figures, not a separate run.
+- **Secondary variants.** The hybrid fails G4 (heating -6.3 % and -8.3 % of the gap against LF-0). With the
+  `trailing_median` residual, cooling in 2026 gains about 16 % of the gap (interval above zero) and heating loses
+  about 8 %.
+- **Candidate, not a result.** A pure seasonal hybrid, LF-0 for every component in heating and the structured
+  forecaster in cooling, would by construction give about zero in heating and the cooling figures above, but it was
+  not what was run and those figures were seen first. Per the owner's decision it needs forward confirmation in the
+  P7 shadow before any adoption; so does replacing the hot-water part.
 
 ### P5 — Appliance-aware signals (LF-2, collect now, evaluate later)
 
