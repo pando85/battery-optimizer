@@ -542,7 +542,7 @@ def _terminal_note(run: _Run) -> str:
 def _horizon_scope_note(run: _Run) -> str:
     """Say which calendar the evaluation horizon is measured on.
 
-    The package README records the rule: a report must state plainly that the horizon
+    docs/benchmark.md records the rule: a report must state plainly that the horizon
     is UTC-scoped instead of letting ``Z``-suffixed labels imply it — a UTC year is not
     a local calendar year, because the local year turns before UTC midnight east of
     Greenwich.  Both bounds and the dataset's tariff timezone already live in the run

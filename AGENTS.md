@@ -59,4 +59,6 @@ just release           # cut a release (see the release skill)
 - Decisions: `docs/adr/` (start with ADR-0003 for the measurement baseline and ADR-0004 for the
   production architecture).
 - Plans and progress: `docs/planning/`, provenance of the extraction in `docs/provenance.md`.
-- CLI behavior, environment variables and secrets policy: `README.md`.
+- CLI behavior: `docs/cli.md` (`docs/benchmark.md` for `benchmark`); environment variables and secrets
+  policy: `docs/configuration.md`; module notes: `docs/architecture.md`; known issues:
+  `docs/known-issues.md`; the image: `docs/container.md`. `README.md` is the short overview.

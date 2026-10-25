@@ -1,0 +1,108 @@
+# Configuration
+
+Environment variables, data directory, Home Assistant authentication and the secrets policy. The per-command
+flags are in the [CLI reference](cli.md); the service-specific settings (`config/service.yaml`) are in the
+[shadow service](service.md#configuration) page.
+
+## Environment variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `BATTERY_OPTIMIZER_DATA_DIR` | Private dataset store; must be **outside** any git worktree | `~/data/energy-baseline` |
+| `BATTERY_OPTIMIZER_CONFIG` | Tariff configuration file | `config/tariff.yaml` relative to the working directory |
+| `BATTERY_OPTIMIZER_HA_URL` | Home Assistant base URL | built-in default |
+| `BATTERY_OPTIMIZER_HA_TOKEN` | Home Assistant bearer token, read-only; required for HA extraction, `ha-states` and `serve` | unset |
+| `BATTERY_OPTIMIZER_HA_TOKEN_FILE` | File holding the token (e.g. a mounted secret); used by `serve` when the variable above is unset | unset |
+| `BATTERY_OPTIMIZER_SERVICE_CONFIG` | Shadow service configuration (`serve`, `shadow-report`) | `config/service.yaml` relative to the working directory |
+| `BATTERY_OPTIMIZER_PORT` | HTTP port of `serve` | `8080` |
+| `BATTERY_OPTIMIZER_PROMETHEUS_URL` | Prometheus base URL | built-in default |
+| `BATTERY_OPTIMIZER_GIT_SHA` | Build-time commit identity (40-hex, optional `-dirty`) used when git is unavailable | unset (set by the image build) |
+
+`.envrc.example` shows a [direnv](https://direnv.net/) setup without any secret in it.
+
+## Development and production locations
+
+### Data directory
+
+All output goes to a private data directory **outside the git worktree**.
+Default: `~/data/energy-baseline`. Override with `--data-dir` or `BATTERY_OPTIMIZER_DATA_DIR`.
+
+The default directory keeps its pre-rename `energy-baseline` name on purpose (it is an existing
+immutable store and stored benchmark JSONs embed its path). The legacy `ENERGY_BASELINE_*`
+environment variables are still honoured as a deprecated fallback (`DeprecationWarning`); the
+`BATTERY_OPTIMIZER_*` name wins when both are set.
+
+**Code identity without git (container images).** Lineage records the commit via
+`git rev-parse HEAD`. Where git is unavailable, set `BATTERY_OPTIMIZER_GIT_SHA` at build time to a
+40-character lowercase commit SHA (optionally suffixed `-dirty`); it is used only when git cannot
+answer, a malformed value raises `ValueError`, and with neither the identity is the
+`nogit@battery-optimizer==<version>` sentinel.
+
+**Development (this repo, local runs):** data lives under `/tmp/opencode/energy-baseline`
+(chmod 0700, ephemeral, wiped on reboot). Used for first-extraction milestones and
+offline tests. All files written with mode 0600, dirs with 0700.
+
+**Production (planned):** data moves to a cluster PVC (e.g. `openebs-zfspv` on prusik)
+with the same directory layout and permission model. Migration is a `rsync` + a
+`--data-dir` flag flip; the package code is location-agnostic.
+
+### No recurring scheduler yet
+
+There is no recurring scheduler, cron job, or Kubernetes CronJob wired up for this toolkit yet.
+Every command in the [CLI reference](cli.md) is run manually (or by a human-driven runbook). A scheduled pipeline
+(extract → validate → build → benchmark → report) is deferred to a later phase: see
+[ADR-0003](adr/0003-phase1-measurement-and-baseline.md) for the scope boundary.
+
+## HA authentication
+
+HA history extraction requires a bearer token. The token is **never written to
+disk** by the package — it is passed via the `BATTERY_OPTIMIZER_HA_TOKEN`
+environment variable or the `token=` keyword argument to `extract_ha_history()`.
+The HA base URL is also **never recorded**: the manifest keeps only
+`endpoint: "home-assistant-history-api"` plus `endpoint_instance_sha256_16`,
+a one-way digest that allows cross-run identity correlation (telling two
+instances apart) without recording the endpoint itself.
+
+httpx INFO-level request logging (which would leak the full URL including
+entity filters) is suppressed at the start of `extract_ha_history()` via
+`_suppress_httpx_info_logging()`, and `_sanitize_error()` strips the base URL
+and host from transport-error text before it reaches stderr or logs.
+
+For a first-run login flow (username + password from `pass`), see
+[`docs/troubleshooting/home-assistant-api-hacs-deploy.md` in pando85/homelab](https://github.com/pando85/homelab/blob/master/docs/troubleshooting/home-assistant-api-hacs-deploy.md).
+The login flow is ephemeral: the token lives in memory for the duration of the
+extract call and is never persisted.
+
+## Secrets policy
+
+- No secrets are written to files by this package
+- `BATTERY_OPTIMIZER_HA_TOKEN` is read from env or passed explicitly; never logged
+- HA extraction writes no endpoint identity: the manifest records
+  `endpoint: "home-assistant-history-api"` plus a 16-char SHA-256 digest of the
+  base URL (`endpoint_instance_sha256_16`) for cross-run correlation only.
+  Prometheus extraction still records `params.base_url` (an unauthenticated
+  internal archive URL) — the asymmetry is a known gap
+- `_redact_error()` strips bearer tokens, credential-bearing parameters
+  (`password`, `passwd`, `pwd`, `token`, `access_token`, `refresh_token`,
+  `id_token`, `secret`, `api_key`, `apikey`, `authorization`, `client_secret`
+  in both `key=value` and `key: value` form), and common API-key prefixes
+  (`sk-`, `pat-`, `ghp_`, `gho_`, `xoxb/xoxa/xoxp/xoxr/xoxs-`) from any
+  error message before it reaches stderr or logs
+- HA extraction additionally applies `_sanitize_error()` to strip the base URL
+  and its host from transport-error text, and suppresses httpx INFO-level
+  request logging (which would otherwise leak the full URL with entity filters)
+- The CLI catches `ValueError`, `RuntimeError` (and their domain subclasses:
+  `BenchmarkInputError`, `ReportInputError`, `SQLInputError`, `BenchmarkError`,
+  `ReportError`), `NotImplementedError` (for deferred commands like `mirror`),
+  and `OSError` (including `FileExistsError` from the immutable store's
+  no-clobber writes, `PermissionError`, `IsADirectoryError`, `FileNotFoundError`)
+  and prints one redacted line to stderr with exit code 1; no raw tracebacks
+  leak. A no-clobber refusal additionally explains that nothing was overwritten
+  or deleted and what to do instead — the tool never cleans up canonical data
+  on its own
+- Curated `inspect-sql` queries that need a benchmark-only view are checked up
+  front, so a missing `--benchmark` is reported as a usage error rather than
+  surfacing a DuckDB `CatalogException`
+- Unexpected exceptions (e.g. `KeyError`, `TypeError`, or any other exception
+  type) are allowed to propagate so bugs are visible; there is no blanket
+  `except Exception`

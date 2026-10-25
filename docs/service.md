@@ -147,6 +147,9 @@ Omnibattery entities exist, map `battery_soc` plus either `battery_power` (signe
 control surface (`number.*_pd_target_grid_power`, `switch.*_battery_allow_charge/discharge`, system
 caps — where `0` means *unlimited*) to `observed`, and switch to `soc_source: entity`.
 
+The variables the service reads (the complete table for every command is in
+[Configuration](configuration.md#environment-variables)):
+
 | Variable | Purpose | Default |
 |---|---|---|
 | `BATTERY_OPTIMIZER_HA_URL` | Home Assistant base URL (the in-cluster Service URL, set by the homelab manifest) | unset → not ready |
