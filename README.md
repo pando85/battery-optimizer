@@ -5,8 +5,10 @@
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE.md)
 
 Reproducible energy measurement and baseline toolkit for the home battery optimizer project
-([ADR-0003](docs/adr/0003-phase1-measurement-and-baseline.md)). Architecture decisions live in
-[`docs/adr/`](docs/adr/), plans and progress notes in [`docs/planning/`](docs/planning/).
+([ADR-0003](docs/adr/0003-phase1-measurement-and-baseline.md)), plus the resident **shadow** service
+that runs the same MPC live without actuating anything ([docs/service.md](docs/service.md)).
+Architecture decisions live in [`docs/adr/`](docs/adr/), plans and progress notes in
+[`docs/planning/`](docs/planning/).
 
 ## Quick start
 
@@ -56,6 +58,19 @@ docker run --rm --read-only \
   ghcr.io/pando85/battery-optimizer:latest validate
 ```
 
+The shadow service runs from the same image (`serve`, port 8080, read-only root filesystem, writes
+only under the data directory); see [docs/service.md](docs/service.md):
+
+```bash
+docker run --rm --read-only --cap-drop ALL -p 8080:8080 \
+  -v "$HOME/data/energy-baseline:/data" -v "$PWD/config:/config:ro" \
+  -e BATTERY_OPTIMIZER_DATA_DIR=/data \
+  -e BATTERY_OPTIMIZER_CONFIG=/config/tariff.yaml \
+  -e BATTERY_OPTIMIZER_SERVICE_CONFIG=/config/service.yaml \
+  -e BATTERY_OPTIMIZER_HA_URL -e BATTERY_OPTIMIZER_HA_TOKEN -e BATTERY_OPTIMIZER_PROMETHEUS_URL \
+  ghcr.io/pando85/battery-optimizer:latest serve
+```
+
 The data directory must be writable by uid `65532`. Verify an image's provenance with
 `gh attestation verify oci://ghcr.io/pando85/battery-optimizer:<tag> --owner pando85`.
 The image records the commit it was built from in `BATTERY_OPTIMIZER_GIT_SHA` (see below).
@@ -67,7 +82,10 @@ The image records the commit it was built from in `BATTERY_OPTIMIZER_GIT_SHA` (s
 | `BATTERY_OPTIMIZER_DATA_DIR` | Private dataset store; must be **outside** any git worktree | `~/data/energy-baseline` |
 | `BATTERY_OPTIMIZER_CONFIG` | Tariff configuration file | `config/tariff.yaml` relative to the working directory |
 | `BATTERY_OPTIMIZER_HA_URL` | Home Assistant base URL | built-in default |
-| `BATTERY_OPTIMIZER_HA_TOKEN` | Home Assistant bearer token, read-only; required for HA extraction and `ha-states` | unset |
+| `BATTERY_OPTIMIZER_HA_TOKEN` | Home Assistant bearer token, read-only; required for HA extraction, `ha-states` and `serve` | unset |
+| `BATTERY_OPTIMIZER_HA_TOKEN_FILE` | File holding the token (e.g. a mounted secret); used by `serve` when the variable above is unset | unset |
+| `BATTERY_OPTIMIZER_SERVICE_CONFIG` | Shadow service configuration (`serve`, `shadow-report`) | `config/service.yaml` relative to the working directory |
+| `BATTERY_OPTIMIZER_PORT` | HTTP port of `serve` | `8080` |
 | `BATTERY_OPTIMIZER_PROMETHEUS_URL` | Prometheus base URL | built-in default |
 | `BATTERY_OPTIMIZER_GIT_SHA` | Build-time commit identity (40-hex, optional `-dirty`) used when git is unavailable | unset (set by the image build) |
 
@@ -117,6 +135,8 @@ Every command below is run manually (or by a human-driven runbook). A scheduled 
 | `report`       | **functional** | Generate monthly reconciliation report         |
 | `inspect-sql`  | **functional** | Inspect DuckDB SQL queries                     |
 | `ha-states`    | **functional** | Read Home Assistant enum state history (read-side, deduplicated, as-of) |
+| `serve`        | **functional** | Resident shadow service: read-only HA/Prometheus, live MPC, intents recorded never sent ([docs](docs/service.md)) |
+| `shadow-report`| **functional** | Shadow plans vs native battery behaviour: coverage, energy, cost, SOC violations |
 | `mirror`       | deferred     | Deferred — not implemented in Phase 1          |
 
 **Modules with no CLI surface (or `hack/` only), deliberately:**
@@ -737,6 +757,17 @@ See module docstring.
 **Status: complete — committed. NOT deployed, NOT a resident service, NO HA adapter, recording
 only.** Deterministic plan content; record ids are per-run random (`generation_id` is `uuid.uuid4()`). Caller-supplied time; recording-only sink; injectable planner.
 Demo: `python -m battery_optimizer.hack.replay_runtime_demo`. See module docstring.
+
+## Shadow service (`service/`)
+
+**Status: Phase C (PROD-C1 to C3) built — shadow only, no actuation path.** `battery-optimizer serve`
+subscribes to Home Assistant (read-only allowlist, reconnect and full resync), reads load history from
+Prometheus, solves the offline MPC kernel every 15 minutes in a bounded worker, records time-bounded
+shadow intents and exposes `/health/live`, `/health/ready`, `/status`, `/plan` and `/metrics`.
+`battery-optimizer shadow-report` compares the recorded plans with the native battery behaviour.
+No battery entity exists in Home Assistant yet, so the committed configuration runs a virtual battery
+(`soc_source: simulated`) until the Omnibattery entities are mapped. Architecture, configuration,
+metrics, failure modes and the comparison method: [docs/service.md](docs/service.md).
 
 ## HA authentication
 

@@ -209,8 +209,8 @@ The project remains successful even if the result is *do not automate*: an offli
 
 | Unit | Proposed design | Current gate |
 |---|---|---|
-| Python application | One long-running process with HA WebSocket/REST subscription, reconnect and state resynchronization; Prometheus range-query adapter; publication-aware PVPC adapter; snapshot/forecast/HiGHS MPC; typed intent generator; shadow sink by default | No **resident** service exists. `replay_runtime.py` exercises the planner and dispatch contract in a deterministic, replay-capable loop with a **recording-only** sink — not a service, no writer, no HA adapter, not deployed |
-| Internal HTTP endpoint | FastAPI/ASGI, `GET /health/live`, `/health/ready`, `/status`, `/plan`, `/metrics`; ClusterIP only, no public ingress or unauthenticated writable commands | Not built |
+| Python application | One long-running process with HA WebSocket/REST subscription, reconnect and state resynchronization; Prometheus range-query adapter; publication-aware PVPC adapter; snapshot/forecast/HiGHS MPC; typed intent generator; shadow sink by default | Built (shadow only, read-only adapters, no writer): `battery_optimizer.service`, see [service docs](../service.md). Not deployed (PROD-4) |
+| Internal HTTP endpoint | FastAPI/ASGI, `GET /health/live`, `/health/ready`, `/status`, `/plan`, `/metrics`; ClusterIP only, no public ingress or unauthenticated writable commands | Built (`serve`, port 8080, GET-only); deployment is PROD-4 |
 | Extraction and offline jobs | Separate CronJob/Job for `extract → validate → build`, plus on-demand benchmark and optional training; immutable private Parquet manifests/DuckDB on a backed-up ZFS/OpenEBS PVC | Follow existing manual extraction policy until independently scheduled |
 | Actuator integration | Prefer existing Omnibattery **HA entity adapter** (directional permission switches, grid-target and optional positive power caps), preserving single Modbus writer and fast Shelly feedback. Readback/reconcile ordered multi-entity changes; keep lease as optimizer-side data only. Optional upstream atomic intent API only if needed. | Entity availability, competing modes, physical response and HA-outage behaviour must be proved; **no live writer** |
 | Observability | prometheus-client, ServiceMonitor, Grafana and alerts on stale sources, forecast/plan age, command reconciliation, import/export anomalies and missed extraction | Plan before live enablement |
@@ -259,13 +259,21 @@ secrets references, storage, policies, dashboards and runbooks. The history impo
 
 #### Phase C — Resident shadow service (no actuation)
 
-- [ ] **PROD-C1 — Adapters.** Home Assistant WebSocket/REST adapter with reconnect and full state resynchronization;
+- [x] **PROD-C1 — Adapters.** Home Assistant WebSocket/REST adapter with reconnect and full state resynchronization;
   Prometheus range-query adapter; publication-aware PVPC adapter. The MPC loop runs the same pure planner code as the
   offline benchmarks in a **bounded executor** off the event loop, discarding obsolete plans.
-- [ ] **PROD-C2 — HTTP surface.** FastAPI/ASGI with `GET /health/live`, `/health/ready`, `/status`, `/plan` and
+  *Built 2026-10-25 in `src/battery_optimizer/service/` ([service docs](../service.md)): read-only allowlist guard on
+  every WebSocket frame and REST request, subscribe-then-`get_states` resync on every connect, source-time ordering,
+  `oracle.solve_oracle` + `dispatch.intents_from_schedule` in a one-worker executor with a timeout, time-bounded
+  shadow intents and an append-only store. No battery entity exists in HA yet, so the committed config runs a
+  virtual battery (`soc_source: simulated`) until TODO-5.1 maps the Omnibattery entities.*
+- [x] **PROD-C2 — HTTP surface.** FastAPI/ASGI with `GET /health/live`, `/health/ready`, `/status`, `/plan` and
   `/metrics`; ClusterIP only, no public ingress and no writable commands.
-- [ ] **PROD-C3 — Fake-adapter tests.** Disconnect/reconnect, duplicate and out-of-order updates, stale SOC and stale
+  *Built 2026-10-25 (`battery-optimizer serve`, port 8080); `battery-optimizer shadow-report` adds the
+  shadow-vs-native comparison for exit gate C.*
+- [x] **PROD-C3 — Fake-adapter tests.** Disconnect/reconnect, duplicate and out-of-order updates, stale SOC and stale
   grid readings, DST transitions and old (expired) intents, plus failed acknowledgements, all in CI.
+  *Built 2026-10-25: `tests/test_service_*.py` (fake HA server, fake clock, no network).*
 - [ ] **PROD-4 — Homelab deployment.** Only `pando85/homelab` owns `apps/battery-optimizer/`: a **one-replica,
   `Recreate`** Deployment (no HPA, no overlapping rollout pods), ClusterIP Service, **NetworkPolicy without any
   Modbus path**, ServiceMonitor, alerts and a Grafana dashboard, image pinned by digest, and **no write

@@ -17,6 +17,10 @@ dependencies = [
     "pyyaml",
     "httpx",
     "numpy",
+    "fastapi",
+    "uvicorn",
+    "prometheus-client",
+    "websockets",
 ]
 
 [project.urls]

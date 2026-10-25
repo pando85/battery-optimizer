@@ -13,6 +13,11 @@ how identities map, and the caveats when comparing old artifacts.
 | [0003](adr/0003-phase1-measurement-and-baseline.md) | Phase 1 measurement and baseline | Accepted (2026-10-23) |
 | [0004](adr/0004-battery-optimizer-production-architecture.md) | Production runtime and independent source repository | Proposed |
 
+## Service
+
+- [Resident shadow service](service.md): architecture, endpoints, metrics, configuration, failure modes and the
+  shadow-vs-native comparison method.
+
 ## Planning
 
 | Document | Purpose |
