@@ -388,6 +388,20 @@ at the event's local-day start, the same rules as before the seam. Registered fo
 |---|---|---|
 | `trailing_mean` (default) | LF-0, the 28-day same-slot trailing mean. Bit-identical to the pre-seam path | `window_days`, fed by `--day-ahead-forecast-window-days` |
 | `perfect` | **Offline oracle.** It returns the measured load of the target slots. Gap-excluded slots pass through the same value the whole-horizon oracle sees, and the shared usable mask gives them zero flow, so the value cannot change a plan. It is flagged `oracle=True`, refused by the service, and recorded as an oracle in the artifact | none |
+| `trailing_median` | Same-slot median over the previous `window_days` local days. Robust to appliance spikes | `window_days` (28) |
+| `trailing_trimmed_mean` | Same-slot mean after dropping `floor(trim·n)` values at each end | `window_days` (28), `trim` (0.1) |
+| `ewma` | Same-slot exponentially weighted mean over days, weight `0.5^(age/half_life_days)` with age counted from the target day | `half_life_days` (7), `window_days` (56, the cap) |
+| `daytype` | Mean of the last `n_days` local days of the target's day type: weekday, Saturday, or Sunday-or-holiday. Spanish national holidays (plus an optional subdivision) come from the [`holidays`](https://pypi.org/project/holidays/) package. Days without usable data are skipped | `n_days` (6), `window_days` (84, the search limit), `subdivision` (none = national only) |
+| `level_adjusted` | The 28-day trailing-mean profile times `clip(observed last 24 h ÷ profile of those slots, lo, hi)`. **Declares `intraday_cutoff`**: at the 14:00 and 20:30 events the last 24 h include today's observed slots. One factor scales every target day; under 24 observed slots it stays 1.0 | `window_days` (28), `lo` (0.7), `hi` (1.4), `min_slots` (24) |
+| `blend` | `w · trailing mean + (1 − w) ·` the same-season-last-year profile: the mean of the local days within `last_year_half_width_days` of the same date one year earlier. Trailing alone where fewer than `min_last_year_days` of those days have usable data | `w` (0.5), `window_days` (28), `last_year_half_width_days` (14), `min_last_year_days` (7) |
+
+The six statistical candidates (`trailing_median` to `blend`) read the
+same history as LF-0, aligned by slot position inside each local day, so a 92- or 100-interval DST
+day is still one local day. An interval that is not usable is unknown: it never contributes and is
+never counted as zero. A slot no history day knows takes the window's pooled mean, and a window with
+no usable interval forecasts 0.0 kWh and is flagged `zero_no_history`, exactly as LF-0 does. They
+are evaluated with [`forecast-eval`](#forecast-evaluation-forecast-eval). The shadow service plans at
+the local midnight of the decision day, so there `level_adjusted` sees yesterday only.
 
 The default adds nothing to the run identity, so a pre-seam identity is reproduced except for
 `code_version`. Any other forecaster adds `load_forecaster` and `load_forecaster_params`. Every run
