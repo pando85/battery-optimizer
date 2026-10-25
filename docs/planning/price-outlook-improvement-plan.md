@@ -127,4 +127,4 @@ Decided 2026-10-25:
   and reworks what is needed.
 
 Still open:
-1. GA minimum worthwhile gain (private).
+1. GA threshold: the owner sets it **after seeing the PO-A headroom** (decided 2026-10-25).
