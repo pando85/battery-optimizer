@@ -6,6 +6,9 @@ build-backend = "hatchling.build"
 name = "battery-optimizer"
 version = "0.1.0"
 description = "Battery optimisation toolkit: Prometheus/Home Assistant extraction, dataset build and battery MPC benchmarks"
+readme = "README.md"
+license = "GPL-3.0-only"
+license-files = ["LICENSE.md"]
 requires-python = ">=3.14"
 dependencies = [
     "pyarrow",
@@ -15,6 +18,11 @@ dependencies = [
     "httpx",
     "numpy",
 ]
+
+[project.urls]
+Homepage = "https://github.com/pando85/battery-optimizer"
+Issues = "https://github.com/pando85/battery-optimizer/issues"
+Changelog = "https://github.com/pando85/battery-optimizer/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -26,8 +34,19 @@ dev = [
 [project.scripts]
 battery-optimizer = "battery_optimizer.cli:main"
 
+[dependency-groups]
+# Release/CI tooling, kept out of the runtime image and the test environment.
+# Use with: uv run --only-group tools <command>
+tools = [
+    "git-cliff",
+    "pre-commit",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/battery_optimizer"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/config", "/README.md", "/LICENSE.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
