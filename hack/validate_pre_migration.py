@@ -78,7 +78,7 @@ Honesty rules:
   from ``manifest.code_version()`` — the real ``git rev-parse HEAD`` plus
   ``-dirty`` — with ``git_head`` and ``git_dirty`` alongside it so the dirty state
   needs no suffix parsing, a ``source_hashes`` map of sha256 over the raw bytes of
-  EVERY ``energy_baseline`` module the runner imports (traced from the import graph,
+  EVERY ``battery_optimizer`` module the runner imports (traced from the import graph,
   not a hand-kept list) plus this file itself, and both ``config_sha256`` (raw
   bytes) and the canonical ``config_hash`` next to ``config_path``.  The identity is
   snapshotted at the START and again at the END of the run and cross-checked: code
@@ -127,39 +127,39 @@ import pyarrow.parquet as pq
 _here = Path(__file__).resolve().parent
 _project = _here.parent
 _src = _project / "src"
-_package = _src / "energy_baseline"
+_package = _src / "battery_optimizer"
 _runner_path = Path(__file__).resolve()
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from energy_baseline.artifact_integrity import (  # noqa: E402
+from battery_optimizer.artifact_integrity import (  # noqa: E402
     finalize_run_outputs,
     monthly_usable_fraction_gate,
 )
-from energy_baseline.battery import (  # noqa: E402
+from battery_optimizer.battery import (  # noqa: E402
     BatteryPhysicsError,
     BatterySpec,
     Horizon,
 )
-from energy_baseline.benchmark import (  # noqa: E402
+from battery_optimizer.benchmark import (  # noqa: E402
     BenchmarkInputError,
     load_dataset,
     resolve_battery_assumptions,
     usable_mask,
 )
-from energy_baseline.config import load_config  # noqa: E402
-from energy_baseline.manifest import (  # noqa: E402
+from battery_optimizer.config import load_config  # noqa: E402
+from battery_optimizer.manifest import (  # noqa: E402
     DIRTY_SUFFIX,
     NO_GIT_MARKER,
 )
-from energy_baseline.manifest import (  # noqa: E402
+from battery_optimizer.manifest import (  # noqa: E402
     code_version as git_code_version,
 )
-from energy_baseline.manifest import (  # noqa: E402
+from battery_optimizer.manifest import (  # noqa: E402
     config_hash as canonical_config_hash,
 )
-from energy_baseline.oracle import OracleError, solve_oracle  # noqa: E402
-from energy_baseline.policies import (  # noqa: E402
+from battery_optimizer.oracle import OracleError, solve_oracle  # noqa: E402
+from battery_optimizer.policies import (  # noqa: E402
     DayAheadDay,
     contiguous_day_bounds,
     fit_thresholds,
@@ -168,7 +168,7 @@ from energy_baseline.policies import (  # noqa: E402
     policy_day_ahead,
     policy_no_battery,
 )
-from energy_baseline.rolling_horizon import (  # noqa: E402
+from battery_optimizer.rolling_horizon import (  # noqa: E402
     LOAD_FORECAST_MODE_CAUSAL,
     LOAD_FORECAST_MODE_FROZEN,
     CausalForecastProvider,
@@ -277,12 +277,12 @@ def _inside_git_worktree(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 #: Modules that are not reachable from this runner's import graph today but belong
-#: to the same dispatch contract this milestone scores: :mod:`energy_baseline.dispatch`
+#: to the same dispatch contract this milestone scores: :mod:`battery_optimizer.dispatch`
 #: is the planner-to-writer seam that ``replay_runtime`` builds out of exactly these
 #: schedules.  Recording it is one extra digest; *omitting* a module is how a
 #: provenance map silently under-attests (the failure mode this runner is built to
 #: avoid, and the one a sibling study shipped).
-_MANDATORY_SOURCE_MODULES: tuple[str, ...] = ("energy_baseline.dispatch",)
+_MANDATORY_SOURCE_MODULES: tuple[str, ...] = ("battery_optimizer.dispatch",)
 
 
 def _file_sha256(path: Path) -> str:
@@ -297,11 +297,11 @@ def _file_sha256(path: Path) -> str:
 def _git_identity() -> tuple[str, str | None, bool | None]:
     """``(code_version, git_head, git_dirty)`` from ONE read of the shared identity.
 
-    :func:`energy_baseline.manifest.code_version` is the facility ``build`` and
+    :func:`battery_optimizer.manifest.code_version` is the facility ``build`` and
     ``benchmark`` already pin their artifacts with: the 40-character
-    ``git rev-parse HEAD``, plus :data:`~energy_baseline.manifest.DIRTY_SUFFIX` when
+    ``git rev-parse HEAD``, plus :data:`~battery_optimizer.manifest.DIRTY_SUFFIX` when
     the working tree carries uncommitted changes, or
-    :data:`~energy_baseline.manifest.NO_GIT_MARKER` when git cannot be asked at all.
+    :data:`~battery_optimizer.manifest.NO_GIT_MARKER` when git cannot be asked at all.
 
     Deriving all three from that one string keeps ``code_version`` and ``git_head``
     / ``git_dirty`` from ever contradicting each other, while the explicit fields
@@ -321,11 +321,11 @@ def _module_to_path(name: str) -> Path | None:
     """Resolve a dotted first-party module name to its source file, or ``None``.
 
     ``None`` means "not a module we can hash": a third-party name, or an attribute
-    named in a ``from ... import`` clause (``energy_baseline.battery.BatterySpec``
+    named in a ``from ... import`` clause (``battery_optimizer.battery.BatterySpec``
     is a class, not a file).
     """
     parts = name.split(".")
-    if parts[0] != "energy_baseline":
+    if parts[0] != "battery_optimizer":
         return None
     if len(parts) == 1:
         return _package / "__init__.py"
@@ -365,12 +365,12 @@ def _names_imported_by(tree: ast.AST, anchor: str) -> set[str]:
     """Every dotted name an ``import`` statement in *tree* could refer to.
 
     Both the imported package and each alias are returned, because
-    ``from energy_baseline import cost`` and ``from .battery import BatterySpec``
+    ``from battery_optimizer import cost`` and ``from .battery import BatterySpec``
     name a module in one position and a symbol in the next — the resolver in
     :func:`_static_first_party_closure` keeps whichever one maps to a file.
     ``importlib.import_module("literal")`` is followed too, and function-level
     imports are included: ``ast.walk`` descends into bodies, which is what catches
-    ``benchmark._modules()`` pulling in :mod:`energy_baseline.cost` only on call.
+    ``benchmark._modules()`` pulling in :mod:`battery_optimizer.cost` only on call.
     """
     names: set[str] = set()
     for node in ast.walk(tree):
@@ -399,8 +399,8 @@ def _names_imported_by(tree: ast.AST, anchor: str) -> set[str]:
 def _parent_package_inits(path: Path) -> list[tuple[str, Path]]:
     """The package ``__init__.py`` files importing *path* necessarily executes.
 
-    ``energy_baseline/hack/x.py`` pulls in ``energy_baseline/hack/__init__.py`` and
-    ``energy_baseline/__init__.py``; both sets of bytes are on the causal path and
+    ``battery_optimizer/hack/x.py`` pulls in ``battery_optimizer/hack/__init__.py`` and
+    ``battery_optimizer/__init__.py``; both sets of bytes are on the causal path and
     both have to be pinned, or a change that lives only in a package initialiser is
     invisible to the artifact.
     """
@@ -461,7 +461,7 @@ def _runtime_first_party_modules() -> dict[str, Path]:
     """
     found: dict[str, Path] = {}
     for name in list(sys.modules):
-        if name != "energy_baseline" and not name.startswith("energy_baseline."):
+        if name != "battery_optimizer" and not name.startswith("battery_optimizer."):
             continue
         target = _module_to_path(name)
         if target is not None and target.is_file():
@@ -498,7 +498,7 @@ def _project_relative(path: Path) -> str:
 def _collect_source_hashes() -> dict[str, str]:
     """sha256 of the raw bytes of every module this run depends on, plus this file.
 
-    Keys are project-relative paths (``src/energy_baseline/battery.py``), so a
+    Keys are project-relative paths (``src/battery_optimizer/battery.py``), so a
     reviewer holding a commit can read exactly these bytes with
     ``git show <sha>:scripts/energy-baseline/<key>``.
     """

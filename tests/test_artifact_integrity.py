@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from energy_baseline.artifact_integrity import (
+from battery_optimizer.artifact_integrity import (
     BENCHMARK_MANIFEST_NAME,
     BENCHMARK_REQUIRED_FILES,
     MANIFEST_SCHEMA_VERSION,

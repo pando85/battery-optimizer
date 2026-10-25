@@ -196,15 +196,15 @@ def _analysis_table(
 
 
 def _analysis_schema() -> pa.Schema:
-    from energy_baseline.schemas import ANALYSIS_INTERVAL
+    from battery_optimizer.schemas import ANALYSIS_INTERVAL
 
     return ANALYSIS_INTERVAL
 
 
 def _write_dataset(root: Path, table: pa.Table, *, config_path: Path, dataset_id: str) -> Path:
     """Write ``<root>/analysis/v<schema>/<dataset_id>`` with a valid build manifest."""
-    from energy_baseline.manifest import config_hash
-    from energy_baseline.schemas import SCHEMA_VERSION
+    from battery_optimizer.manifest import config_hash
+    from battery_optimizer.schemas import SCHEMA_VERSION
 
     dataset_dir = root / "analysis" / f"v{SCHEMA_VERSION}" / dataset_id
     parts_dir = dataset_dir / "parts"
@@ -1053,7 +1053,7 @@ class TestFailureRecording:
     def test_declared_solver_failure_is_recorded_and_exit_is_nonzero(
         self, runner, main_env, monkeypatch
     ) -> None:
-        from energy_baseline.oracle import OracleInfeasibleError
+        from battery_optimizer.oracle import OracleInfeasibleError
 
         real = runner.optimize_with_throughput
 
@@ -1185,8 +1185,8 @@ class TestLineage:
         assert all(re.fullmatch(r"[0-9a-f]{64}", h) for h in lineage["source_hashes"].values())
         assert set(lineage["source_hashes"]) >= {
             "hack/economic_sensitivity.py",
-            "src/energy_baseline/economic_sensitivity.py",
-            "src/energy_baseline/oracle.py",
+            "src/battery_optimizer/economic_sensitivity.py",
+            "src/battery_optimizer/oracle.py",
         }
         assert len(lineage["dataset_part_files"]) == 1
         assert lineage["dataset_part_files"][0]["rows"] == 12 * SLOTS

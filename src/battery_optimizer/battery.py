@@ -3,8 +3,8 @@
 Pure numeric kernel: no filesystem, network, or Parquet access.  Everything
 here operates on :class:`BatterySpec`, :class:`Horizon` and plain per-interval
 arrays, so the physics can be unit-tested offline and reused by the policies
-(:mod:`energy_baseline.policies`), the oracle
-(:mod:`energy_baseline.oracle`) and the benchmark CLI.
+(:mod:`battery_optimizer.policies`), the oracle
+(:mod:`battery_optimizer.oracle`) and the benchmark CLI.
 
 Units
 -----
@@ -17,7 +17,7 @@ Units
   terminals** — the same side ``gross_kwh`` is metered on — so net import is
   ``grid = load + charge - discharge``.
 * prices are EUR/kWh **pretax**; tax is a separate concern
-  (:func:`energy_baseline.config.tax_multiplier`).
+  (:func:`battery_optimizer.config.tax_multiplier`).
 
 Physics invariants (ADR-0003 §"Battery physical simulator")
 -----------------------------------------------------------
@@ -240,7 +240,7 @@ class BatterySpec:
     Deliberately *not* validated here: this is a plain data carrier, so a
     malformed spec can be handed to :func:`validate_spec`,
     :func:`check_feasible`, :func:`simulate` or
-    :func:`energy_baseline.oracle.solve_oracle` and be rejected there with a
+    :func:`battery_optimizer.oracle.solve_oracle` and be rejected there with a
     precise message.
     """
 
@@ -368,7 +368,7 @@ class Horizon:
     same basis contracted power is enforced on, and the reason peaks in the
     archive neither validate nor contradict this number (module docstring,
     invariant 6).  Enforced by :func:`check_feasible`, :func:`simulate` and
-    :func:`energy_baseline.oracle.solve_oracle`; discharge is bounded only by the
+    :func:`battery_optimizer.oracle.solve_oracle`; discharge is bounded only by the
     no-export rule, so it stays available when the ceiling is tightest.
     """
 
@@ -825,7 +825,7 @@ def check_feasible(
             oracle use this: they cannot guarantee end-of-horizon energy
             neutrality — but :func:`check_feasible` with the default still
             reports the mismatch, and the fixed-mode
-            :func:`energy_baseline.oracle.solve_oracle` enforces it.
+            :func:`battery_optimizer.oracle.solve_oracle` enforces it.
         tol: Absolute kWh slack for every comparison, scaled by
             ``capacity_kwh`` for SOC-window checks.
 

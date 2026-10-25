@@ -19,19 +19,19 @@ So everything here is a **request**, expressed as values, with no I/O:
   retries, minimum setpoint change, rate limit, safe-idle lease).  Data only:
   this module never writes to a device and owns no writer.
 * :func:`intents_from_schedule` — the bridge from the plans the offline pipeline
-  already produces (:mod:`energy_baseline.policies`,
-  :mod:`energy_baseline.rolling_horizon`) to contract intents.
+  already produces (:mod:`battery_optimizer.policies`,
+  :mod:`battery_optimizer.rolling_horizon`) to contract intents.
 
 Design decisions that are load-bearing
 --------------------------------------
 1. **The physics is not re-implemented here.**  Power limits, the SOC window,
    one-binary-mode-per-interval and the import-ceiling headroom rule are checked
-   by :func:`energy_baseline.battery.check_feasible` on the flows each intent was
-   derived from, using the caller's :class:`~energy_baseline.battery.BatterySpec`.
+   by :func:`battery_optimizer.battery.check_feasible` on the flows each intent was
+   derived from, using the caller's :class:`~battery_optimizer.battery.BatterySpec`.
    The **import ceiling constrains charging only**: net import above it because
    the *measured load* already exceeds it is an observation
-   (:func:`energy_baseline.battery.ceiling_exceedance_indices`,
-   :attr:`~energy_baseline.battery.Schedule.ceiling_exceeding_intervals`), never a
+   (:func:`battery_optimizer.battery.ceiling_exceedance_indices`,
+   :attr:`~battery_optimizer.battery.Schedule.ceiling_exceeding_intervals`), never a
    rejection.  That framing comes from ``battery.py`` invariants 6 and 7 and is
    deliberately not tightened here — the ceiling constrains a decision we make,
    not history we measured.
@@ -52,10 +52,10 @@ Design decisions that are load-bearing
    ``utcnow()`` or ``time.time()``.  The caller supplies ``generated_at``; in
    offline replay that is the *simulated decision instant*, so re-running a
    replay produces byte-identical plans and therefore stable content hashes for a
-   no-clobber store.  (Same reason :mod:`energy_baseline.policies` refuses to
+   no-clobber store.  (Same reason :mod:`battery_optimizer.policies` refuses to
    record solver wall-clock time.)
 
-5. **Canonical JSON + SHA-256**, the convention :mod:`energy_baseline.manifest`
+5. **Canonical JSON + SHA-256**, the convention :mod:`battery_optimizer.manifest`
    already uses: ``json.dumps(..., sort_keys=True)`` hashed over its UTF-8 bytes.
    Compact separators rather than ``indent=2``, because these bytes are hashed
    content and not a human-facing report, and **no** ``default=str``, so an
@@ -72,7 +72,7 @@ Errors
 Structural problems raise :class:`DispatchError` (a :class:`ValueError`) with a
 one-line message, following the precedent of the ``build`` no-clobber collision
 and the missing-benchmark-view exit: one clean line, not a traceback.  Physical
-infeasibility raises :class:`~energy_baseline.battery.BatteryPhysicsError` from
+infeasibility raises :class:`~battery_optimizer.battery.BatteryPhysicsError` from
 the shared kernel.  There is no blanket ``except Exception``, and a programmer
 error is never swallowed.
 """
@@ -251,7 +251,7 @@ def _power_w(energy_kwh: float, interval_seconds: float) -> float:
 def canonical_json(payload: Mapping[str, Any]) -> str:
     """Deterministic canonical JSON for a dispatch payload.
 
-    Same convention as :mod:`energy_baseline.manifest` (``sort_keys=True``, hash
+    Same convention as :mod:`battery_optimizer.manifest` (``sort_keys=True``, hash
     over UTF-8 bytes) with two deliberate moves toward strictness: compact
     separators, because these bytes are hashed content rather than a report, and
     no ``default=str``, so an unserializable value raises instead of being
@@ -1032,7 +1032,7 @@ def dispatch_intents_arrow_schema() -> Any:
     The belief columns are nullable; nothing else is, because the contract has no
     legitimate way to omit them.
 
-    Returned rather than registered in :mod:`energy_baseline.schemas` on purpose:
+    Returned rather than registered in :mod:`battery_optimizer.schemas` on purpose:
     registering a schema implies a writer that TODO-4.6 does not include, and this
     module can then own its own shape without touching shared files.
     """
@@ -1075,11 +1075,11 @@ def intents_from_schedule(
 ) -> DispatchPlan:
     """Turn an existing per-interval plan into contract intents.
 
-    The input shape is what :mod:`energy_baseline.policies` and
-    :mod:`energy_baseline.rolling_horizon` actually produce: a
-    :class:`~energy_baseline.battery.Schedule` whose ``charge_kwh`` /
+    The input shape is what :mod:`battery_optimizer.policies` and
+    :mod:`battery_optimizer.rolling_horizon` actually produce: a
+    :class:`~battery_optimizer.battery.Schedule` whose ``charge_kwh`` /
     ``discharge_kwh`` are AC-side kWh per interval, over the
-    :class:`~energy_baseline.battery.Horizon` it was traced against, plus each
+    :class:`~battery_optimizer.battery.Horizon` it was traced against, plus each
     interval's UTC start (the analysis grid's ``interval_start``).  Modes come
     from which leg is positive, powers from energy over the interval length, and
     SOC targets from the schedule's own kWh trajectory divided by nameplate
@@ -1092,10 +1092,10 @@ def intents_from_schedule(
       element may itself be ``None`` (e.g. "price was published, load forecast
       fell back to the pooled mean").  Never defaulted to ``1.0``.
     * ``expected_buy_price_eur_per_kwh`` — the *planning* prices are not on a
-      :class:`~energy_baseline.battery.Schedule`:
-      :func:`energy_baseline.policies.policy_day_ahead` scores against measured
+      :class:`~battery_optimizer.battery.Schedule`:
+      :func:`battery_optimizer.policies.policy_day_ahead` scores against measured
       prices and keeps its noisy planning curve in separate metadata, and
-      :func:`energy_baseline.rolling_horizon.run_rolling_horizon` does the same.
+      :func:`battery_optimizer.rolling_horizon.run_rolling_horizon` does the same.
       So this is opt-in: hand in the forecast array the solve actually used and it
       is recorded as a belief; omit it and every intent carries ``None``.  Passing
       ``horizon.prices`` is legitimate but is then labelled by *your* call — this
@@ -1103,7 +1103,7 @@ def intents_from_schedule(
 
     Validation is delegated, not duplicated
     ---------------------------------------
-    The whole plan is re-checked by :func:`energy_baseline.battery.check_feasible`
+    The whole plan is re-checked by :func:`battery_optimizer.battery.check_feasible`
     with ``enforce_terminal_soc=False``: an emitted intent sequence is an open
     cycle whose endpoint the next replan owns, exactly as the causal policy and
     both rolling variants already assume.  Per-interval SOC bounds are additionally

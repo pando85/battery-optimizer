@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from energy_baseline import paths as paths_module
-from energy_baseline.paths import (
+from battery_optimizer import paths as paths_module
+from battery_optimizer.paths import (
     _find_git_root,
     _is_inside_git_tree,
     iter_parts,
@@ -29,7 +29,7 @@ from energy_baseline.paths import (
 class TestResolveDataDir:
     def test_default_not_under_repo(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Default data dir must NOT be inside the git worktree."""
-        monkeypatch.delenv("ENERGY_BASELINE_DATA_DIR", raising=False)
+        monkeypatch.delenv("BATTERY_OPTIMIZER_DATA_DIR", raising=False)
         result = resolve_data_dir()
         repo_root = Path("/home/agil/homelab").resolve()
         assert not str(result).startswith(str(repo_root)), (
@@ -37,28 +37,28 @@ class TestResolveDataDir:
         )
 
     def test_default_expands_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("ENERGY_BASELINE_DATA_DIR", raising=False)
+        monkeypatch.delenv("BATTERY_OPTIMIZER_DATA_DIR", raising=False)
         result = resolve_data_dir()
         assert "~" not in str(result)
         assert result.name == "energy-baseline"
 
     def test_env_override(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", str(tmp_path / "custom"))
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", str(tmp_path / "custom"))
         result = resolve_data_dir()
         assert result == (tmp_path / "custom").resolve()
 
     def test_cli_arg_wins(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", str(tmp_path / "env"))
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", str(tmp_path / "env"))
         result = resolve_data_dir(cli_arg=str(tmp_path / "cli"))
         assert result == (tmp_path / "cli").resolve()
 
     def test_expanduser_in_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", "~/test-energy-data")
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", "~/test-energy-data")
         result = resolve_data_dir()
         assert "~" not in str(result)
 
     def test_expanduser_in_cli_arg(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("ENERGY_BASELINE_DATA_DIR", raising=False)
+        monkeypatch.delenv("BATTERY_OPTIMIZER_DATA_DIR", raising=False)
         result = resolve_data_dir(cli_arg="~/test-energy-data")
         assert "~" not in str(result)
 
@@ -71,7 +71,7 @@ class TestResolveDataDir:
         repo.mkdir()
         (repo / ".git").mkdir()
         inside = repo / "data"
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", str(inside))
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", str(inside))
         with pytest.raises(ValueError, match="inside git worktree"):
             resolve_data_dir()
 

@@ -1,5 +1,5 @@
 ---
-# Tariff configuration for energy-baseline (ADR-0003).
+# Tariff configuration for battery-optimizer (ADR-0003).
 #
 # The PVPC sensor (via pvpc_updated / ESIOS indicator 1001) reports €/kWh and
 # already includes access tolls + charges + production cost.  It EXCLUDES taxes.
@@ -73,7 +73,7 @@ battery:
   # Every benchmark figure computed at 0.88 is now an optimistic superseded
   # result; those figures are not restated.
   #
-  # compute_dataset_id in src/energy_baseline/build.py hashes
+  # compute_dataset_id in src/battery_optimizer/build.py hashes
   # config_hash(cfg_path), a SHA-256 over the canonical re-dumped YAML of the
   # whole file.  Changing this VALUE changes dataset_id, forces a rebuild, and
   # requires a recorded supersession of dataset

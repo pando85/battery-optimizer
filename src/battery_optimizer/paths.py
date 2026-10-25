@@ -2,7 +2,7 @@
 
 The data directory lives **outside** the git worktree.  Default is
 ``~/data/energy-baseline``, overridable via ``--data-dir`` or the
-``ENERGY_BASELINE_DATA_DIR`` environment variable.
+``BATTERY_OPTIMIZER_DATA_DIR`` environment variable.
 
 Part filename contract::
 
@@ -22,6 +22,11 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+from battery_optimizer._env import get_env
+
+# Deliberately keeps the pre-rename ``energy-baseline`` name: this is an existing,
+# immutable private store, and stored benchmark JSONs embed its absolute path, so
+# renaming it would break verification of historical dataset_ids.
 _DEFAULT_DATA_DIR = "~/data/energy-baseline"
 
 
@@ -45,7 +50,7 @@ def _is_inside_git_tree(path: Path) -> bool:
 def resolve_data_dir(cli_arg: str | None = None) -> Path:
     """Resolve the data directory.
 
-    Priority: *cli_arg* > ``ENERGY_BASELINE_DATA_DIR`` env > default.
+    Priority: *cli_arg* > ``BATTERY_OPTIMIZER_DATA_DIR`` env > default.
 
     All paths are expanded (``~``) and resolved to absolute.  The result
     is rejected if it falls inside a git worktree (detected by the
@@ -54,7 +59,7 @@ def resolve_data_dir(cli_arg: str | None = None) -> Path:
     if cli_arg:
         resolved = Path(os.path.expanduser(cli_arg)).resolve()
     else:
-        env = os.environ.get("ENERGY_BASELINE_DATA_DIR")
+        env = get_env("BATTERY_OPTIMIZER_DATA_DIR")
         if env:
             resolved = Path(os.path.expanduser(env)).resolve()
         else:

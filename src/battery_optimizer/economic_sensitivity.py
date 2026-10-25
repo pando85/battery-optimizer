@@ -1,8 +1,8 @@
 """Economic sensitivity analysis — throughput cost and terminal value sweeps.
 
 Pure numeric module: no filesystem, network, or Parquet access.  Consumes
-:class:`~energy_baseline.battery.BatterySpec`, :class:`~energy_baseline.battery.Horizon`
-and :class:`~energy_baseline.battery.Schedule` objects and returns plain dicts.
+:class:`~battery_optimizer.battery.BatterySpec`, :class:`~battery_optimizer.battery.Horizon`
+and :class:`~battery_optimizer.battery.Schedule` objects and returns plain dicts.
 
 Purpose
 -------
@@ -221,7 +221,7 @@ def optimize_with_throughput(
             Must be finite and non-negative.  All values are user-supplied
             hypotheticals.
         terminal_mode: ``"fixed"`` (default) or ``"free"``.  See
-            :func:`energy_baseline.oracle.solve_oracle`.
+            :func:`battery_optimizer.oracle.solve_oracle`.
         terminal_value_eur_per_kwh: EUR/DC-kWh value of the terminal inventory.
             Required when ``terminal_mode="free"``.
         time_limit_s: Wall-clock limit for the solver.
@@ -231,7 +231,7 @@ def optimize_with_throughput(
 
     Returns:
         ``(schedule, info)`` where ``schedule`` is the optimized
-        :class:`~energy_baseline.battery.Schedule` and ``info`` is a dict with:
+        :class:`~battery_optimizer.battery.Schedule` and ``info`` is a dict with:
 
         * ``throughput_cost_eur_per_kwh``: the value used.
         * ``total_ac_throughput_kwh``: total AC energy throughput.

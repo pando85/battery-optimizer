@@ -1,4 +1,4 @@
-"""Tests for ``energy_baseline.cost`` — pre-tax cost and effective-dated taxes.
+"""Tests for ``battery_optimizer.cost`` — pre-tax cost and effective-dated taxes.
 
 Everything here is synthetic: no network, no cluster, no real invoice and no
 real tariff rates.  The tax bands and dates are invented for the test and named
@@ -40,8 +40,8 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from energy_baseline import cost as cost_mod
-from energy_baseline.cost import (
+from battery_optimizer import cost as cost_mod
+from battery_optimizer.cost import (
     ALLOCATION_EXACT,
     COST_BASIS_TAXED,
     COST_BASIS_UNTAXED,
@@ -72,7 +72,7 @@ from energy_baseline.cost import (
     tax_rate_changes,
     usable_intervals,
 )
-from energy_baseline.schemas import ANALYSIS_INTERVAL
+from battery_optimizer.schemas import ANALYSIS_INTERVAL
 
 MADRID = "Europe/Madrid"
 JAN_BAND = date(2026, 1, 1)
@@ -863,7 +863,7 @@ class TestAccountIntervals:
         result = account_intervals([], confirmed_config())
         # Empty input has no months; ask for the counts through the helpers below.
         assert result["months"] == {}
-        from energy_baseline.cost import _expected_intervals  # noqa: PLC0415 - white-box check
+        from battery_optimizer.cost import _expected_intervals  # noqa: PLC0415 - white-box check
 
         tz = ZoneInfo(MADRID)
         assert _expected_intervals(tz, 2026, 1, 900) == 31 * 96
@@ -1101,7 +1101,7 @@ battery:
 class TestWithRealConfig:
     @pytest.fixture
     def synthetic_cfg(self, tmp_path: Path) -> Any:
-        from energy_baseline.config import load_config
+        from battery_optimizer.config import load_config
 
         path = tmp_path / "tariff.yaml"
         path.write_text(SYNTHETIC_YAML)
@@ -1125,7 +1125,7 @@ class TestWithRealConfig:
 
     def test_shipped_tariff_yaml_stays_unconfirmed(self) -> None:
         """The committed config must still refuse billed figures: no invented rates."""
-        from energy_baseline.config import load_config
+        from battery_optimizer.config import load_config
 
         shipped = Path(__file__).resolve().parents[1] / "config" / "tariff.yaml"
         if not shipped.exists():  # pragma: no cover - repo layout guard
@@ -1169,6 +1169,6 @@ class TestWithRealConfig:
 
     def test_module_does_not_mutate_config_or_round_money(self) -> None:
         source = inspect.getsource(cost_mod)
-        assert "import energy_baseline.config" not in source  # TYPE_CHECKING only
-        assert "from energy_baseline.config import" in source  # guarded, typing only
+        assert "import battery_optimizer.config" not in source  # TYPE_CHECKING only
+        assert "from battery_optimizer.config import" in source  # guarded, typing only
         assert "round(" not in source.replace("rounding", "")

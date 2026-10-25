@@ -1,4 +1,4 @@
-# energy-baseline
+# battery-optimizer
 
 Reproducible energy measurement and baseline toolkit for the home battery optimizer project
 ([ADR-0003](../../docs/adr/0003-phase1-measurement-and-baseline.md)).
@@ -7,7 +7,7 @@ Reproducible energy measurement and baseline toolkit for the home battery optimi
 
 ```bash
 uv sync --extra dev
-uv run energy-baseline --help
+uv run battery-optimizer --help
 uv run pytest
 uv run ruff check .
 ```
@@ -17,7 +17,12 @@ uv run ruff check .
 ### Data directory
 
 All output goes to a private data directory **outside the git worktree**.
-Default: `~/data/energy-baseline`. Override with `--data-dir` or `ENERGY_BASELINE_DATA_DIR`.
+Default: `~/data/energy-baseline`. Override with `--data-dir` or `BATTERY_OPTIMIZER_DATA_DIR`.
+
+The default directory keeps its pre-rename `energy-baseline` name on purpose (it is an existing
+immutable store and stored benchmark JSONs embed its path). The legacy `ENERGY_BASELINE_*`
+environment variables are still honoured as a deprecated fallback (`DeprecationWarning`); the
+`BATTERY_OPTIMIZER_*` name wins when both are set.
 
 **Development (this repo, local runs):** data lives under `/tmp/opencode/energy-baseline`
 (chmod 0700, ephemeral, wiped on reboot). Used for first-extraction milestones and
@@ -64,13 +69,13 @@ Every command below is run manually (or by a human-driven runbook). A scheduled 
 
 ```bash
 # Prometheus (no auth, default 4 entities)
-uv run energy-baseline extract \
+uv run battery-optimizer extract \
   --source prometheus \
   --config config/tariff.yaml \
   --lookback-days 9
 
-# HA history (requires ENERGY_BASELINE_HA_TOKEN env var)
-uv run energy-baseline extract \
+# HA history (requires BATTERY_OPTIMIZER_HA_TOKEN env var)
+uv run battery-optimizer extract \
   --source ha-history \
   --config config/tariff.yaml \
   --start 2026-10-14T00:00:00Z \
@@ -79,7 +84,7 @@ uv run energy-baseline extract \
   --entities sensor.lavavajillas_current_status
 
 # Both sources in one run
-uv run energy-baseline extract --source all --lookback-days 7
+uv run battery-optimizer extract --source all --lookback-days 7
 ```
 
 Time window: either `--start`/`--end` (ISO-8601 UTC, end defaults to now) or
@@ -93,9 +98,9 @@ level](#overlapping-re-extraction-is-deduplicated-at-row-level).
 ### `validate`
 
 ```bash
-uv run energy-baseline validate --source ha-history
-uv run energy-baseline validate --source prometheus
-uv run energy-baseline validate --source all   # default
+uv run battery-optimizer validate --source ha-history
+uv run battery-optimizer validate --source prometheus
+uv run battery-optimizer validate --source all   # default
 ```
 
 Checks per source:
@@ -109,7 +114,7 @@ Exit code 0 if all checks pass; 1 otherwise.
 ### `build`
 
 ```bash
-uv run energy-baseline build \
+uv run battery-optimizer build \
   --start 2026-10-01T00:00:00+00:00 \
   --end 2026-10-23T00:00:00+00:00 \
   --assume-no-battery  # default; use --no-assume-no-battery to refuse
@@ -134,7 +139,7 @@ directory, or remove that one dataset directory yourself and re-run.
 ### `benchmark`
 
 ```bash
-uv run energy-baseline benchmark \
+uv run battery-optimizer benchmark \
   --dataset ~/data/energy-baseline/analysis/v1/<dataset_id> \
   --train-end 2026-09-01T00:00:00+00:00 \
   --policies all \
@@ -544,8 +549,8 @@ exists. Fill taxes from a verified invoice to get a taxed basis.
 ### `report`
 
 ```bash
-uv run energy-baseline report --dataset ~/data/energy-baseline/analysis/v1/<dataset_id>
-uv run energy-baseline report --benchmark ~/data/energy-baseline/analysis/v1/<dataset_id>/benchmarks/<run_id>
+uv run battery-optimizer report --dataset ~/data/energy-baseline/analysis/v1/<dataset_id>
+uv run battery-optimizer report --benchmark ~/data/energy-baseline/analysis/v1/<dataset_id>/benchmarks/<run_id>
 ```
 
 `--dataset` must contain exactly one benchmark run; if multiple runs exist, the error lists the
@@ -571,10 +576,10 @@ one file by hand and know that its bytes will differ from what was reviewed.
 ### `inspect-sql`
 
 ```bash
-uv run energy-baseline inspect-sql --list-queries
-uv run energy-baseline inspect-sql --dataset ~/data/energy-baseline/analysis/v1/<dataset_id> \
+uv run battery-optimizer inspect-sql --list-queries
+uv run battery-optimizer inspect-sql --dataset ~/data/energy-baseline/analysis/v1/<dataset_id> \
   --query price_distribution
-uv run energy-baseline inspect-sql --dataset ~/data/energy-baseline/analysis/v1/<dataset_id> \
+uv run battery-optimizer inspect-sql --dataset ~/data/energy-baseline/analysis/v1/<dataset_id> \
   --sql "SELECT * FROM intervals WHERE price_eur_per_kwh > 0.20" \
   --benchmark ~/data/energy-baseline/analysis/v1/<dataset_id>/benchmarks/<run_id>
 ```
@@ -595,13 +600,13 @@ missing view and telling you to pass `--benchmark` — instead of leaking a raw
 
 ```bash
 # Summary of the store: parts, rows before and after dedup, entities present
-uv run energy-baseline ha-states
+uv run battery-optimizer ha-states
 
 # Every deduplicated state for one entity, in order
-uv run energy-baseline ha-states --entity sensor.lavadora_current_status --list-states
+uv run battery-optimizer ha-states --entity sensor.lavadora_current_status --list-states
 
 # What that entity's state was at an instant (inclusive at the transition boundary)
-uv run energy-baseline ha-states --entity sensor.lavadora_current_status \
+uv run battery-optimizer ha-states --entity sensor.lavadora_current_status \
   --as-of 2026-10-20T12:00:00Z
 ```
 
@@ -664,12 +669,12 @@ See module docstring.
 
 **Status: complete — committed. NOT deployed, NOT a resident service, NO HA adapter, recording
 only.** Deterministic plan content; record ids are per-run random (`generation_id` is `uuid.uuid4()`). Caller-supplied time; recording-only sink; injectable planner.
-Demo: `python -m energy_baseline.hack.replay_runtime_demo`. See module docstring.
+Demo: `python -m battery_optimizer.hack.replay_runtime_demo`. See module docstring.
 
 ## HA authentication
 
 HA history extraction requires a bearer token. The token is **never written to
-disk** by the package — it is passed via the `ENERGY_BASELINE_HA_TOKEN`
+disk** by the package — it is passed via the `BATTERY_OPTIMIZER_HA_TOKEN`
 environment variable or the `token=` keyword argument to `extract_ha_history()`.
 The HA base URL is also **never recorded**: the manifest keeps only
 `endpoint: "home-assistant-history-api"` plus `endpoint_instance_sha256_16`,
@@ -842,7 +847,7 @@ duplicate rather than inventing an appliance event per run.
 ## Secrets policy
 
 - No secrets are written to files by this package
-- `ENERGY_BASELINE_HA_TOKEN` is read from env or passed explicitly; never logged
+- `BATTERY_OPTIMIZER_HA_TOKEN` is read from env or passed explicitly; never logged
 - HA extraction writes no endpoint identity: the manifest records
   `endpoint: "home-assistant-history-api"` plus a 16-char SHA-256 digest of the
   base URL (`endpoint_instance_sha256_16`) for cross-run correlation only.

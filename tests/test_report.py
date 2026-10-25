@@ -15,9 +15,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from energy_baseline import benchmark as bm
-from energy_baseline import report as rp
-from energy_baseline.config import BatteryConfig, TariffConfig, TariffPeriods, TaxEntry
+from battery_optimizer import benchmark as bm
+from battery_optimizer import report as rp
+from battery_optimizer.config import BatteryConfig, TariffConfig, TariffPeriods, TaxEntry
 
 # ---------------------------------------------------------------------------
 # Helpers (shared with test_benchmark.py)
@@ -95,7 +95,7 @@ def make_analysis_table(
 ) -> pa.Table:
     from zoneinfo import ZoneInfo
 
-    from energy_baseline.schemas import ANALYSIS_INTERVAL
+    from battery_optimizer.schemas import ANALYSIS_INTERVAL
 
     madrid = ZoneInfo("Europe/Madrid")
     starts = [start + timedelta(seconds=i * interval_seconds) for i in range(intervals)]
@@ -145,8 +145,8 @@ def write_synthetic_dataset(
     """
     import hashlib
 
-    from energy_baseline.manifest import config_hash
-    from energy_baseline.schemas import SCHEMA_VERSION
+    from battery_optimizer.manifest import config_hash
+    from battery_optimizer.schemas import SCHEMA_VERSION
 
     if config_path is None:
         config_path = tmp_path / "tariff.yaml"
@@ -252,7 +252,7 @@ class TestGenerateReport:
 
     def test_report_writes_integrity_sidecar(self, tmp_path: Path) -> None:
         """generate_report finalizes an independent report sidecar and exposes integrity info."""
-        from energy_baseline.artifact_integrity import (
+        from battery_optimizer.artifact_integrity import (
             BENCHMARK_MANIFEST_NAME,
             REPORT_MANIFEST_NAME,
             REPORT_REQUIRED_FILES,
@@ -294,8 +294,8 @@ class TestGenerateReport:
 
     def test_report_manifest_excludes_benchmark_files(self, tmp_path: Path) -> None:
         """The report sidecar hashes only report files, not benchmark artifacts."""
-        from energy_baseline.artifact_integrity import REPORT_MANIFEST_NAME
-        from energy_baseline.benchmark import (
+        from battery_optimizer.artifact_integrity import REPORT_MANIFEST_NAME
+        from battery_optimizer.benchmark import (
             RESULTS_JSON_NAME,
             RESULTS_PARQUET_NAME,
             SCHEDULES_PARQUET_NAME,

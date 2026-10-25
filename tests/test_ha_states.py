@@ -14,7 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from energy_baseline.ha_states import (
+from battery_optimizer.ha_states import (
     UNAVAILABLE_STATES,
     HAState,
     HAStore,
@@ -22,8 +22,8 @@ from energy_baseline.ha_states import (
     format_summary,
     load_store,
 )
-from energy_baseline.paths import parts_dir
-from energy_baseline.schemas import RAW_ENUM_STATE
+from battery_optimizer.paths import parts_dir
+from battery_optimizer.schemas import RAW_ENUM_STATE
 
 # ---------------------------------------------------------------------------
 # Helpers

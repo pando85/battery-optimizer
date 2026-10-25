@@ -13,7 +13,6 @@ un-sourced holiday calendar can never silently become an assumption.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -21,6 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from battery_optimizer._env import get_env
 
 # ---------------------------------------------------------------------------
 # Day types
@@ -374,11 +375,11 @@ def tariff_period_for(periods: TariffPeriods, day: date, hour: int) -> int:
 def resolve_config_path(cli_arg: str | None = None) -> Path:
     """Resolve the tariff config path.
 
-    Priority: *cli_arg* > ``ENERGY_BASELINE_CONFIG`` env > CWD-relative default.
+    Priority: *cli_arg* > ``BATTERY_OPTIMIZER_CONFIG`` env > CWD-relative default.
     """
     if cli_arg:
         return Path(cli_arg).resolve()
-    env = os.environ.get("ENERGY_BASELINE_CONFIG")
+    env = get_env("BATTERY_OPTIMIZER_CONFIG")
     if env:
         return Path(env).resolve()
     return (Path.cwd() / "config" / "tariff.yaml").resolve()

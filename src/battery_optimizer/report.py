@@ -1,6 +1,6 @@
 """Monthly reconciliation report and DuckDB SQL inspection.
 
-This module reads the artifacts produced by :mod:`energy_baseline.benchmark` and
+This module reads the artifacts produced by :mod:`battery_optimizer.benchmark` and
 turns them into a human-readable monthly report, plus a small, safe SQL surface
 for ad-hoc inspection of the dataset.
 
@@ -47,7 +47,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from energy_baseline.artifact_integrity import (
+from battery_optimizer.artifact_integrity import (
     BENCHMARK_MANIFEST_NAME,
     BENCHMARK_REQUIRED_FILES,
     REPORT_MANIFEST_NAME,
@@ -56,7 +56,7 @@ from energy_baseline.artifact_integrity import (
     finalize_run_outputs,
     verify_run_outputs,
 )
-from energy_baseline.benchmark import (
+from battery_optimizer.benchmark import (
     BENCHMARK_VERSION,
     BENCHMARKS_DIRNAME,
     RESULTS_JSON_NAME,
@@ -65,9 +65,9 @@ from energy_baseline.benchmark import (
     list_datasets,
     load_dataset,
 )
-from energy_baseline.manifest import config_hash
-from energy_baseline.paths import resolve_data_dir, write_part_atomic
-from energy_baseline.schemas import SCHEMA_VERSION
+from battery_optimizer.manifest import config_hash
+from battery_optimizer.paths import resolve_data_dir, write_part_atomic
+from battery_optimizer.schemas import SCHEMA_VERSION
 
 REPORT_JSON_NAME = "report.json"
 REPORT_MD_NAME = "report.md"

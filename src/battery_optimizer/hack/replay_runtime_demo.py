@@ -24,7 +24,7 @@ Demonstrates the replay runtime without modifying any existing files (no
 
 Usage::
 
-    python -m energy_baseline.hack.replay_runtime_demo
+    python -m battery_optimizer.hack.replay_runtime_demo
 
 Dependencies: nothing beyond the project's existing dependencies.  No network,
 no writer, no actuation, no deployment, no wall-clock reads.
@@ -37,10 +37,10 @@ import threading
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
-from energy_baseline.battery import BatterySpec
-from energy_baseline.dispatch import DispatchPlan
-from energy_baseline.oracle import OracleError
-from energy_baseline.replay_runtime import (
+from battery_optimizer.battery import BatterySpec
+from battery_optimizer.dispatch import DispatchPlan
+from battery_optimizer.oracle import OracleError
+from battery_optimizer.replay_runtime import (
     ConstantLoadProvider,
     OraclePlannerAdapter,
     PricePublication,

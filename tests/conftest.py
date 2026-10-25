@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 import pyarrow as pa
 import pytest
 
-from energy_baseline.schemas import (
+from battery_optimizer.schemas import (
     ANALYSIS_INTERVAL,
     BENCHMARK_RESULT,
     RAW_ENUM_STATE,

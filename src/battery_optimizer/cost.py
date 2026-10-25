@@ -58,7 +58,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime dependency
-    from energy_baseline.config import TariffConfig
+    from battery_optimizer.config import TariffConfig
 
 __all__ = [
     "ALLOCATION_EXACT",

@@ -3,7 +3,7 @@
 Unit tests cannot catch API drift between the runner and the library (a renamed
 attribute or a changed signature fails only when the script actually executes).
 This module builds a small but real on-disk dataset — manifest + parquet part, the
-same shape ``build`` writes and :func:`energy_baseline.benchmark.load_dataset`
+same shape ``build`` writes and :func:`battery_optimizer.benchmark.load_dataset`
 verifies — and runs the runner as a subprocess.
 
 The synthetic dataset/table/manifest helpers mirror the ones in
@@ -33,12 +33,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from energy_baseline.schemas import SCHEMA_VERSION
+from battery_optimizer.schemas import SCHEMA_VERSION
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNNER = REPO_ROOT / "hack" / "compare_forecasts.py"
 MADRID = ZoneInfo("Europe/Madrid")
-PKG_ROOT = REPO_ROOT / "src" / "energy_baseline"
+PKG_ROOT = REPO_ROOT / "src" / "battery_optimizer"
 
 _INTERVAL_SECONDS = 900
 
@@ -191,7 +191,7 @@ def _analysis_table(
 
 def _analysis_schema() -> pa.Schema:
     """The exact ANALYSIS_INTERVAL schema ``validate_table`` requires."""
-    from energy_baseline.schemas import ANALYSIS_INTERVAL
+    from battery_optimizer.schemas import ANALYSIS_INTERVAL
 
     return ANALYSIS_INTERVAL
 
@@ -204,7 +204,7 @@ def _write_dataset(
     dataset_id: str = "smoke-dataset",
 ) -> Path:
     """Write ``<root>/analysis/v<schema>/<dataset_id>`` with a valid build manifest."""
-    from energy_baseline.manifest import config_hash
+    from battery_optimizer.manifest import config_hash
 
     dataset_dir = root / "analysis" / f"v{SCHEMA_VERSION}" / dataset_id
     parts_dir = dataset_dir / "parts"
@@ -312,7 +312,7 @@ def scratch_repo(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             pytest.skip(f"git unavailable: {probe.stderr}")
     shutil.copytree(
         PKG_ROOT,
-        repo / "src" / "energy_baseline",
+        repo / "src" / "battery_optimizer",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     (repo / "hack").mkdir(parents=True)
@@ -909,7 +909,7 @@ class TestProvenance:
         assert isinstance(summary["git_dirty"], bool) or summary["git_dirty"] is None
 
     def test_source_hashes_cover_every_imported_module(self, smoke_setup: dict[str, Any]) -> None:
-        """source_hashes must cover every energy_baseline module the runner imports."""
+        """source_hashes must cover every battery_optimizer module the runner imports."""
         proc = _run(smoke_setup, "--windows", "28", "--sigmas", "0", "--seeds", "0")
         assert proc.returncode == 0, proc.stderr
 
@@ -918,19 +918,19 @@ class TestProvenance:
         assert isinstance(source_hashes, dict)
         # The runner itself must be included.
         assert "hack/compare_forecasts.py" in source_hashes
-        # Every energy_baseline module on the measurement path must be present.
+        # Every battery_optimizer module on the measurement path must be present.
         expected_modules = {
-            "src/energy_baseline/__init__.py",
-            "src/energy_baseline/artifact_integrity.py",
-            "src/energy_baseline/battery.py",
-            "src/energy_baseline/benchmark.py",
-            "src/energy_baseline/config.py",
-            "src/energy_baseline/manifest.py",
-            "src/energy_baseline/oracle.py",
-            "src/energy_baseline/paths.py",
-            "src/energy_baseline/policies.py",
-            "src/energy_baseline/rolling_horizon.py",
-            "src/energy_baseline/schemas.py",
+            "src/battery_optimizer/__init__.py",
+            "src/battery_optimizer/artifact_integrity.py",
+            "src/battery_optimizer/battery.py",
+            "src/battery_optimizer/benchmark.py",
+            "src/battery_optimizer/config.py",
+            "src/battery_optimizer/manifest.py",
+            "src/battery_optimizer/oracle.py",
+            "src/battery_optimizer/paths.py",
+            "src/battery_optimizer/policies.py",
+            "src/battery_optimizer/rolling_horizon.py",
+            "src/battery_optimizer/schemas.py",
         }
         missing = expected_modules - set(source_hashes.keys())
         assert not missing, f"source_hashes is missing modules: {missing}"
@@ -961,7 +961,7 @@ class TestProvenance:
 
     def test_config_hash_matches_independent_computation(self, smoke_setup: dict[str, Any]) -> None:
         """config_hash and config_sha256_raw_bytes must match independently computed values."""
-        from energy_baseline.manifest import config_hash as canonical_config_hash
+        from battery_optimizer.manifest import config_hash as canonical_config_hash
 
         proc = _run(smoke_setup, "--windows", "28", "--sigmas", "0", "--seeds", "0")
         assert proc.returncode == 0, proc.stderr
@@ -1045,22 +1045,22 @@ class TestProvenanceDriftDetection:
         # Simulate the drift detection logic directly.
         start_hashes = {
             "hack/compare_forecasts.py": "a" * 64,
-            "src/energy_baseline/manifest.py": "b" * 64,
-            "src/energy_baseline/battery.py": "c" * 64,
+            "src/battery_optimizer/manifest.py": "b" * 64,
+            "src/battery_optimizer/battery.py": "c" * 64,
         }
         end_hashes = {
             "hack/compare_forecasts.py": "a" * 64,
-            "src/energy_baseline/manifest.py": "d" * 64,  # changed
-            "src/energy_baseline/battery.py": "c" * 64,
+            "src/battery_optimizer/manifest.py": "d" * 64,  # changed
+            "src/battery_optimizer/battery.py": "c" * 64,
         }
         drift = sorted(rel for rel in start_hashes if start_hashes.get(rel) != end_hashes.get(rel))
-        assert drift == ["src/energy_baseline/manifest.py"]
+        assert drift == ["src/battery_optimizer/manifest.py"]
 
     def test_drift_detection_is_empty_when_nothing_changes(self) -> None:
         """No drift when start and end hashes match."""
         hashes = {
             "hack/compare_forecasts.py": "a" * 64,
-            "src/energy_baseline/manifest.py": "b" * 64,
+            "src/battery_optimizer/manifest.py": "b" * 64,
         }
         drift = sorted(rel for rel in hashes if hashes.get(rel) != hashes.get(rel))
         assert drift == []

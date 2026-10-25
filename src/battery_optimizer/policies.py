@@ -1,14 +1,14 @@
 """Benchmark policies — no-battery baseline, the causal price rule, day-ahead rolling.
 
-Pure numeric kernels: they consume a :class:`~energy_baseline.battery.BatterySpec`
-and a :class:`~energy_baseline.battery.Horizon` and return a
-:class:`~energy_baseline.battery.Schedule`.  No I/O.  The causal policy uses no
+Pure numeric kernels: they consume a :class:`~battery_optimizer.battery.BatterySpec`
+and a :class:`~battery_optimizer.battery.Horizon` and return a
+:class:`~battery_optimizer.battery.Schedule`.  No I/O.  The causal policy uses no
 forecast and no future knowledge of any kind; the day-ahead policy receives its
 load forecast as an argument, computed by
 :func:`forecast_load_trailing_slot_mean` from strictly-prior intervals only.
 
 Every policy routes its plan through
-:func:`energy_baseline.battery.simulate`, so the physics invariants are checked
+:func:`battery_optimizer.battery.simulate`, so the physics invariants are checked
 by one implementation shared with the oracle.  Gap exclusion (``usable``) and
 the pretax cost basis are therefore *identical* across all five policies.
 
@@ -16,7 +16,7 @@ Charge and discharge are **not** bounded symmetrically.  The no-export rule
 (``grid = load + charge - discharge >= 0``) caps discharge at the household
 load; charging raises import, so it is capped only by the power rating, by SOC
 headroom and — only when configured — by the site import ceiling
-(:attr:`~energy_baseline.battery.Horizon.import_limit_kw`, unknown by default).
+(:attr:`~battery_optimizer.battery.Horizon.import_limit_kw`, unknown by default).
 The ceiling limits the *charging decision*, not the measurement::
 
     charge[t] <= max(0, import_limit_kw * h - load[t])
@@ -34,8 +34,8 @@ average power drawn over an interval with the contracted power — which is how
 maximum demand is actually enforced, as a 15-minute average rather than against
 instantaneous readings.  A policy that refused to report such intervals would
 refuse to report the baseline at all.  See
-:func:`energy_baseline.battery.ceiling_exceedance_indices` and
-:mod:`energy_baseline.battery` invariants 6 and 7 for the verified
+:func:`battery_optimizer.battery.ceiling_exceedance_indices` and
+:mod:`battery_optimizer.battery` invariants 6 and 7 for the verified
 full-population figures and for the withdrawn peak-based justification.
 
 Reporting honesty: the causal policy is allowed to cost **more** than the
@@ -88,7 +88,7 @@ measurement, not a ladder step.  Empirically, rolling_horizon <= day_ahead held 
 81 offline configurations, all of them a Q4 holdout immediately following the training
 cut; that is strong evidence within its own configuration and not a proof, and it does
 not transfer to evaluation windows that extrapolate far beyond the cut.  The
-implementation lives in :mod:`energy_baseline.rolling_horizon`; the benchmark
+implementation lives in :mod:`battery_optimizer.rolling_horizon`; the benchmark
 orchestrator wires it into the ladder.
 
 Its price information set is not an invented convenience.  The claim "a full
@@ -111,7 +111,7 @@ is the experiment: prices beyond its own local day, and measured load at or afte
 its own local day.  Load enters the decision only through
 :func:`forecast_load_trailing_slot_mean`, which reads strictly-prior intervals.
 The forecast never enters the *cost*: cost is always re-computed by
-:func:`energy_baseline.battery.simulate` against the measured load, so a forecast
+:func:`battery_optimizer.battery.simulate` against the measured load, so a forecast
 error degrades the dispatch quality and is disclosed as such, but it can never
 fabricate or hide money.
 
@@ -201,7 +201,7 @@ def policy_no_battery(spec: BatterySpec, horizon: Horizon) -> Schedule:
     ``Horizon.import_limit_kw`` can never make it fail.  With zero flows the net
     import equals the load, and intervals where the load alone exceeds the
     ceiling are recorded as an observation —
-    :attr:`~energy_baseline.battery.Schedule.ceiling_exceeding_intervals` —
+    :attr:`~battery_optimizer.battery.Schedule.ceiling_exceeding_intervals` —
     because the reason is structural, not empirical: the ceiling constrains a
     *decision we make* (charging), not *history we measured*, so no dispatch
     decision caused those intervals and no dispatch can undo them.  Raising here
@@ -212,7 +212,7 @@ def policy_no_battery(spec: BatterySpec, horizon: Horizon) -> Schedule:
     2025 archive tops 5.0 kW in 5 of 34 744 clean intervals (0.014 %) and on 5 of
     365 days, against an annual mean load of 0.633 kW (12.7 % of the ceiling).
     5.0 kW is user-confirmed from the contract on 2026-10-23, never inferred from
-    sensors; see :mod:`energy_baseline.battery` invariants 6 and 7 for the full
+    sensors; see :mod:`battery_optimizer.battery` invariants 6 and 7 for the full
     table, including why the 8 678.9 W instantaneous maximum bears only on the
     battery's power rating and wiring headroom, never on contract feasibility.
 
@@ -244,7 +244,7 @@ def policy_causal_price(
       power rating, by SOC headroom to ``soc_max_frac``, and by the site import
       ceiling when one is configured: ``charge[t] <= max(0, import_limit_kw * h -
       load[t])`` (the headroom the load leaves, see
-      :attr:`~energy_baseline.battery.Horizon.charge_headroom_kwh`).  An interval
+      :attr:`~battery_optimizer.battery.Horizon.charge_headroom_kwh`).  An interval
       whose load already meets or beats the ceiling has zero headroom, so the
       causal policy charges nothing there — charging is unavailable, not illegal.
     * ``price[t] > discharge_threshold`` → discharge at full power, limited by
@@ -272,7 +272,7 @@ def policy_causal_price(
 
     Nothing here raises because the measured load tops the ceiling: that is
     recorded on the returned schedule as
-    :attr:`~energy_baseline.battery.Schedule.ceiling_exceeding_intervals`.
+    :attr:`~battery_optimizer.battery.Schedule.ceiling_exceeding_intervals`.
 
     The discharge cap clamps the request, it never pushes energy onto the grid:
     an over-sized discharge is cut down to ``load[t]`` rather than exported.
@@ -285,7 +285,7 @@ def policy_causal_price(
     it did not charge during the window.  In the neutral case
     (``terminal_soc_frac is None``) the floor is ``max(soc_min, initial_soc)``,
     which is exactly the shared common-feasible-set floor the free oracle uses.
-    :func:`energy_baseline.battery.check_feasible` with the default
+    :func:`battery_optimizer.battery.check_feasible` with the default
     ``enforce_terminal_soc=True`` still lists the residual terminal drift, which
     is the honest signal that the horizon's accounting is not closed.
 
@@ -682,9 +682,9 @@ def _clip_plan_to_model_bounds(
 
     Every bound it uses comes from the shared battery model, never re-derived here:
     the power/energy limit from
-    :meth:`~energy_baseline.battery.BatterySpec.interval_energy_limit_kwh`, the import
-    ceiling as :attr:`~energy_baseline.battery.Horizon.charge_headroom_kwh` computed on
-    the *measured* load, the SOC ceiling from :meth:`~energy_baseline.battery.
+    :meth:`~battery_optimizer.battery.BatterySpec.interval_energy_limit_kwh`, the import
+    ceiling as :attr:`~battery_optimizer.battery.Horizon.charge_headroom_kwh` computed on
+    the *measured* load, the SOC ceiling from :meth:`~battery_optimizer.battery.
     BatterySpec.soc_bound_kwh`, the no-export cap from ``day_horizon.load_kwh``, and the
     seed-protection floor from the caller — the **horizon's** causal floor, not the day's
     opening SOC, for the reason given in :func:`policy_day_ahead`.  Clipping is
@@ -802,9 +802,9 @@ def policy_day_ahead(
     Mechanics.  The horizon is partitioned on local calendar days by
     :func:`contiguous_day_bounds`, so DST days contribute 92 or 100 intervals to one
     solve rather than being cut in half.  Each day is solved by
-    :func:`energy_baseline.oracle.solve_oracle` with ``terminal_mode="free"`` and
+    :func:`battery_optimizer.oracle.solve_oracle` with ``terminal_mode="free"`` and
     ``terminal_value_eur_per_kwh``, on a day-scoped
-    :class:`~energy_baseline.battery.BatterySpec` whose ``initial_soc_frac`` is the
+    :class:`~battery_optimizer.battery.BatterySpec` whose ``initial_soc_frac`` is the
     carried SOC.  Reusing the oracle's constraint assembly is deliberate: SOC
     recurrence, per-step bounds, the binary one-mode-per-interval rule, the no-export
     row and the import-ceiling headroom row are the same code the oracle uses, so the
@@ -830,7 +830,7 @@ def policy_day_ahead(
     an infeasible plan, an export, or a fabricated number.
 
     Accounting.  The concatenated plan is simulated **once** over the whole horizon by
-    :func:`energy_baseline.battery.simulate` with ``enforce_terminal_soc=False`` (an
+    :func:`battery_optimizer.battery.simulate` with ``enforce_terminal_soc=False`` (an
     open cycle: the horizon ends wherever the daily plans leave it), and the reported
     ``cost_eur`` is ``meter_cost_eur - scoring_terminal_value * (terminal - initial)`` —
     the identical framing the free oracle uses with the **same** scoring value, so the
@@ -847,7 +847,7 @@ def policy_day_ahead(
     an incumbent, that day **holds SOC and does not charge** (zero flows), is flagged in
     ``per_day``, and the roll continues; the run does not abort and the oracle's answer
     is never quietly borrowed.  A day whose intervals are all gap-excluded is skipped the
-    same way (its :class:`~energy_baseline.battery.Horizon` would reject an all-unusable
+    same way (its :class:`~battery_optimizer.battery.Horizon` would reject an all-unusable
     slice, and an empty cost basis is not a dispatch problem to solve).  Counts are in
     the summary.
 
@@ -1265,7 +1265,7 @@ def policy_day_ahead(
         "wall_clock_note": (
             "per-day solver wall-clock time is deliberately NOT recorded. Run artifacts "
             "are content-addressed and written no-clobber "
-            "(energy_baseline.paths.write_part_atomic refuses the same run id with "
+            "(battery_optimizer.paths.write_part_atomic refuses the same run id with "
             "different bytes), so a timing field would make an identical re-run raise "
             "FileExistsError and destroy byte-level reproducibility. Deterministic per-day "
             "telemetry (solver_status, is_certified, mip_gap) and the count of days that "

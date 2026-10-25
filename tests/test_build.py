@@ -1,4 +1,4 @@
-"""Tests for ``energy_baseline.build`` — the raw-archive → 15-minute grid builder.
+"""Tests for ``battery_optimizer.build`` — the raw-archive → 15-minute grid builder.
 
 Everything here is synthetic: no network, no cluster, and Parquet is written only
 under ``pytest``'s ``tmp_path``.  The behaviours pinned by this file are the
@@ -36,9 +36,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from energy_baseline import build as build_mod
-from energy_baseline import schemas
-from energy_baseline.build import (
+from battery_optimizer import build as build_mod
+from battery_optimizer import schemas
+from battery_optimizer.build import (
     ALLOCATION_ESTIMATED_BOUNDARY,
     ALLOCATION_EXACT,
     ALLOCATION_UNKNOWN_GAP,
@@ -82,15 +82,15 @@ from energy_baseline.build import (
     resolve_gross_load,
     stitch_series,
 )
-from energy_baseline.config import PeriodRule, TariffPeriods, load_config, tariff_period_for
-from energy_baseline.extract_prom import (
+from battery_optimizer.config import PeriodRule, TariffPeriods, load_config, tariff_period_for
+from battery_optimizer.extract_prom import (
     DEAD_DUPLICATE_ENTITY_IDS,
     VOLATILE_IDENTITY_LABELS,
     canonical_labels_json,
     compute_series_key,
 )
-from energy_baseline.paths import parts_dir
-from energy_baseline.schemas import RAW_SAMPLE, SCHEMA_VERSION, validate_table
+from battery_optimizer.paths import parts_dir
+from battery_optimizer.schemas import RAW_SAMPLE, SCHEMA_VERSION, validate_table
 
 # ---------------------------------------------------------------------------
 # Entities, label sets and row helpers (shaped like the real archive)
@@ -2680,7 +2680,7 @@ class TestOutputContract:
         benchmark's usable-mask already recognises, so this pins the shared
         vocabulary from the builder side.
         """
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         assert ALLOCATION_EXACT in benchmark.USABLE_ALLOCATION_QUALITY
         assert ALLOCATION_ESTIMATED_BOUNDARY in benchmark.USABLE_ALLOCATION_QUALITY
@@ -3681,7 +3681,7 @@ class TestHourAlignedPrices:
         ``unknown_gap``.  This is the cross-check that the vocabulary agrees,
         without the builder importing benchmark policy.
         """
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         cfg = write_tariff(tmp_path)
         rows = counter_rows(_T0, 61, times=counter_times(_T0, 61, 60.0))

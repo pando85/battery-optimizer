@@ -48,7 +48,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNNER = REPO_ROOT / "hack" / "validate_pre_migration.py"
 SRC_ROOT = REPO_ROOT / "src"
-PKG_ROOT = SRC_ROOT / "energy_baseline"
+PKG_ROOT = SRC_ROOT / "battery_optimizer"
 MADRID = ZoneInfo("Europe/Madrid")
 
 _INTERVAL_SECONDS = 900
@@ -97,26 +97,26 @@ def _load_runner_at(path: Path, name: str) -> Any:
 #: which re-hashed 7 of 8 modules and noticed nothing — has to fail this list.
 _REQUIRED_SOURCE_PATHS: tuple[str, ...] = (
     "hack/validate_pre_migration.py",
-    "src/energy_baseline/__init__.py",
-    "src/energy_baseline/artifact_integrity.py",
-    "src/energy_baseline/battery.py",
-    "src/energy_baseline/benchmark.py",
-    "src/energy_baseline/config.py",
-    "src/energy_baseline/cost.py",
-    "src/energy_baseline/dispatch.py",
-    "src/energy_baseline/manifest.py",
-    "src/energy_baseline/oracle.py",
-    "src/energy_baseline/paths.py",
-    "src/energy_baseline/policies.py",
-    "src/energy_baseline/rolling_horizon.py",
-    "src/energy_baseline/schemas.py",
+    "src/battery_optimizer/__init__.py",
+    "src/battery_optimizer/artifact_integrity.py",
+    "src/battery_optimizer/battery.py",
+    "src/battery_optimizer/benchmark.py",
+    "src/battery_optimizer/config.py",
+    "src/battery_optimizer/cost.py",
+    "src/battery_optimizer/dispatch.py",
+    "src/battery_optimizer/manifest.py",
+    "src/battery_optimizer/oracle.py",
+    "src/battery_optimizer/paths.py",
+    "src/battery_optimizer/policies.py",
+    "src/battery_optimizer/rolling_horizon.py",
+    "src/battery_optimizer/schemas.py",
 )
 
 #: A module that reaches the solver only through a function-level import
 #: (``benchmark._modules()``), so a snapshot of ``sys.modules`` taken after the
 #: runner's own imports cannot see it.  Its presence is what proves the map is
 #: traced from the source rather than scraped off the live interpreter.
-_LAZY_IMPORT_PATH = "src/energy_baseline/cost.py"
+_LAZY_IMPORT_PATH = "src/battery_optimizer/cost.py"
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -132,10 +132,10 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _resolve_first_party(name: str) -> Path | None:
-    """Project-relative source file for a dotted ``energy_baseline`` name."""
-    if name == "energy_baseline":
+    """Project-relative source file for a dotted ``battery_optimizer`` name."""
+    if name == "battery_optimizer":
         return PKG_ROOT / "__init__.py"
-    if not name.startswith("energy_baseline."):
+    if not name.startswith("battery_optimizer."):
         return None
     base = PKG_ROOT.joinpath(*name.split(".")[1:])
     for candidate in (base.with_suffix(".py"), base / "__init__.py"):
@@ -201,10 +201,10 @@ def _test_side_import_closure(entry: Path = RUNNER) -> set[str]:
 
 
 def _sys_module_source_paths(runner: Any) -> set[str]:
-    """Project-relative paths of the ``energy_baseline`` modules live in this process."""
+    """Project-relative paths of the ``battery_optimizer`` modules live in this process."""
     paths: set[str] = set()
     for name in list(sys.modules):
-        if name != "energy_baseline" and not name.startswith("energy_baseline."):
+        if name != "battery_optimizer" and not name.startswith("battery_optimizer."):
             continue
         target = _resolve_first_party(name)
         if target is not None:
@@ -237,7 +237,7 @@ def scratch_repo(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         assert probe.returncode == 0, f"git command failed: {probe.stderr}"
     shutil.copytree(
         PKG_ROOT,
-        repo / "src" / "energy_baseline",
+        repo / "src" / "battery_optimizer",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     (repo / "hack").mkdir(parents=True)
@@ -432,14 +432,14 @@ def _analysis_table(*, start: datetime, days: int, dataset_id: str) -> pa.Table:
 
 
 def _analysis_schema() -> pa.Schema:
-    from energy_baseline.schemas import ANALYSIS_INTERVAL
+    from battery_optimizer.schemas import ANALYSIS_INTERVAL
 
     return ANALYSIS_INTERVAL
 
 
 def _write_dataset(root: Path, table: pa.Table, *, config_path: Path, dataset_id: str) -> Path:
-    from energy_baseline.manifest import config_hash
-    from energy_baseline.schemas import SCHEMA_VERSION
+    from battery_optimizer.manifest import config_hash
+    from battery_optimizer.schemas import SCHEMA_VERSION
 
     dataset_dir = root / "analysis" / f"v{SCHEMA_VERSION}" / dataset_id
     parts = dataset_dir / "parts"
@@ -795,8 +795,11 @@ class TestAllRequestedArmsRun:
 class TestForecastSharing:
     def test_provider_and_day_ahead_use_the_same_function(self) -> None:
         """Directly: the provider's forecast IS the canonical trailing-slot mean."""
-        from energy_baseline.policies import contiguous_day_bounds, forecast_load_trailing_slot_mean
-        from energy_baseline.rolling_horizon import CausalForecastProvider, RollingEvent
+        from battery_optimizer.policies import (
+            contiguous_day_bounds,
+            forecast_load_trailing_slot_mean,
+        )
+        from battery_optimizer.rolling_horizon import CausalForecastProvider, RollingEvent
 
         n_days = 40
         starts = [
@@ -890,8 +893,8 @@ class TestFuturePerturbation:
 
     def test_per_event_provider_forecast_is_insensitive_to_future_load(self) -> None:
         """Perturbing load at or after the event's day leaves that event's forecast equal."""
-        from energy_baseline.policies import contiguous_day_bounds
-        from energy_baseline.rolling_horizon import CausalForecastProvider, RollingEvent
+        from battery_optimizer.policies import contiguous_day_bounds
+        from battery_optimizer.rolling_horizon import CausalForecastProvider, RollingEvent
 
         starts, local_days, load, usable = self._arrays()
         days = contiguous_day_bounds(local_days)
@@ -943,8 +946,11 @@ class TestFuturePerturbation:
         than trusting a comment, and it also pins that the day-ahead rung's own
         cutoff is still respected (perturbing D+1 never moves D+1's forecast).
         """
-        from energy_baseline.policies import contiguous_day_bounds, forecast_load_trailing_slot_mean
-        from energy_baseline.rolling_horizon import CausalForecastProvider, RollingEvent
+        from battery_optimizer.policies import (
+            contiguous_day_bounds,
+            forecast_load_trailing_slot_mean,
+        )
+        from battery_optimizer.rolling_horizon import CausalForecastProvider, RollingEvent
 
         starts, local_days, load, usable = self._arrays()
         days = contiguous_day_bounds(local_days)
@@ -1290,10 +1296,10 @@ class TestRunnerContract:
         assert "def solve_" not in src
         assert "scipy" not in src.lower()
         for needed in (
-            "from energy_baseline.battery import",
-            "from energy_baseline.oracle import",
-            "from energy_baseline.rolling_horizon import",
-            "from energy_baseline.policies import",
+            "from battery_optimizer.battery import",
+            "from battery_optimizer.oracle import",
+            "from battery_optimizer.rolling_horizon import",
+            "from battery_optimizer.policies import",
         ):
             assert needed in src
 
@@ -1303,7 +1309,7 @@ class TestRunnerContract:
         assert "CausalForecastProvider" in src
         assert "LOAD_FORECAST_MODE_CAUSAL" in src
         assert "forecast_load_trailing_slot_mean" in src
-        assert "try:\n    from energy_baseline.rolling_horizon import" not in src
+        assert "try:\n    from battery_optimizer.rolling_horizon import" not in src
         mod = _load_runner()
         assert mod.PROVIDER_WINDOW_DAYS == 28
 
@@ -1334,7 +1340,7 @@ class TestCodeProvenance:
         dataset: dict[str, Any],
         scratch_repo: dict[str, Any],
     ) -> None:
-        from energy_baseline import __version__ as static_version
+        from battery_optimizer import __version__ as static_version
 
         # The run is in the scratch repo, so check its HEAD, not the real repo's
         head = _git(scratch_repo["repo"], "rev-parse", "HEAD")
@@ -1372,14 +1378,16 @@ class TestCodeProvenance:
 
     def test_runner_no_longer_imports_the_distribution_version(self) -> None:
         src = RUNNER.read_text()
-        assert "from energy_baseline import __version__ as code_version" not in src
-        assert "from energy_baseline.manifest import" in src
+        assert "from battery_optimizer import __version__ as code_version" not in src
+        assert "from battery_optimizer.manifest import" in src
 
     def test_no_git_records_the_sentinel_instead_of_raising(self, monkeypatch) -> None:
         """``nogit`` degrades to unknown fields; it never pretends to be clean."""
         runner = _load_runner()
         marker = runner.NO_GIT_MARKER
-        monkeypatch.setattr(runner, "git_code_version", lambda: f"{marker}@energy-baseline==0.1.0")
+        monkeypatch.setattr(
+            runner, "git_code_version", lambda: f"{marker}@battery-optimizer==0.1.0"
+        )
         version, head, dirty = runner._git_identity()
         assert version.startswith(marker)
         assert head is None
@@ -1420,7 +1428,7 @@ class TestSourceHashCoverage:
                 "import importlib.util, sys;"
                 f"spec = importlib.util.spec_from_file_location('p', {str(RUNNER)!r});"
                 "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod);"
-                "print('cost_imported=' + str('energy_baseline.cost' in sys.modules))",
+                "print('cost_imported=' + str('battery_optimizer.cost' in sys.modules))",
             ],
             capture_output=True,
             text=True,
@@ -1449,7 +1457,7 @@ class TestSourceHashCoverage:
         """The map is derived: give the copy a new import and the map grows."""
         runner_copy = scratch_repo["runner"]
         original = runner_copy.read_text()
-        probe_rel = "src/energy_baseline/_prov_probe.py"
+        probe_rel = "src/battery_optimizer/_prov_probe.py"
 
         # First run: get baseline source hashes
         out_before = scratch_repo["root"] / "out-before"
@@ -1465,11 +1473,11 @@ class TestSourceHashCoverage:
             (scratch_repo["repo"] / probe_rel).write_text("PROBE = 1\n")
 
             # Add an import of the probe module to the runner
-            anchor = "from energy_baseline.config import load_config  # noqa: E402\n"
+            anchor = "from battery_optimizer.config import load_config  # noqa: E402\n"
             assert anchor in original
             mutated = original.replace(
                 anchor,
-                anchor + "from energy_baseline import _prov_probe  # noqa: F401\n",
+                anchor + "from battery_optimizer import _prov_probe  # noqa: F401\n",
                 1,
             )
             runner_copy.write_text(mutated)
@@ -1508,7 +1516,7 @@ class TestConfigDigests:
         assert identity["config_path"]  # the bare path is still recorded
         assert identity["config_sha256"] == hashlib.sha256(raw).hexdigest()
 
-        from energy_baseline.manifest import config_hash as canonical_config_hash
+        from battery_optimizer.manifest import config_hash as canonical_config_hash
 
         assert identity["config_hash"] == canonical_config_hash(tariff)
         # ...and that function really is the declared convention, re-derived here.
@@ -1530,7 +1538,7 @@ class TestConfigDigests:
     ) -> None:
         import yaml
 
-        from energy_baseline.manifest import config_hash as canonical_config_hash
+        from battery_optimizer.manifest import config_hash as canonical_config_hash
 
         original = Path(dataset["tariff"])
         data = yaml.safe_load(original.read_text())
@@ -1587,7 +1595,7 @@ class TestProvenanceCrossCheck:
         runner = _load_runner()
         start = runner._collect_provenance(Path(dataset["tariff"]))
         end = copy.deepcopy(start)
-        target = "src/energy_baseline/battery.py"
+        target = "src/battery_optimizer/battery.py"
         assert _HEX64.match(start["source_hashes"][target])
         end["source_hashes"][target] = "0" * 64  # the monkeypatched "file was rewritten"
         with pytest.raises(SystemExit) as excinfo:
@@ -1603,7 +1611,7 @@ class TestProvenanceCrossCheck:
         runner = _load_runner()
         start = runner._collect_provenance(Path(dataset["tariff"]))
         end = copy.deepcopy(start)
-        end["source_hashes"]["src/energy_baseline/late_arrival.py"] = "1" * 64
+        end["source_hashes"]["src/battery_optimizer/late_arrival.py"] = "1" * 64
         with pytest.raises(SystemExit, match="first hashed at the END"):
             runner._assert_provenance_stable(start, end)
 

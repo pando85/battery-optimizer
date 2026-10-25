@@ -21,16 +21,16 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from energy_baseline.cli import (
+from battery_optimizer.cli import (
     _redact_error,
     build_parser,
     main,
     parse_entities,
     resolve_time_window,
 )
-from energy_baseline.manifest import new_manifest, write_manifest
-from energy_baseline.paths import part_path, write_part_atomic
-from energy_baseline.schemas import RAW_ENUM_STATE, RAW_SAMPLE
+from battery_optimizer.manifest import new_manifest, write_manifest
+from battery_optimizer.paths import part_path, write_part_atomic
+from battery_optimizer.schemas import RAW_ENUM_STATE, RAW_SAMPLE
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -116,7 +116,7 @@ def _make_raw_enum_part(data_dir: Path) -> Path:
 
 def _write_manifest(data_dir: Path, source: str, rel: str, sha256: str) -> Path:
     """Write a minimal manifest referencing one part file."""
-    from energy_baseline.config import resolve_config_path
+    from battery_optimizer.config import resolve_config_path
 
     cfg = resolve_config_path(
         str(Path(__file__).resolve().parent.parent / "config" / "tariff.yaml")
@@ -279,7 +279,7 @@ class TestCmdValidate:
     def test_validate_prometheus_parts(self, tmp_path, monkeypatch):
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", str(data_dir))
         part = _make_raw_sample_part(data_dir)
         sha = hashlib.sha256(part.read_bytes()).hexdigest()
         rel = str(part.relative_to(data_dir))
@@ -289,7 +289,7 @@ class TestCmdValidate:
     def test_validate_ha_parts(self, tmp_path, monkeypatch):
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", str(data_dir))
         part = _make_raw_enum_part(data_dir)
         sha = hashlib.sha256(part.read_bytes()).hexdigest()
         rel = str(part.relative_to(data_dir))
@@ -299,14 +299,14 @@ class TestCmdValidate:
     def test_validate_no_parts_fails(self, tmp_path, monkeypatch):
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", str(data_dir))
         assert main(["validate", "--source", "prometheus"]) == 1
 
     def test_validate_manifest_hash_mismatch(self, tmp_path, monkeypatch):
         """Manifest hash mismatch against actual bytes yields exit 1."""
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", str(data_dir))
         part = _make_raw_sample_part(data_dir)
         rel = str(part.relative_to(data_dir))
         _write_manifest(data_dir, "prometheus", rel, "deadbeef" * 8)
@@ -322,7 +322,7 @@ class TestCmdExtractErrors:
     def test_extract_no_time_args_fails(self, tmp_path, monkeypatch, capsys):
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", str(data_dir))
         rc = main(["extract", "--source", "prometheus"])
         assert rc == 1
         captured = capsys.readouterr()
@@ -332,8 +332,8 @@ class TestCmdExtractErrors:
         """Extract ha-history without token fails with redacted error."""
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", str(data_dir))
-        monkeypatch.delenv("ENERGY_BASELINE_HA_TOKEN", raising=False)
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", str(data_dir))
+        monkeypatch.delenv("BATTERY_OPTIMIZER_HA_TOKEN", raising=False)
         cfg = str(Path(__file__).resolve().parent.parent / "config" / "tariff.yaml")
         rc = main(
             [
@@ -362,7 +362,7 @@ class TestCmdExtractErrors:
         """Extract with a nonexistent config path fails cleanly (exit 1)."""
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", str(data_dir))
         rc = main(
             [
                 "extract",
@@ -384,10 +384,10 @@ class TestCmdExtractErrors:
         """RuntimeError from extractor is caught, redacted, no traceback leaks."""
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", str(data_dir))
         cfg = str(Path(__file__).resolve().parent.parent / "config" / "tariff.yaml")
 
-        import energy_baseline.extract_ha as _eh
+        import battery_optimizer.extract_ha as _eh
 
         def boom(**_kw):
             raise RuntimeError(f"HA auth failed: Bearer {_SENTINEL_TOKEN} password=P@ss secret=xyz")
@@ -455,7 +455,7 @@ class TestBenchmarkCLI:
         assert exc.value.code == 2
 
     def test_core_unavailable_message(self, monkeypatch, capsys):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         monkeypatch.setattr(benchmark, "core_available", lambda: False)
         called = {"benchmark_dataset": False}
@@ -495,7 +495,7 @@ class TestBenchmarkCLI:
         ],
     )
     def test_flag_maps_to_keyword(self, monkeypatch, flag, value, kwarg, expected):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         monkeypatch.setattr(benchmark, "core_available", lambda: True)
         captured = {}
@@ -520,7 +520,7 @@ class TestBenchmarkCLI:
         assert captured[kwarg] == expected
 
     def test_allow_reconstructed_quality_flag(self, monkeypatch):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         monkeypatch.setattr(benchmark, "core_available", lambda: True)
         captured = {}
@@ -544,7 +544,7 @@ class TestBenchmarkCLI:
         assert captured["allow_reconstructed_quality"] is True
 
     def test_terminal_mode_free_and_fixed(self, monkeypatch):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         monkeypatch.setattr(benchmark, "core_available", lambda: True)
         captured = {}
@@ -571,7 +571,7 @@ class TestBenchmarkCLI:
             assert captured["terminal_mode"] == mode
 
     def test_defaults_from_module(self, monkeypatch):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         monkeypatch.setattr(benchmark, "core_available", lambda: True)
         captured = {}
@@ -604,7 +604,7 @@ class TestBenchmarkCLI:
         assert captured["terminal_mode"] == "free"
 
     def test_summary_printed(self, monkeypatch, tmp_path, capsys):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         monkeypatch.setattr(benchmark, "core_available", lambda: True)
         run_dir = tmp_path / "benchmarks" / "abc123"
@@ -667,7 +667,7 @@ class TestBenchmarkCLI:
 
 class TestInspectSQLCLI:
     def test_list_queries(self, monkeypatch, capsys):
-        from energy_baseline import report
+        from battery_optimizer import report
 
         monkeypatch.setattr(report, "list_curated_queries", lambda: ["alpha", "beta"])
         rc = main(["inspect-sql", "--list-queries"])
@@ -677,7 +677,7 @@ class TestInspectSQLCLI:
         assert "beta" in captured.out
 
     def test_list_queries_json(self, monkeypatch, capsys):
-        from energy_baseline import report
+        from battery_optimizer import report
 
         monkeypatch.setattr(report, "list_curated_queries", lambda: ["alpha", "beta"])
         rc = main(["inspect-sql", "--list-queries", "--json"])
@@ -725,7 +725,7 @@ class TestInspectSQLCLI:
         assert "--dataset" in captured.err
 
     def test_query_forwarded(self, monkeypatch, capsys):
-        from energy_baseline import report
+        from battery_optimizer import report
 
         monkeypatch.setattr(
             report,
@@ -739,7 +739,7 @@ class TestInspectSQLCLI:
         assert "100" in captured.out
 
     def test_sql_forwarded(self, monkeypatch, capsys):
-        from energy_baseline import report
+        from battery_optimizer import report
 
         monkeypatch.setattr(
             report,
@@ -776,7 +776,7 @@ _DATASET_ONLY_QUERIES = ("dataset_meta", "price_distribution", "quality_summary"
 class TestInspectSQLBenchmarkViews:
     @pytest.mark.parametrize("name", sorted(_BENCHMARK_VIEW_QUERIES))
     def test_benchmark_view_query_refused_without_benchmark(self, name, monkeypatch, capsys):
-        from energy_baseline import report
+        from battery_optimizer import report
 
         expected_view = _BENCHMARK_VIEW_QUERIES[name]
         called = {"ran": False}
@@ -797,7 +797,7 @@ class TestInspectSQLBenchmarkViews:
 
     @pytest.mark.parametrize("name", sorted(_DATASET_ONLY_QUERIES))
     def test_dataset_only_query_still_runs_without_benchmark(self, name, monkeypatch, capsys):
-        from energy_baseline import report
+        from battery_optimizer import report
 
         monkeypatch.setattr(report, "run_curated_query", lambda _name, **_kw: [{"ok": 1}])
         rc = main(["inspect-sql", "--dataset", "/tmp/ds", "--query", name])
@@ -806,7 +806,7 @@ class TestInspectSQLBenchmarkViews:
 
     def test_query_with_benchmark_flag_is_not_blocked(self, monkeypatch, capsys):
         """--benchmark registers the views, so the same query must go through."""
-        from energy_baseline import report
+        from battery_optimizer import report
 
         called = {}
 
@@ -837,14 +837,14 @@ class TestInspectSQLBenchmarkViews:
         The split is asserted against ``report``'s real roster so the CLI's
         up-front check cannot silently stop covering a benchmark-needing query.
         """
-        from energy_baseline import report
+        from battery_optimizer import report
 
         assert set(report.list_curated_queries()) == set(_BENCHMARK_VIEW_QUERIES) | set(
             _DATASET_ONLY_QUERIES
         )
 
     def test_adhoc_sql_naming_benchmark_view_refused(self, monkeypatch, capsys):
-        from energy_baseline import report
+        from battery_optimizer import report
 
         called = {"ran": False}
 
@@ -870,7 +870,7 @@ class TestInspectSQLBenchmarkViews:
         assert called["ran"] is False
 
     def test_adhoc_sql_without_benchmark_view_not_blocked(self, monkeypatch):
-        from energy_baseline import report
+        from battery_optimizer import report
 
         monkeypatch.setattr(report, "inspect_sql", lambda **_kw: [{"n": 1}])
         rc = main(["inspect-sql", "--dataset", "/tmp/ds", "--sql", "SELECT 1 FROM intervals"])
@@ -886,7 +886,7 @@ class TestInspectSQLBenchmarkViews:
 
     def test_view_detection_ignores_lookalikes(self):
         """Word-boundary matching, so nothing blocks on an unrelated identifier."""
-        from energy_baseline.cli import _benchmark_views_in
+        from battery_optimizer.cli import _benchmark_views_in
 
         assert _benchmark_views_in("SELECT * FROM benchmark_schedules") == ["benchmark_schedules"]
         assert _benchmark_views_in("SELECT * FROM intervals") == []
@@ -897,7 +897,7 @@ class TestInspectSQLBenchmarkViews:
         ) == ["benchmark_results", "benchmark_schedules"]
 
     def test_both_missing_views_named_in_one_message(self, monkeypatch, capsys):
-        from energy_baseline import report
+        from battery_optimizer import report
 
         monkeypatch.setattr(report, "inspect_sql", lambda **_kw: [])
         rc = main(
@@ -921,7 +921,7 @@ class TestInspectSQLBenchmarkViews:
 
     def test_blocked_message_does_not_leak_token(self, monkeypatch, capsys):
         """Redaction still applies on the new error path."""
-        from energy_baseline import report
+        from battery_optimizer import report
 
         def fake(_name, **_kw):
             raise ValueError(f"cannot read run: token={_SENTINEL_TOKEN}")
@@ -952,7 +952,7 @@ class TestInspectSQLBenchmarkViews:
 
 class TestBuildCLI:
     def test_default_battery_absent_true(self, monkeypatch, capsys):
-        from energy_baseline import build
+        from battery_optimizer import build
 
         captured = {}
 
@@ -969,7 +969,7 @@ class TestBuildCLI:
         assert "NOT A DETECTION" in captured_err
 
     def test_no_assume_no_battery(self, monkeypatch, capsys):
-        from energy_baseline import build
+        from battery_optimizer import build
 
         captured = {}
 
@@ -994,7 +994,7 @@ class TestBuildCLI:
         assert "--no-assume-no-battery" in captured_err
 
     def test_prints_dataset_dir(self, monkeypatch, capsys):
-        from energy_baseline import build
+        from battery_optimizer import build
 
         monkeypatch.setattr(build, "build_dataset", lambda **kw: Path("/tmp/dataset"))
         rc = main(["build", "--start", "2026-01-01", "--end", "2026-01-02"])
@@ -1011,7 +1011,7 @@ class TestBuildCLI:
 
 class TestReportCLI:
     def test_forwards_dataset_and_benchmark(self, monkeypatch):
-        from energy_baseline import report
+        from battery_optimizer import report
 
         captured = {}
 
@@ -1034,7 +1034,7 @@ class TestReportCLI:
         assert captured["benchmark_path"] == "/tmp/run"
 
     def test_ambiguity_surfaces_run_ids(self, monkeypatch, capsys):
-        from energy_baseline import report
+        from battery_optimizer import report
 
         def fake(**_kw):
             raise report.ReportInputError(
@@ -1058,7 +1058,7 @@ class TestReportCLI:
 
 class TestMainErrorHandling:
     def test_value_error_exit_1(self, monkeypatch, capsys):
-        from energy_baseline import cli
+        from battery_optimizer import cli
 
         def boom(_args):
             raise ValueError("bad input: missing required field")
@@ -1071,7 +1071,7 @@ class TestMainErrorHandling:
         assert "Traceback" not in captured.err
 
     def test_runtime_error_exit_1(self, monkeypatch, capsys):
-        from energy_baseline import cli
+        from battery_optimizer import cli
 
         def boom(_args):
             raise RuntimeError("something went wrong")
@@ -1084,7 +1084,7 @@ class TestMainErrorHandling:
         assert "Traceback" not in captured.err
 
     def test_unexpected_exception_propagates(self, monkeypatch):
-        from energy_baseline import cli
+        from battery_optimizer import cli
 
         def boom(_args):
             raise KeyError("unexpected")
@@ -1094,7 +1094,7 @@ class TestMainErrorHandling:
             main(["report"])
 
     def test_error_redacts_sentinel_token(self, monkeypatch, capsys):
-        from energy_baseline import cli
+        from battery_optimizer import cli
 
         def boom(_args):
             raise ValueError(
@@ -1111,7 +1111,7 @@ class TestMainErrorHandling:
         assert "<REDACTED>" in captured.err
 
     def test_error_message_one_line(self, monkeypatch, capsys):
-        from energy_baseline import cli
+        from battery_optimizer import cli
 
         def boom(_args):
             raise ValueError("line one\nline two\nline three")
@@ -1146,7 +1146,7 @@ _COLLISION = (
 
 class TestOSErrorHandling:
     def test_file_exists_error_is_one_clean_line(self, monkeypatch, capsys):
-        from energy_baseline import cli
+        from battery_optimizer import cli
 
         def boom(_args):
             raise FileExistsError(_COLLISION)
@@ -1162,7 +1162,7 @@ class TestOSErrorHandling:
 
     def test_build_collision_explains_and_tells_what_to_do(self, monkeypatch, capsys):
         """The collision message says what happened, why, and what to do next."""
-        from energy_baseline import cli
+        from battery_optimizer import cli
 
         def boom(_args):
             raise FileExistsError(_COLLISION)
@@ -1184,7 +1184,7 @@ class TestOSErrorHandling:
 
     def test_build_collision_never_deletes_or_overwrites(self, monkeypatch, tmp_path, capsys):
         """Real no-clobber collision through the real writer: bytes survive, exit 1."""
-        from energy_baseline import build, paths
+        from battery_optimizer import build, paths
 
         existing = tmp_path / "analysis/v1/dataset-abc123/build_manifest.json"
         existing.parent.mkdir(parents=True)
@@ -1208,7 +1208,7 @@ class TestOSErrorHandling:
 
     def test_generic_file_exists_error_gets_no_guidance(self, monkeypatch, capsys):
         """The guidance is for the store's own refusal, not every FileExistsError."""
-        from energy_baseline import cli
+        from battery_optimizer import cli
 
         def boom(_args):
             raise FileExistsError("file exists")
@@ -1231,7 +1231,7 @@ class TestOSErrorHandling:
         ids=["permission", "is-a-directory", "not-found", "plain"],
     )
     def test_unrelated_os_error_is_one_clean_line(self, monkeypatch, capsys, exc):
-        from energy_baseline import cli
+        from battery_optimizer import cli
 
         def boom(_args):
             raise exc
@@ -1247,7 +1247,7 @@ class TestOSErrorHandling:
         assert lines[0].startswith("validate:")
 
     def test_os_error_message_redacts_credentials(self, monkeypatch, capsys):
-        from energy_baseline import cli
+        from battery_optimizer import cli
 
         def boom(_args):
             raise OSError(
@@ -1265,7 +1265,7 @@ class TestOSErrorHandling:
 
     def test_unexpected_exception_types_still_propagate(self, monkeypatch):
         """Only expected shapes are handled — no blanket ``except Exception``."""
-        from energy_baseline import cli
+        from battery_optimizer import cli
 
         class UnexpectedBugError(Exception):
             """Not ValueError, RuntimeError or OSError: a programming error."""
@@ -1319,12 +1319,12 @@ class TestCmdExtractMock:
     def test_extract_ha_mock(self, tmp_path, monkeypatch):
         data_dir = tmp_path / "data"
         data_dir.mkdir()
-        monkeypatch.setenv("ENERGY_BASELINE_DATA_DIR", str(data_dir))
-        monkeypatch.setenv("ENERGY_BASELINE_HA_TOKEN", "mock-token-xyz")
+        monkeypatch.setenv("BATTERY_OPTIMIZER_DATA_DIR", str(data_dir))
+        monkeypatch.setenv("BATTERY_OPTIMIZER_HA_TOKEN", "mock-token-xyz")
         cfg = str(Path(__file__).resolve().parent.parent / "config" / "tariff.yaml")
 
-        import energy_baseline.extract_ha as _eh
-        from energy_baseline.extract_ha import extract_ha_history
+        import battery_optimizer.extract_ha as _eh
+        from battery_optimizer.extract_ha import extract_ha_history
 
         ts_str = "2026-01-01T12:00:00Z"
         fake_history = [
@@ -1377,7 +1377,7 @@ class TestCmdExtractMock:
 class TestDayAheadCLI:
     @staticmethod
     def _capture(monkeypatch, argv):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         monkeypatch.setattr(benchmark, "core_available", lambda: True)
         captured = {}
@@ -1416,7 +1416,7 @@ class TestDayAheadCLI:
         assert "no_battery, causal_price, day_ahead, rolling_horizon, oracle" in text
 
     def test_defaults_come_from_the_benchmark_module(self, monkeypatch):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         captured = self._capture(
             monkeypatch,
@@ -1460,7 +1460,7 @@ class TestDayAheadCLI:
         assert captured[kwarg] == expected
 
     def test_summary_reports_day_ahead_telemetry(self, monkeypatch, tmp_path, capsys):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         monkeypatch.setattr(benchmark, "core_available", lambda: True)
         run_dir = tmp_path / "benchmarks" / "def456"
@@ -1547,7 +1547,7 @@ class TestDayAheadCLI:
         day-ahead dict where the oracle's mode used to be, makes the line unreadable and
         the two claims indistinguishable — this pin keeps them named.
         """
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         monkeypatch.setattr(benchmark, "core_available", lambda: True)
         run_dir = tmp_path / "benchmarks" / "bbb222"
@@ -1611,7 +1611,7 @@ class TestDayAheadCLI:
         assert "source" not in summary.split("day_ahead:")[1]
 
     def test_summary_omits_day_ahead_when_it_did_not_run(self, monkeypatch, tmp_path, capsys):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         monkeypatch.setattr(benchmark, "core_available", lambda: True)
         run_dir = tmp_path / "benchmarks" / "aaa111"
@@ -1664,7 +1664,7 @@ class TestDayAheadCLI:
 class TestRollingHorizonLoadForecastModeCLI:
     @staticmethod
     def _capture(monkeypatch, argv):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         monkeypatch.setattr(benchmark, "core_available", lambda: True)
         captured = {}
@@ -1679,7 +1679,7 @@ class TestRollingHorizonLoadForecastModeCLI:
         return captured
 
     def test_default_is_causal(self, monkeypatch):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         captured = self._capture(
             monkeypatch,
@@ -1765,7 +1765,7 @@ class TestRollingHorizonLoadForecastModeCLI:
 class TestQualityPolicyCLI:
     @staticmethod
     def _capture(monkeypatch, argv):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         monkeypatch.setattr(benchmark, "core_available", lambda: True)
         captured = {}
@@ -1780,7 +1780,7 @@ class TestQualityPolicyCLI:
         return captured
 
     def test_quality_policy_default_is_reject(self, monkeypatch):
-        from energy_baseline import benchmark
+        from battery_optimizer import benchmark
 
         captured = self._capture(
             monkeypatch,

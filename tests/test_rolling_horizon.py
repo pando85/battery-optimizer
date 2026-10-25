@@ -25,11 +25,11 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pytest
 
-from energy_baseline.battery import (
+from battery_optimizer.battery import (
     BatterySpec,
 )
-from energy_baseline.policies import contiguous_day_bounds
-from energy_baseline.rolling_horizon import (
+from battery_optimizer.policies import contiguous_day_bounds
+from battery_optimizer.rolling_horizon import (
     AFTERNOON_EVENT,
     EVENING_EVENT,
     _clock_slot_position,
@@ -1549,7 +1549,7 @@ class TestRollingHorizon:
 
     def test_solver_failure_zero_flows(self, monkeypatch) -> None:
         """If the solver fails, that event gets zero flows, not substitution."""
-        from energy_baseline import rolling_horizon
+        from battery_optimizer import rolling_horizon
 
         spec, prices, load, usable, local_days, starts, frozen = self._simple_setup()
 
@@ -1560,7 +1560,7 @@ class TestRollingHorizon:
         def failing_solve(*args, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
-                from energy_baseline.oracle import OracleError
+                from battery_optimizer.oracle import OracleError
 
                 raise OracleError("Simulated solver failure")
             return original_solve(*args, **kwargs)
@@ -1632,8 +1632,8 @@ class TestRollingHorizon:
         itself a forecast error, and the test was passing for the wrong reason.  The
         per-day load factor here supplies the imperfection deliberately.
         """
-        from energy_baseline.battery import Horizon
-        from energy_baseline.rolling_horizon import run_day_ahead_with_frozen_forecast
+        from battery_optimizer.battery import Horizon
+        from battery_optimizer.rolling_horizon import run_day_ahead_with_frozen_forecast
 
         # Create a scenario with varying load and prices to expose differences
         spec = _spec()
@@ -3414,7 +3414,7 @@ class TestReplanCadenceDispatch:
         (clipping), so the executed dispatch is allowed to differ — the plan inputs are
         not.
         """
-        from energy_baseline import rolling_horizon as rh
+        from battery_optimizer import rolling_horizon as rh
 
         prices, load, usable, local_days, starts = _daily_shape_window(
             datetime(2025, 6, 10, 0, 0, tzinfo=UTC), 3
@@ -3531,7 +3531,7 @@ class TestReplanCadenceInvariants:
         The floor handed to the solver must therefore be the SAME constant for every
         event of the roll, derived from the evaluation window's initial SOC.
         """
-        from energy_baseline import rolling_horizon as rh
+        from battery_optimizer import rolling_horizon as rh
 
         captured: list[float] = []
         original = rh.solve_oracle
@@ -3552,7 +3552,7 @@ class TestReplanCadenceInvariants:
 
     def test_solver_failure_degrades_and_still_tiles(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A failed solve holds SOC for its own slice; it is never back-filled."""
-        from energy_baseline import rolling_horizon as rh
+        from battery_optimizer import rolling_horizon as rh
 
         prices, load, usable, local_days, starts = _daily_shape_window(n_days=2)
         frozen, _ = build_frozen_load_profile(
@@ -3570,7 +3570,7 @@ class TestReplanCadenceInvariants:
         def failing(day_spec, horizon, **kw):  # noqa: ANN001 - mirrors solve_oracle
             calls["n"] += 1
             if calls["n"] in (1, 2, 5):
-                from energy_baseline.oracle import OracleError
+                from battery_optimizer.oracle import OracleError
 
                 raise OracleError("Simulated solver infeasible")
             return original(day_spec, horizon, **kw)
@@ -3634,7 +3634,7 @@ class TestReplanCadenceInvariants:
         The runner's ``--time-limit`` is the knob; this checks it really reaches every
         solve at the new cadence rather than being applied once per day as before.
         """
-        from energy_baseline import rolling_horizon as rh
+        from battery_optimizer import rolling_horizon as rh
 
         captured: list[float] = []
         original = rh.solve_oracle
@@ -3718,7 +3718,7 @@ class TestCausalLoadProfile:
 
     def test_provider_uses_only_data_before_current_local_day_start(self) -> None:
         """Forecast cutoff is strictly before the event's local-day start, not midnight."""
-        from energy_baseline.rolling_horizon import CausalForecastProvider, RollingEvent
+        from battery_optimizer.rolling_horizon import CausalForecastProvider, RollingEvent
 
         rng = np.random.default_rng(42)
         n_days = 10
@@ -3763,7 +3763,7 @@ class TestCausalLoadProfile:
         the usable mask at the event's local-day start, so perturbing D's own load (and
         D+1's) leaves every horizon slot — including tomorrow's — bit-identical.
         """
-        from energy_baseline.rolling_horizon import CausalForecastProvider, RollingEvent
+        from battery_optimizer.rolling_horizon import CausalForecastProvider, RollingEvent
 
         rng = np.random.default_rng(11)
         n_days = 8
@@ -3828,7 +3828,7 @@ class TestCausalLoadProfile:
         decision) into tomorrow's fitted vintage, and a cut that only compares the past
         array prefix would miss it.
         """
-        from energy_baseline.rolling_horizon import (
+        from battery_optimizer.rolling_horizon import (
             CausalForecastProvider,
             RollingEvent,
         )
@@ -3880,7 +3880,7 @@ class TestCausalLoadProfile:
 
     def test_causal_mode_through_dispatcher(self) -> None:
         """run_rolling_horizon with causal mode builds a provider and ignores frozen_load."""
-        from energy_baseline.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
+        from battery_optimizer.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
 
         fixture = TestRollingHorizon()._simple_setup(6)
         spec, prices, load, usable, local_days, starts, _frozen = fixture
@@ -3921,7 +3921,7 @@ class TestCausalLoadProfile:
         A direct caller who hands a frozen array and labels it causal must get the
         event-specific provider, not a relabelled frozen array.
         """
-        from energy_baseline.rolling_horizon import (
+        from battery_optimizer.rolling_horizon import (
             LOAD_FORECAST_MODE_CAUSAL,
             CausalForecastProvider,
         )
@@ -3964,8 +3964,8 @@ class TestCausalLoadProfile:
 
     def test_causal_first_event_horizon_forecast_capture(self) -> None:
         """Capture the horizon forecast via a solve spy: cutoff is pre-local-day-start."""
-        from energy_baseline import rolling_horizon as rh
-        from energy_baseline.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
+        from battery_optimizer import rolling_horizon as rh
+        from battery_optimizer.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
 
         fixture = TestRollingHorizon()._simple_setup(6)
         spec, prices, load, usable, local_days, starts, _frozen = fixture
@@ -4053,7 +4053,7 @@ class TestCausalLoadProfile:
 
     def test_causal_mode_future_prices_dont_change_past_execution(self) -> None:
         """Changing future prices does NOT change already-committed actions in causal mode."""
-        from energy_baseline.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
+        from battery_optimizer.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
 
         fixture = TestRollingHorizon()._simple_setup(5)
         spec, prices, load, usable, local_days, starts, _frozen = fixture
@@ -4103,7 +4103,7 @@ class TestCausalLoadProfile:
 
     def test_causal_mode_dst_fall_back(self) -> None:
         """Causal mode tiles the 100-slot fall-back day correctly under the event provider."""
-        from energy_baseline.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
+        from battery_optimizer.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
 
         prices, load, usable, local_days, starts = _dst_fall_back_window()
         oct25 = next(i for i, d in enumerate(local_days) if d == date(2025, 10, 25))
@@ -4136,7 +4136,7 @@ class TestCausalLoadProfile:
 
     def test_causal_partial_first_day_clock_position_correct(self) -> None:
         """A slice opening at non-midnight keeps correct slot positions in causal mode."""
-        from energy_baseline.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
+        from battery_optimizer.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
 
         # Opens at 2025-10-01T00:00Z = 02:00 CEST, so the first eval local day is partial.
         start = datetime(2025, 9, 24, 0, 0, tzinfo=UTC)
@@ -4172,7 +4172,7 @@ class TestCausalLoadProfile:
 
     def test_causal_prefix_replay_identity(self) -> None:
         """Prefix execution is identical when only post-cutoff load changes (causal)."""
-        from energy_baseline.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
+        from battery_optimizer.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
 
         fixture = TestRollingHorizon()._simple_setup(8)
         spec, prices, load, usable, local_days, starts, _frozen = fixture
@@ -4221,8 +4221,8 @@ class TestCausalLoadProfile:
         input for a multi-day-horizon event and assert perturbing D's own load leaves that
         input bit-identical, with a pre-cutoff non-vacuity proving the fit is real.
         """
-        from energy_baseline import rolling_horizon as rh
-        from energy_baseline.rolling_horizon import (
+        from battery_optimizer import rolling_horizon as rh
+        from battery_optimizer.rolling_horizon import (
             LOAD_FORECAST_MODE_CAUSAL,
             compute_rolling_events,
         )
@@ -4334,7 +4334,7 @@ class TestCausalLoadProfile:
         A second call for the same local day (same cutoff) returns a byte-identical
         forecast and matching metadata, with only the event-specific labels differing.
         """
-        from energy_baseline.rolling_horizon import CausalForecastProvider, RollingEvent
+        from battery_optimizer.rolling_horizon import CausalForecastProvider, RollingEvent
 
         rng = np.random.default_rng(3)
         n_days = 6
@@ -4376,7 +4376,7 @@ class TestCausalLoadProfile:
         Two providers over the same data but different ``window_days`` must produce
         different forecasts (the cache never returns a wrong-window result).
         """
-        from energy_baseline.rolling_horizon import CausalForecastProvider, RollingEvent
+        from battery_optimizer.rolling_horizon import CausalForecastProvider, RollingEvent
 
         rng = np.random.default_rng(3)
         n_days = 8
@@ -4419,8 +4419,8 @@ class TestCausalLoadProfile:
         hardcoded 28.  Proven two ways: the artifact reports the window, and the actual
         forecast input the solver receives differs between windows (non-vacuity).
         """
-        from energy_baseline import rolling_horizon as rh
-        from energy_baseline.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
+        from battery_optimizer import rolling_horizon as rh
+        from battery_optimizer.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
 
         spec = _spec()
         n_days = 16
@@ -4480,7 +4480,7 @@ class TestCausalLoadProfile:
 
     def test_forecast_window_days_validated(self) -> None:
         """forecast_window_days < 1 is refused, like the frozen profile's guard."""
-        from energy_baseline.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
+        from battery_optimizer.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
 
         fixture = TestRollingHorizon()._simple_setup(4)
         spec, prices, load, usable, local_days, starts, _frozen = fixture
@@ -4509,7 +4509,7 @@ class TestCausalLoadProfile:
         usable mask zeroes the training region.  We must not crash (backward compat for
         edge fixtures), but the run must make the count visible in telemetry.
         """
-        from energy_baseline.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
+        from battery_optimizer.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
 
         spec = _spec()
         n_days = 6
@@ -4549,7 +4549,7 @@ class TestCausalLoadProfile:
 
     def test_b3_b4_b6_metadata_fields(self) -> None:
         """B3 (content hash), B4 (window-scoped support), B6 (per-target-day history)."""
-        from energy_baseline.rolling_horizon import CausalForecastProvider, RollingEvent
+        from battery_optimizer.rolling_horizon import CausalForecastProvider, RollingEvent
 
         rng = np.random.default_rng(9)
         n_days = 8
@@ -4649,7 +4649,7 @@ _CAUSAL_GOLDEN: dict[str, Any] = {
 
 class TestCausalGolden:
     def test_event_specific_causal_dispatch_matches_golden(self) -> None:
-        from energy_baseline.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
+        from battery_optimizer.rolling_horizon import LOAD_FORECAST_MODE_CAUSAL
 
         start = datetime(2025, 6, 15, 0, 0, tzinfo=UTC)
         n = 5 * 96

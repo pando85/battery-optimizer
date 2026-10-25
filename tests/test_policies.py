@@ -28,7 +28,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from energy_baseline.battery import (
+from battery_optimizer.battery import (
     BatteryPhysicsError,
     BatterySpec,
     Horizon,
@@ -36,8 +36,8 @@ from energy_baseline.battery import (
     check_feasible,
     simulate,
 )
-from energy_baseline.oracle import solve_oracle
-from energy_baseline.policies import (
+from battery_optimizer.oracle import solve_oracle
+from battery_optimizer.policies import (
     FORECAST_FALLBACK_RULE,
     DayAheadDay,
     contiguous_day_bounds,
@@ -1750,8 +1750,8 @@ class TestDayAheadPolicy:
 class TestDayAheadDegradation:
     def test_infeasible_day_holds_soc_and_the_run_continues(self, monkeypatch) -> None:
         """One bad day must not abort the horizon and must not borrow the oracle's answer."""
-        import energy_baseline.policies as policies_mod
-        from energy_baseline.oracle import OracleInfeasibleError
+        import battery_optimizer.policies as policies_mod
+        from battery_optimizer.oracle import OracleInfeasibleError
 
         s = spec()
         case = day_ahead_case()
@@ -1787,8 +1787,8 @@ class TestDayAheadDegradation:
         assert sched.charge_kwh.sum() + sched.discharge_kwh.sum() > 0.0
 
     def test_no_incumbent_day_is_counted_separately(self, monkeypatch) -> None:
-        import energy_baseline.policies as policies_mod
-        from energy_baseline.oracle import OracleNoIncumbentError
+        import battery_optimizer.policies as policies_mod
+        from battery_optimizer.oracle import OracleNoIncumbentError
 
         s = spec()
         case = day_ahead_case()

@@ -106,16 +106,17 @@ import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from energy_baseline.config import resolve_config_path
-from energy_baseline.manifest import new_manifest, write_manifest
-from energy_baseline.paths import (
+from battery_optimizer._env import get_env
+from battery_optimizer.config import resolve_config_path
+from battery_optimizer.manifest import new_manifest, write_manifest
+from battery_optimizer.paths import (
     iter_parts,
     part_path,
     parts_dir,
     resolve_data_dir,
     write_part_atomic,
 )
-from energy_baseline.schemas import RAW_SAMPLE, validate_table
+from battery_optimizer.schemas import RAW_SAMPLE, validate_table
 
 log = logging.getLogger(__name__)
 
@@ -129,7 +130,7 @@ SOURCE = "prometheus"
 PART_KIND = "prom-samples"
 """``kind`` component of part filenames for this extractor."""
 
-BASE_URL_ENV_VAR = "ENERGY_BASELINE_PROMETHEUS_URL"
+BASE_URL_ENV_VAR = "BATTERY_OPTIMIZER_PROMETHEUS_URL"
 
 DEFAULT_BASE_URL = "https://prometheus-long-term.internal.grigri.cloud"
 """The archive is publicly reachable inside the cluster and needs no auth."""
@@ -342,12 +343,12 @@ def escape_promql_string(value: str) -> str:
 
 
 def resolve_base_url(base_url: str | None = None) -> str:
-    """``base_url`` arg > ``ENERGY_BASELINE_PROMETHEUS_URL`` env > live default.
+    """``base_url`` arg > ``BATTERY_OPTIMIZER_PROMETHEUS_URL`` env > live default.
 
     Rejects non-HTTP schemes and embedded credentials (the archive is
     unauthenticated, so a URL with userinfo is a misconfiguration).
     """
-    url = base_url or os.environ.get(BASE_URL_ENV_VAR) or DEFAULT_BASE_URL
+    url = base_url or get_env(BASE_URL_ENV_VAR) or DEFAULT_BASE_URL
     url = url.strip().rstrip("/")
     parsed = httpx.URL(url)
     if parsed.scheme not in ("http", "https"):
@@ -874,7 +875,7 @@ def extract_prometheus(
             empty selects :data:`DEFAULT_ENTITY_IDS` (``sensor.esios_pvpc_2``
             is never a default — it is a dead duplicate of the price sensor).
         base_url: Prometheus base URL; ``None`` resolves
-            ``ENERGY_BASELINE_PROMETHEUS_URL`` then :data:`DEFAULT_BASE_URL`.
+            ``BATTERY_OPTIMIZER_PROMETHEUS_URL`` then :data:`DEFAULT_BASE_URL`.
         client: Pre-configured :class:`httpx.Client` to use (test injection).
             When omitted an unauthenticated client is created and closed here.
         chunk_seconds: Chunk width in seconds (default 24h).  Each chunk is

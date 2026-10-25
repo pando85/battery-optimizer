@@ -51,7 +51,7 @@ Load forecasts have two modes that share one code path, selected by
 * **causal** (the canonical benchmark default): each event's forecast is built by
   :class:`CausalForecastProvider` at the event's decision instant, from a usable mask
   truncated at the event's own local-day start, using the SAME
-  :func:`energy_baseline.policies.forecast_load_trailing_slot_mean` function the
+  :func:`battery_optimizer.policies.forecast_load_trailing_slot_mean` function the
   day-ahead policy uses.  So the bases are truly comparable, and a solve whose horizon
   spans into the next local day never reads that day's — or its own day's — measured
   load into the fit.  The next-day refresh happens only at the first event after that
@@ -1476,7 +1476,7 @@ def run_rolling_horizon(
     * ``causal``: each event's forecast is built by :class:`CausalForecastProvider`,
       which truncates the usable mask at the event's own local-day start and calls the
       SAME function the day-ahead policy uses
-      (:func:`energy_baseline.policies.forecast_load_trailing_slot_mean`).  A 20:30
+      (:func:`battery_optimizer.policies.forecast_load_trailing_slot_mean`).  A 20:30
       solve on day D whose horizon spans D+1 therefore never reads day D's measured
       load into D+1's estimate — no whole-array per-target-day vintage and no future
       leakage.  The ``frozen_load`` argument is ignored in this mode.

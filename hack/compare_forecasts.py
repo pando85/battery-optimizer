@@ -76,29 +76,29 @@ _src = _here.parent / "src"
 if str(_src) not in sys.path:
     sys.path.insert(0, str(_src))
 
-from energy_baseline.artifact_integrity import finalize_run_outputs  # noqa: E402
-from energy_baseline.battery import BatteryPhysicsError, BatterySpec, Horizon  # noqa: E402
-from energy_baseline.benchmark import (  # noqa: E402
+from battery_optimizer.artifact_integrity import finalize_run_outputs  # noqa: E402
+from battery_optimizer.battery import BatteryPhysicsError, BatterySpec, Horizon  # noqa: E402
+from battery_optimizer.benchmark import (  # noqa: E402
     BenchmarkInputError,
     load_dataset,
     resolve_battery_assumptions,
     usable_mask,
 )
-from energy_baseline.config import load_config  # noqa: E402
+from battery_optimizer.config import load_config  # noqa: E402
 
 # _get_code_version is private, but necessary: the runner needs the (rev, dirty)
 # tuple to record git_head and git_dirty as separate fields. The public code_version()
 # returns a combined string like "abc123-dirty", which would require fragile parsing
 # to extract the components. The private API is stable and used internally by
 # code_version() itself.
-from energy_baseline.manifest import (  # noqa: E402
+from battery_optimizer.manifest import (  # noqa: E402
     _get_code_version,
     code_version,
     config_hash,
 )
-from energy_baseline.oracle import OracleError  # noqa: E402
-from energy_baseline.policies import policy_no_battery  # noqa: E402
-from energy_baseline.rolling_horizon import (  # noqa: E402
+from battery_optimizer.oracle import OracleError  # noqa: E402
+from battery_optimizer.policies import policy_no_battery  # noqa: E402
+from battery_optimizer.rolling_horizon import (  # noqa: E402
     build_frozen_load_profile,
     run_day_ahead_with_frozen_forecast,
     run_rolling_horizon,
@@ -116,7 +116,7 @@ _POLICY_ERRORS: tuple[type[BaseException], ...] = (OracleError, BatteryPhysicsEr
 _PROJECT = _here.parent
 
 #: Files whose bytes are hashed into ``source_hashes`` (relative to the project).
-#: Derived by tracing every energy_baseline module the runner imports on the
+#: Derived by tracing every battery_optimizer module the runner imports on the
 #: measurement path: direct imports (battery, benchmark, config, oracle,
 #: policies, rolling_horizon, manifest, artifact_integrity) plus transitive
 #: imports discovered via benchmark (paths, schemas) and the package __init__.
@@ -124,17 +124,17 @@ _PROJECT = _here.parent
 #: replay_runtime_demo.py, which this runner does not use.
 _SOURCE_FILES: tuple[str, ...] = (
     "hack/compare_forecasts.py",
-    "src/energy_baseline/__init__.py",
-    "src/energy_baseline/artifact_integrity.py",
-    "src/energy_baseline/battery.py",
-    "src/energy_baseline/benchmark.py",
-    "src/energy_baseline/config.py",
-    "src/energy_baseline/manifest.py",
-    "src/energy_baseline/oracle.py",
-    "src/energy_baseline/paths.py",
-    "src/energy_baseline/policies.py",
-    "src/energy_baseline/rolling_horizon.py",
-    "src/energy_baseline/schemas.py",
+    "src/battery_optimizer/__init__.py",
+    "src/battery_optimizer/artifact_integrity.py",
+    "src/battery_optimizer/battery.py",
+    "src/battery_optimizer/benchmark.py",
+    "src/battery_optimizer/config.py",
+    "src/battery_optimizer/manifest.py",
+    "src/battery_optimizer/oracle.py",
+    "src/battery_optimizer/paths.py",
+    "src/battery_optimizer/policies.py",
+    "src/battery_optimizer/rolling_horizon.py",
+    "src/battery_optimizer/schemas.py",
 )
 
 

@@ -18,7 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from energy_baseline.extract_ha import (
+from battery_optimizer.extract_ha import (
     DEFAULT_BASE_URL,
     DEFAULT_ENTITIES,
     PART_KIND,
@@ -44,9 +44,9 @@ from energy_baseline.extract_ha import (
     table_to_bytes,
     to_epoch_us,
 )
-from energy_baseline.manifest import read_manifest
-from energy_baseline.paths import iter_parts, part_path, write_part_atomic
-from energy_baseline.schemas import RAW_ENUM_STATE, validate_table
+from battery_optimizer.manifest import read_manifest
+from battery_optimizer.paths import iter_parts, part_path, write_part_atomic
+from battery_optimizer.schemas import RAW_ENUM_STATE, validate_table
 
 # ---------------------------------------------------------------------------
 # Constants & helpers
@@ -1390,11 +1390,11 @@ class TestPureHelpers:
             resolve_base_url("https://user:pass@hass.example.com")
 
     def test_resolve_token_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("ENERGY_BASELINE_HA_TOKEN", "env-token")
+        monkeypatch.setenv("BATTERY_OPTIMIZER_HA_TOKEN", "env-token")
         assert resolve_token(None) == "env-token"
 
     def test_resolve_token_missing_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("ENERGY_BASELINE_HA_TOKEN", raising=False)
+        monkeypatch.delenv("BATTERY_OPTIMIZER_HA_TOKEN", raising=False)
         with pytest.raises(ValueError, match="not provided"):
             resolve_token(None)
 
@@ -1987,7 +1987,7 @@ class TestCrossRunDedup:
         self, tmp_path: Path, config: Path
     ) -> None:
         """A damaged part cannot contribute keys: dedup degrades to duplication."""
-        from energy_baseline.paths import parts_dir
+        from battery_optimizer.paths import parts_dir
 
         data_dir = tmp_path / "data"
         pdir = parts_dir(data_dir, SOURCE)

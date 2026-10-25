@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 from scipy.optimize import milp
 
-from energy_baseline.battery import (
+from battery_optimizer.battery import (
     BatteryPhysicsError,
     BatterySpec,
     Horizon,
@@ -32,7 +32,7 @@ from energy_baseline.battery import (
     check_feasible,
     simulate,
 )
-from energy_baseline.oracle import (
+from battery_optimizer.oracle import (
     OracleError,
     OracleInfeasibleError,
     OracleNoIncumbentError,
@@ -40,7 +40,7 @@ from energy_baseline.oracle import (
     classify_result,
     solve_oracle,
 )
-from energy_baseline.policies import (
+from battery_optimizer.policies import (
     DayAheadDay,
     fit_thresholds,
     policy_causal_price,
@@ -886,7 +886,7 @@ class TestInfeasibleRaises:
 
     def test_solver_kernel_disagreement_surfaces_as_oracle_error(self, monkeypatch) -> None:
         """The oracle never leaks a physics error: it wraps the disagreement."""
-        from energy_baseline import oracle as oracle_module
+        from battery_optimizer import oracle as oracle_module
 
         def refusing(*args, **kwargs):
             raise BatteryPhysicsError("simulated kernel refusal")
@@ -1979,7 +1979,7 @@ class TestDayAheadReusesOracleAssembly:
 
     def test_policy_calls_solve_oracle_with_free_terminal_mode(self, monkeypatch) -> None:
         """Recorded, not assumed: the day-ahead policy goes through this module's API."""
-        import energy_baseline.policies as policies_mod
+        import battery_optimizer.policies as policies_mod
 
         seen: list[dict[str, object]] = []
         real = policies_mod.solve_oracle

@@ -308,9 +308,9 @@ def code_version() -> str:
     """
     rev, dirty = _get_code_version()
     if rev is None:
-        from energy_baseline import __version__
+        from battery_optimizer import __version__
 
-        return f"{NO_GIT_MARKER}@energy-baseline=={__version__}"
+        return f"{NO_GIT_MARKER}@battery-optimizer=={__version__}"
     return f"{rev}{DIRTY_SUFFIX if dirty else ''}"
 
 
@@ -330,7 +330,7 @@ def new_manifest(
     URLs with query strings) before storage.
     """
     code_ver, code_dirty = _get_code_version()
-    from energy_baseline.schemas import SCHEMA_VERSION
+    from battery_optimizer.schemas import SCHEMA_VERSION
 
     return ExtractionManifest(
         manifest_version=1,

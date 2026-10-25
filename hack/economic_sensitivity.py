@@ -39,7 +39,7 @@ Honesty rules this runner is written to
   is pinned to the seed and there is no inventory to value, so a nonzero planning
   terminal value is refused rather than silently ignored.
 * **Optimised responses, not rescoring.**  Each pair is its own solve through
-  :func:`energy_baseline.economic_sensitivity.optimize_with_throughput`, so the
+  :func:`battery_optimizer.economic_sensitivity.optimize_with_throughput`, so the
   solver minimises *that pair's* objective.  Repeating a parameter in an array is
   allowed and must produce an identical action digest; the artifact records
   digests per arm so the claim can be checked.
@@ -53,9 +53,9 @@ Honesty rules this runner is written to
   comparable.  Scoring reuses :func:`score_fixed_schedule`; no physics or
   accounting is reimplemented here.
 * **Canonical inputs.**  Interval usability comes from
-  :func:`energy_baseline.benchmark.usable_mask` (allocation, energy *and* price
+  :func:`battery_optimizer.benchmark.usable_mask` (allocation, energy *and* price
   quality, nulls, non-finite values), and the battery from
-  :func:`energy_baseline.benchmark.resolve_battery_assumptions`, so every field
+  :func:`battery_optimizer.benchmark.resolve_battery_assumptions`, so every field
   of ``BatterySpec`` — the initial SOC, the efficiency mapping, the SOC window
   and the import ceiling, each with its provenance — is the config's, never a
   local constant.
@@ -95,22 +95,22 @@ _SRC = _PROJECT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from energy_baseline.artifact_integrity import finalize_run_outputs  # noqa: E402
-from energy_baseline.battery import BatteryPhysicsError, BatterySpec, Horizon  # noqa: E402
-from energy_baseline.benchmark import (  # noqa: E402
+from battery_optimizer.artifact_integrity import finalize_run_outputs  # noqa: E402
+from battery_optimizer.battery import BatteryPhysicsError, BatterySpec, Horizon  # noqa: E402
+from battery_optimizer.benchmark import (  # noqa: E402
     BenchmarkInputError,
     load_dataset,
     parse_train_end,
     resolve_battery_assumptions,
     usable_mask,
 )
-from energy_baseline.config import load_config  # noqa: E402
-from energy_baseline.economic_sensitivity import (  # noqa: E402
+from battery_optimizer.config import load_config  # noqa: E402
+from battery_optimizer.economic_sensitivity import (  # noqa: E402
     optimize_with_throughput,
     score_fixed_schedule,
 )
-from energy_baseline.manifest import code_version, config_hash  # noqa: E402
-from energy_baseline.oracle import OracleError  # noqa: E402
+from battery_optimizer.manifest import code_version, config_hash  # noqa: E402
+from battery_optimizer.oracle import OracleError  # noqa: E402
 
 ARTIFACT_NAME = "sensitivity_sweep.json"
 MANIFEST_NAME = "sensitivity_outputs_manifest.json"
@@ -127,13 +127,13 @@ _ZERO_TOLERANCE = 1e-15
 #: Files whose bytes are hashed into ``source_hashes`` (relative to the project).
 _SOURCE_FILES = (
     "hack/economic_sensitivity.py",
-    "src/energy_baseline/economic_sensitivity.py",
-    "src/energy_baseline/oracle.py",
-    "src/energy_baseline/battery.py",
-    "src/energy_baseline/benchmark.py",
-    "src/energy_baseline/config.py",
-    "src/energy_baseline/manifest.py",
-    "src/energy_baseline/artifact_integrity.py",
+    "src/battery_optimizer/economic_sensitivity.py",
+    "src/battery_optimizer/oracle.py",
+    "src/battery_optimizer/battery.py",
+    "src/battery_optimizer/benchmark.py",
+    "src/battery_optimizer/config.py",
+    "src/battery_optimizer/manifest.py",
+    "src/battery_optimizer/artifact_integrity.py",
 )
 
 #: What each monetary knob is *called* — naming only.  None of these is a real
@@ -553,7 +553,7 @@ def _resolve_windows(
     return {
         "train_end": _iso_utc(train_end),
         "train_end_validation": (
-            "argument: --train-end, normalised by energy_baseline.benchmark.parse_train_end "
+            "argument: --train-end, normalised by battery_optimizer.benchmark.parse_train_end "
             "(aware instant required, future cut rejected). Validation only: no wall-clock "
             "value is written into the artifacts"
         ),
@@ -731,7 +731,7 @@ def _build_horizon(
 
     quality = {
         "usable_mask_source": (
-            "energy_baseline.benchmark.usable_mask — allocation, energy and price quality plus "
+            "battery_optimizer.benchmark.usable_mask — allocation, energy and price quality plus "
             "null and non-finite checks — not an energy-only mask"
         ),
         "allow_reconstructed_quality": bool(allow_reconstructed),
@@ -1202,7 +1202,7 @@ def main(argv: list[str] | None = None) -> int:
             "assumptions": assumptions.as_dict(),
             "spec": asdict(spec),
             "spec_source": (
-                "energy_baseline.benchmark.resolve_battery_assumptions(config, "
+                "battery_optimizer.benchmark.resolve_battery_assumptions(config, "
                 "initial_soc_frac=<--initial-soc-frac or None>): every BatterySpec field, the "
                 "efficiency mapping, the SOC window and the import ceiling come from the config "
                 "with their provenance recorded. --initial-soc-frac overrides the configured "

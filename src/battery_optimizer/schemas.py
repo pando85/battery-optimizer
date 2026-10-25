@@ -1,4 +1,4 @@
-"""PyArrow schemas for the energy-baseline canonical data store.
+"""PyArrow schemas for the battery-optimizer canonical data store.
 
 All timestamps are ``timestamp("us", tz="UTC")``.
 

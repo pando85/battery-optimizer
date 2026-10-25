@@ -22,8 +22,8 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pytest
 
-from energy_baseline.battery import BatteryPhysicsError, BatterySpec, Horizon, Schedule, simulate
-from energy_baseline.dispatch import (
+from battery_optimizer.battery import BatteryPhysicsError, BatterySpec, Horizon, Schedule, simulate
+from battery_optimizer.dispatch import (
     INTENT_FIELDS,
     CommandPolicy,
     DispatchError,
@@ -44,7 +44,7 @@ EPOCH = datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC)
 
 #: Source of the module under test, read once for the structural (AST) checks.
 _DISPATCH_SOURCE = Path(
-    __import__("energy_baseline.dispatch", fromlist=["__file__"]).__file__
+    __import__("battery_optimizer.dispatch", fromlist=["__file__"]).__file__
 ).read_text(encoding="utf-8")
 
 
@@ -451,7 +451,7 @@ class TestNoSimultaneousFlow:
         assert not any("discharge" in field.name for field in dataclasses.fields(DispatchIntent))
 
     def test_mode_derivation_refuses_both_flows(self) -> None:
-        from energy_baseline.dispatch import _mode_from_flows
+        from battery_optimizer.dispatch import _mode_from_flows
 
         with pytest.raises(DispatchError, match="one binary mode per interval"):
             _mode_from_flows(0.5, 0.5)

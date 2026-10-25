@@ -326,36 +326,36 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from energy_baseline.config import (
+from battery_optimizer.config import (
     TariffPeriods,
     load_config,
     resolve_config_path,
     tariff_period_for,
 )
-from energy_baseline.extract_prom import (
+from battery_optimizer.extract_prom import (
     DEAD_DUPLICATE_ENTITY_IDS,
     from_micros,
     iso_z,
     parse_utc,
     to_micros,
 )
-from energy_baseline.extract_prom import (
+from battery_optimizer.extract_prom import (
     SOURCE as PROM_SOURCE,
 )
 
 # ``manifest`` owns the git-version discovery and the canonical config hash;
 # reusing them keeps the dataset id and the extraction manifests on the same
 # definition of "code version" and "config hash".
-from energy_baseline.manifest import (
+from battery_optimizer.manifest import (
     code_version as manifest_code_version,
 )
-from energy_baseline.manifest import (
+from battery_optimizer.manifest import (
     config_hash,
     new_manifest,
     write_manifest,
 )
-from energy_baseline.paths import parts_dir, resolve_data_dir, write_part_atomic
-from energy_baseline.schemas import (
+from battery_optimizer.paths import parts_dir, resolve_data_dir, write_part_atomic
+from battery_optimizer.schemas import (
     ANALYSIS_INTERVAL,
     SCHEMA_VERSION,
     validate_table,
@@ -2534,7 +2534,7 @@ def load_raw_inputs(
 def code_version() -> str:
     """Git commit of the package, dirty-aware.
 
-    Delegates to :func:`energy_baseline.manifest.code_version`, the single shared
+    Delegates to :func:`battery_optimizer.manifest.code_version`, the single shared
     definition used by ``benchmark`` too, so a dirty tree cannot produce the same
     ``dataset_id`` as a clean one.
     """

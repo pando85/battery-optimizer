@@ -1,7 +1,7 @@
 # Rolling Horizon Implementation Status
 
 Status document for the rolling-horizon experiment code in this directory:
-`src/energy_baseline/rolling_horizon.py`, `hack/compare_forecasts.py`, and their tests. The
+`src/battery_optimizer/rolling_horizon.py`, `hack/compare_forecasts.py`, and their tests. The
 dispatcher defaults to the two-event (14:00 / 20:30) schedule and can be run at any replan
 cadence — see *What Is Implemented*.
 
@@ -63,7 +63,7 @@ memory — and paste the count for the *current* revision, not one you measured 
 
 ## What Is Implemented
 
-### `src/energy_baseline/rolling_horizon.py`
+### `src/battery_optimizer/rolling_horizon.py`
 
 1. **Rolling dispatcher with a configurable replan cadence** — two modes over one code
    path and one publication rule.

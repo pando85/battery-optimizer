@@ -16,9 +16,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from energy_baseline import benchmark as bm
-from energy_baseline import report as rp
-from energy_baseline.artifact_integrity import (
+from battery_optimizer import benchmark as bm
+from battery_optimizer import report as rp
+from battery_optimizer.artifact_integrity import (
     BENCHMARK_MANIFEST_NAME,
     BENCHMARK_REQUIRED_FILES,
     REPORT_MANIFEST_NAME,
@@ -26,7 +26,7 @@ from energy_baseline.artifact_integrity import (
     finalize_run_outputs,
     verify_run_outputs,
 )
-from energy_baseline.config import BatteryConfig, TariffConfig, TariffPeriods, TaxEntry
+from battery_optimizer.config import BatteryConfig, TariffConfig, TariffPeriods, TaxEntry
 
 # ---------------------------------------------------------------------------
 # Helpers (synthetic benchmark run)

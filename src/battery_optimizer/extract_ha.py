@@ -156,7 +156,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -168,15 +167,16 @@ import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from energy_baseline.config import resolve_config_path
-from energy_baseline.manifest import new_manifest, write_manifest
-from energy_baseline.paths import (
+from battery_optimizer._env import get_env
+from battery_optimizer.config import resolve_config_path
+from battery_optimizer.manifest import new_manifest, write_manifest
+from battery_optimizer.paths import (
     iter_parts,
     part_path,
     resolve_data_dir,
     write_part_atomic,
 )
-from energy_baseline.schemas import RAW_ENUM_STATE, validate_table
+from battery_optimizer.schemas import RAW_ENUM_STATE, validate_table
 
 log = logging.getLogger(__name__)
 
@@ -190,8 +190,8 @@ SOURCE = "ha_history"
 PART_KIND = "ha-enum"
 """``kind`` component of part filenames."""
 
-BASE_URL_ENV_VAR = "ENERGY_BASELINE_HA_URL"
-TOKEN_ENV_VAR = "ENERGY_BASELINE_HA_TOKEN"
+BASE_URL_ENV_VAR = "BATTERY_OPTIMIZER_HA_URL"
+TOKEN_ENV_VAR = "BATTERY_OPTIMIZER_HA_TOKEN"
 
 DEFAULT_BASE_URL = "https://hass.grigri.cloud"
 """Never recorded in a manifest: the URL itself is replaced by a one-way digest."""
@@ -374,8 +374,8 @@ def iter_chunks(
 
 
 def resolve_base_url(base_url: str | None = None) -> str:
-    """``base_url`` arg > ``ENERGY_BASELINE_HA_URL`` env > default."""
-    url = base_url or os.environ.get(BASE_URL_ENV_VAR) or DEFAULT_BASE_URL
+    """``base_url`` arg > ``BATTERY_OPTIMIZER_HA_URL`` env > default."""
+    url = base_url or get_env(BASE_URL_ENV_VAR) or DEFAULT_BASE_URL
     url = url.strip().rstrip("/")
     parsed = httpx.URL(url)
     if parsed.scheme not in ("http", "https"):
@@ -397,7 +397,7 @@ def resolve_token(token: str | None = None) -> str:
         if not token.strip():
             raise ValueError("HA token must not be empty")
         return token
-    env_token = os.environ.get(TOKEN_ENV_VAR)
+    env_token = get_env(TOKEN_ENV_VAR)
     if env_token:
         return env_token
     raise ValueError(f"HA bearer token not provided: pass token= or set {TOKEN_ENV_VAR}")
@@ -1306,10 +1306,10 @@ def extract_ha_history(
         end: ISO-8601 timestamp with explicit UTC offset (exclusive).
         entities: Entity IDs to extract; falsy selects defaults (washer and
             dishwasher status sensors).
-        base_url: HA base URL; ``None`` resolves ``ENERGY_BASELINE_HA_URL``
+        base_url: HA base URL; ``None`` resolves ``BATTERY_OPTIMIZER_HA_URL``
             then the default.  Never recorded — the manifest keeps only a
             one-way digest of it.
-        token: HA bearer token; ``None`` resolves ``ENERGY_BASELINE_HA_TOKEN``.
+        token: HA bearer token; ``None`` resolves ``BATTERY_OPTIMIZER_HA_TOKEN``.
             Never recorded, logged, or included in an error message.
         client: Pre-configured :class:`httpx.Client` for test injection.
         chunk_seconds: Chunk width in seconds (default 24h).

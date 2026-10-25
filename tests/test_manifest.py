@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from energy_baseline.manifest import (
+from battery_optimizer.manifest import (
     ExtractionManifest,
     config_hash,
     new_extraction_id,
@@ -331,7 +331,7 @@ class TestCodeVersion:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Code version should resolve from the package dir, not cwd."""
-        from energy_baseline.manifest import _get_code_version, _package_dir
+        from battery_optimizer.manifest import _get_code_version, _package_dir
 
         pkg = _package_dir()
         assert pkg.is_dir()
@@ -381,7 +381,7 @@ class TestPartialWriteHandling:
         filesystem that only accepts 10 bytes at a time, so a 100-byte manifest
         requires 10 calls. The final file must contain all 100 bytes.
         """
-        from energy_baseline import manifest as manifest_mod
+        from battery_optimizer import manifest as manifest_mod
 
         original_write = os.write
         call_count = {"n": 0}
@@ -431,7 +431,7 @@ class TestPartialWriteHandling:
         pipe drained, or otherwise unable to make progress). The write loop
         must raise immediately rather than silently truncating the manifest.
         """
-        from energy_baseline import manifest as manifest_mod
+        from battery_optimizer import manifest as manifest_mod
 
         call_count = {"n": 0}
 
@@ -493,10 +493,10 @@ class TestCodeVersionHelper:
 
     def test_clean_tree_no_suffix(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Clean tree: bare 40-char SHA, no suffix."""
-        from energy_baseline.manifest import code_version
+        from battery_optimizer.manifest import code_version
 
         monkeypatch.setattr(
-            "energy_baseline.manifest._get_code_version",
+            "battery_optimizer.manifest._get_code_version",
             lambda: ("a" * 40, False),
         )
         result = code_version()
@@ -505,10 +505,10 @@ class TestCodeVersionHelper:
 
     def test_dirty_tree_has_suffix(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Dirty tree: SHA + '-dirty' suffix."""
-        from energy_baseline.manifest import code_version
+        from battery_optimizer.manifest import code_version
 
         monkeypatch.setattr(
-            "energy_baseline.manifest._get_code_version",
+            "battery_optimizer.manifest._get_code_version",
             lambda: ("a" * 40, True),
         )
         result = code_version()
@@ -516,24 +516,24 @@ class TestCodeVersionHelper:
 
     def test_no_git_returns_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Git unavailable: sentinel containing 'nogit' and package version."""
-        from energy_baseline.manifest import code_version
+        from battery_optimizer.manifest import code_version
 
         monkeypatch.setattr(
-            "energy_baseline.manifest._get_code_version",
+            "battery_optimizer.manifest._get_code_version",
             lambda: (None, None),
         )
         result = code_version()
         assert "nogit" in result
-        assert "energy-baseline==" in result
+        assert "battery-optimizer==" in result
         assert result != "a" * 40  # sentinel is distinct from a clean SHA
 
     def test_build_and_benchmark_use_same_helper(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """build.code_version() and benchmark.code_version() delegate to the same helper."""
-        from energy_baseline import benchmark as bm
-        from energy_baseline import build as build_mod
+        from battery_optimizer import benchmark as bm
+        from battery_optimizer import build as build_mod
 
         monkeypatch.setattr(
-            "energy_baseline.manifest._get_code_version",
+            "battery_optimizer.manifest._get_code_version",
             lambda: ("b" * 40, True),
         )
         assert build_mod.code_version() == bm.code_version()

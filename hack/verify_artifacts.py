@@ -22,7 +22,7 @@ _src = _project_root / "src"
 if _src.is_dir():
     sys.path.insert(0, str(_src))
 
-from energy_baseline.artifact_integrity import (  # noqa: E402
+from battery_optimizer.artifact_integrity import (  # noqa: E402
     BENCHMARK_MANIFEST_NAME,
     BENCHMARK_REQUIRED_FILES,
     REPORT_MANIFEST_NAME,

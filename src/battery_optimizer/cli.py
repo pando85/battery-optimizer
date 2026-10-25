@@ -1,4 +1,4 @@
-"""CLI entry point — argparse subcommands for the energy-baseline toolkit."""
+"""CLI entry point — argparse subcommands for the battery-optimizer toolkit."""
 
 from __future__ import annotations
 
@@ -25,13 +25,13 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--data-dir",
         default=None,
-        help="Data directory (default: $ENERGY_BASELINE_DATA_DIR or ~/data/energy-baseline)",
+        help="Data directory (default: $BATTERY_OPTIMIZER_DATA_DIR or ~/data/energy-baseline)",
     )
     p.add_argument(
         "--config",
         default=None,
         help="Path to tariff config YAML (required for real runs; "
-        "default: $ENERGY_BASELINE_CONFIG or config/tariff.yaml relative to CWD)",
+        "default: $BATTERY_OPTIMIZER_CONFIG or config/tariff.yaml relative to CWD)",
     )
     p.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
@@ -52,7 +52,7 @@ def _add_time_args(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(
-        prog="energy-baseline",
+        prog="battery-optimizer",
         description="Reproducible energy measurement and baseline toolkit (ADR-0003)",
     )
     subs = parser.add_subparsers(dest="command")
@@ -471,9 +471,9 @@ def _redact_error(message: str) -> str:
 
 def cmd_extract(args: argparse.Namespace) -> int:
     """Extract source data to raw Parquet."""
-    from energy_baseline.extract_ha import extract_ha_history
-    from energy_baseline.extract_prom import extract_prometheus
-    from energy_baseline.paths import resolve_data_dir
+    from battery_optimizer.extract_ha import extract_ha_history
+    from battery_optimizer.extract_prom import extract_prometheus
+    from battery_optimizer.paths import resolve_data_dir
 
     entities = parse_entities(args.entities)
     source: str = args.source
@@ -536,7 +536,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
 def cmd_validate(args: argparse.Namespace) -> int:
     """Validate raw Parquet against schemas and manifest integrity."""
-    from energy_baseline.paths import resolve_data_dir
+    from battery_optimizer.paths import resolve_data_dir
 
     source_choice: str = args.source
     data_dir = resolve_data_dir(args.data_dir)
@@ -582,8 +582,8 @@ def _validate_source(data_dir: Path, source: str) -> dict:
     """Validate parts for a single source against its schema."""
     import pyarrow.parquet as pq
 
-    from energy_baseline.paths import iter_parts, parts_dir
-    from energy_baseline.schemas import RAW_ENUM_STATE, RAW_SAMPLE, validate_table
+    from battery_optimizer.paths import iter_parts, parts_dir
+    from battery_optimizer.schemas import RAW_ENUM_STATE, RAW_SAMPLE, validate_table
 
     schema_map = {
         "prometheus": ("RAW_SAMPLE", RAW_SAMPLE),
@@ -698,7 +698,7 @@ def _validate_manifests(data_dir: Path, sources: list[str]) -> dict:
 
 def cmd_build(args: argparse.Namespace) -> int:
     """Build 15-min analysis dataset."""
-    from energy_baseline import build as build_module
+    from battery_optimizer import build as build_module
 
     battery_absent: bool = args.assume_no_battery
     if battery_absent:
@@ -747,7 +747,7 @@ def _benchmark_kwargs(args: argparse.Namespace, benchmark: Any) -> dict[str, Any
     window", which is a different measurement from any number an operator could type,
     and the artifact records which of the two happened.
     """
-    from energy_baseline.config import resolve_config_path
+    from battery_optimizer.config import resolve_config_path
 
     return {
         "dataset": args.dataset,
@@ -889,7 +889,7 @@ def _benchmark_summary(run_dir: Path, benchmark: Any) -> str:
 
 def cmd_benchmark(args: argparse.Namespace) -> int:
     """Run policy benchmarks on a dataset."""
-    from energy_baseline import benchmark
+    from battery_optimizer import benchmark
 
     if not benchmark.core_available():
         print(
@@ -908,7 +908,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
 
 def cmd_report(args: argparse.Namespace) -> int:
     """Generate monthly reconciliation report."""
-    from energy_baseline import report
+    from battery_optimizer import report
 
     run_dir = Path(
         report.generate_report(
@@ -997,7 +997,7 @@ def _require_benchmark_views(sql: str, *, label: str, benchmark: str | None) -> 
 
 def cmd_inspect_sql(args: argparse.Namespace) -> int:
     """Inspect DuckDB SQL queries."""
-    from energy_baseline import report
+    from battery_optimizer import report
 
     chosen = [
         name
@@ -1051,8 +1051,8 @@ def cmd_inspect_sql(args: argparse.Namespace) -> int:
 
 def cmd_ha_states(args: argparse.Namespace) -> int:
     """Read and query Home Assistant enum state history."""
-    from energy_baseline.ha_states import format_as_of_result, format_summary, load_store
-    from energy_baseline.paths import resolve_data_dir
+    from battery_optimizer.ha_states import format_as_of_result, format_summary, load_store
+    from battery_optimizer.paths import resolve_data_dir
 
     data_dir = resolve_data_dir(args.data_dir)
     if not data_dir.exists():
@@ -1064,7 +1064,7 @@ def cmd_ha_states(args: argparse.Namespace) -> int:
     if args.as_of is not None:
         if not args.entity:
             raise ValueError("--as-of requires --entity")
-        from energy_baseline.extract_ha import parse_utc
+        from battery_optimizer.extract_ha import parse_utc
 
         at = parse_utc(args.as_of, name="--as-of")
         result = store.as_of(args.entity, at)

@@ -23,8 +23,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from energy_baseline import extract_prom
-from energy_baseline.extract_prom import (
+from battery_optimizer import extract_prom
+from battery_optimizer.extract_prom import (
     BASE_URL_ENV_VAR,
     DEAD_DUPLICATE_ENTITY_IDS,
     DEFAULT_BASE_URL,
@@ -55,9 +55,9 @@ from energy_baseline.extract_prom import (
     to_micros,
     validate_raw,
 )
-from energy_baseline.manifest import read_manifest
-from energy_baseline.paths import iter_parts, part_path, parts_dir
-from energy_baseline.schemas import RAW_SAMPLE
+from battery_optimizer.manifest import read_manifest
+from battery_optimizer.paths import iter_parts, part_path, parts_dir
+from battery_optimizer.schemas import RAW_SAMPLE
 
 # ---------------------------------------------------------------------------
 # Fake server + helpers
@@ -1507,7 +1507,7 @@ class TestLogging:
     def test_window_before_the_archive_is_warned_about(
         self, tmp_path: Path, config: Path, caplog
     ) -> None:
-        with caplog.at_level(logging.WARNING, logger="energy_baseline.extract_prom"):
+        with caplog.at_level(logging.WARNING, logger="battery_optimizer.extract_prom"):
             run_extract(
                 tmp_path,
                 FakePrometheus([]).client,
@@ -1522,7 +1522,7 @@ class TestLogging:
     ) -> None:
         spec = ENTITY_SPECS[DEFAULT_ENTITY_IDS[0]]
         fake = FakePrometheus(series_for(spec.entity_id, [(_BASE + 5, 1.0)]))
-        with caplog.at_level(logging.INFO, logger="energy_baseline.extract_prom"):
+        with caplog.at_level(logging.INFO, logger="battery_optimizer.extract_prom"):
             run_extract(
                 tmp_path, fake.client, config, entities=[spec.entity_id], chunk_seconds=86400
             )
@@ -1537,7 +1537,7 @@ class TestLogging:
         assert any("wrote manifest" in m for m in messages)
 
     def test_empty_run_warns_loudly(self, tmp_path: Path, config: Path, caplog) -> None:
-        with caplog.at_level(logging.WARNING, logger="energy_baseline.extract_prom"):
+        with caplog.at_level(logging.WARNING, logger="battery_optimizer.extract_prom"):
             run_extract(
                 tmp_path, FakePrometheus([]).client, config, entities=None, chunk_seconds=86400
             )
@@ -1550,7 +1550,7 @@ class TestLogging:
         fake = FakePrometheus(
             [], responder=lambda request, index: httpx.Response(429, text="slow down")
         )
-        with caplog.at_level(logging.WARNING, logger="energy_baseline.extract_prom"):
+        with caplog.at_level(logging.WARNING, logger="battery_optimizer.extract_prom"):
             with pytest.raises(PrometheusHTTPError):
                 run_extract(tmp_path, fake.client, config, max_retries=1, chunk_seconds=3600)
         text = "\n".join(r.getMessage() for r in caplog.records)

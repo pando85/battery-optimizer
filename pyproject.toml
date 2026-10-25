@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "energy-baseline"
+name = "battery-optimizer"
 version = "0.1.0"
-description = "Reproducible energy measurement and baseline toolkit (ADR-0003)"
+description = "Battery optimisation toolkit: Prometheus/Home Assistant extraction, dataset build and battery MPC benchmarks"
 requires-python = ">=3.12"
 dependencies = [
     "pyarrow",
@@ -24,10 +24,10 @@ dev = [
 ]
 
 [project.scripts]
-energy-baseline = "energy_baseline.cli:main"
+battery-optimizer = "battery_optimizer.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/energy_baseline"]
+packages = ["src/battery_optimizer"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

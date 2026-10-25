@@ -36,10 +36,10 @@ import anyio
 import numpy as np
 import pytest
 
-from energy_baseline.battery import BatterySpec, Horizon, Schedule
-from energy_baseline.dispatch import DispatchError, DispatchPlan, intents_from_schedule
-from energy_baseline.oracle import OracleError
-from energy_baseline.replay_runtime import (
+from battery_optimizer.battery import BatterySpec, Horizon, Schedule
+from battery_optimizer.dispatch import DispatchError, DispatchPlan, intents_from_schedule
+from battery_optimizer.oracle import OracleError
+from battery_optimizer.replay_runtime import (
     ConstantLoadProvider,
     EventType,
     InvalidationReason,
@@ -1771,7 +1771,7 @@ class TestSinkProperties:
         actually inspect the module source.
         """
         source_path = Path(
-            __import__("energy_baseline.replay_runtime", fromlist=["__file__"]).__file__
+            __import__("battery_optimizer.replay_runtime", fromlist=["__file__"]).__file__
         )
         source = source_path.read_text(encoding="utf-8")
         # The allowlist guard must find the module parseable and non-empty
@@ -1811,7 +1811,7 @@ class TestSinkProperties:
     def test_no_device_library_imports_ast_guard(self) -> None:
         """AST-level guard: replay_runtime module must not import device libraries."""
         source_path = Path(
-            __import__("energy_baseline.replay_runtime", fromlist=["__file__"]).__file__
+            __import__("battery_optimizer.replay_runtime", fromlist=["__file__"]).__file__
         )
         source = source_path.read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -1841,8 +1841,8 @@ class TestSinkProperties:
                     imported.append(alias.name)
             elif isinstance(node, ast.ImportFrom):
                 if node.level > 0:
-                    # Relative import inside the energy_baseline package
-                    imported.append("energy_baseline." + (node.module or ""))
+                    # Relative import inside the battery_optimizer package
+                    imported.append("battery_optimizer." + (node.module or ""))
                 elif node.module:
                     imported.append(node.module)
 
@@ -1866,7 +1866,7 @@ class TestSinkProperties:
             "datetime",
             "typing",
             "numpy",
-            "energy_baseline",
+            "battery_optimizer",
             "__future__",
         }
         for name in imported:
@@ -1878,7 +1878,7 @@ class TestSinkProperties:
     def test_no_device_call_expressions_ast_guard(self) -> None:
         """No subprocess/socket/requests-style call expressions in the module."""
         source_path = Path(
-            __import__("energy_baseline.replay_runtime", fromlist=["__file__"]).__file__
+            __import__("battery_optimizer.replay_runtime", fromlist=["__file__"]).__file__
         )
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
 
@@ -1900,7 +1900,7 @@ class TestSinkProperties:
 
     def test_module_defines_no_writer_symbols(self) -> None:
         """The module exposes nothing that could send a command to a device."""
-        import energy_baseline.replay_runtime as rr
+        import battery_optimizer.replay_runtime as rr
 
         hints = ("write", "send", "command_", "actuat", "publish")
         writer_like = [name for name in dir(rr) if any(hint in name.lower() for hint in hints)]

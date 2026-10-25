@@ -14,16 +14,16 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from energy_baseline.battery import BatterySpec, Horizon
-from energy_baseline.economic_sensitivity import (
+from battery_optimizer.battery import BatterySpec, Horizon
+from battery_optimizer.economic_sensitivity import (
     break_even_throughput_cost,
     compare_schedules,
     optimize_with_throughput,
     score_fixed_schedule,
     sweep_sensitivity,
 )
-from energy_baseline.oracle import solve_oracle
-from energy_baseline.policies import policy_no_battery
+from battery_optimizer.oracle import solve_oracle
+from battery_optimizer.policies import policy_no_battery
 
 HOUR = 3600.0
 QUARTER = 900.0
@@ -86,7 +86,7 @@ class TestZeroPenaltyIsLegacy:
 
     def test_build_model_zero_throughput_cost_is_unchanged(self) -> None:
         """build_model with tp=0 produces the same objective as without."""
-        from energy_baseline.oracle import build_model
+        from battery_optimizer.oracle import build_model
 
         s = _spec()
         h = _horizon([0.1, 0.3, 0.2], [1.0, 1.0, 1.0])
@@ -270,7 +270,7 @@ class TestInvalidParameters:
             score_fixed_schedule(sched, 0.0, float("nan"))
 
     def test_build_model_rejects_negative_throughput_cost(self) -> None:
-        from energy_baseline.oracle import build_model
+        from battery_optimizer.oracle import build_model
 
         s = _spec()
         h = _horizon([0.1, 0.2], [1.0, 1.0])
@@ -666,7 +666,7 @@ class TestBreakEvenThroughputCost:
 
     def test_pairwise_break_even_classifies_signs(self) -> None:
         """Classification distinguishes real crossovers from negative-axis ones."""
-        from energy_baseline.economic_sensitivity import pairwise_break_even
+        from battery_optimizer.economic_sensitivity import pairwise_break_even
 
         s = _spec(initial_soc_frac=0.0)
         h = _horizon([0.10, 0.40], [1.0, 1.0])
@@ -691,7 +691,7 @@ class TestBreakEvenThroughputCost:
 
     def test_pairwise_break_even_identical_throughput_parallel(self) -> None:
         """Identical throughput returns parallel classification with None tp."""
-        from energy_baseline.economic_sensitivity import pairwise_break_even
+        from battery_optimizer.economic_sensitivity import pairwise_break_even
 
         s = _spec()
         h = _horizon([0.1, 0.2], [1.0, 1.0])
@@ -703,7 +703,7 @@ class TestBreakEvenThroughputCost:
 
     def test_pairwise_break_even_exposes_components(self) -> None:
         """The numerator and denominator are reported separately, not just the ratio."""
-        from energy_baseline.economic_sensitivity import pairwise_break_even
+        from battery_optimizer.economic_sensitivity import pairwise_break_even
 
         s = _spec()
         h = _horizon([0.10, 0.40], [1.0, 1.0])
@@ -763,7 +763,7 @@ class TestBreakEvenUnequalInitialSOC:
 
     def test_unequal_initial_soc_produces_correct_break_even(self) -> None:
         """Hand-computable fixture with different initial SOCs."""
-        from energy_baseline.battery import Schedule
+        from battery_optimizer.battery import Schedule
 
         # Construct minimal schedules with the exact parameters from the proof.
         def _make_schedule(

@@ -76,11 +76,11 @@ Constraints
        charge[t] <= max(0, import_limit_kw * h - load[t])
 
    i.e. each interval's right-hand side is the headroom the load leaves under
-   the ceiling (see :attr:`~energy_baseline.battery.Horizon.charge_headroom_kwh`).
+   the ceiling (see :attr:`~battery_optimizer.battery.Horizon.charge_headroom_kwh`).
    A load that already meets or exceeds the ceiling gives a zero right-hand side
    and simply forces ``charge[t] = 0``; the problem stays feasible, and the
    kernel reports those intervals as an observation
-   (:attr:`~energy_baseline.battery.Schedule.ceiling_exceeding_intervals`).
+   (:attr:`~battery_optimizer.battery.Schedule.ceiling_exceeding_intervals`).
    Discharge is *not* part of this row: it lowers the draw and stays bounded by
    the no-export rule alone, so the oracle may discharge to shave a peak.  The
    only remaining source of infeasibility is a terminal SOC the power limit and
@@ -89,7 +89,7 @@ Constraints
 7. **Unusable intervals** (``usable[t] is False``): ``charge = discharge = 0`` via
    variable bounds and zero objective coefficients, so gap exclusions are
    identical to the other policies' cost basis.  A horizon with no usable intervals
-   is rejected by :class:`~energy_baseline.battery.Horizon` before it gets here.
+   is rejected by :class:`~battery_optimizer.battery.Horizon` before it gets here.
 
 Objective (minimise)
 --------------------
@@ -136,7 +136,7 @@ onto the reported-cost basis: ``load_term + terminal_value*initial_SOC + dual``,
 or ``None`` when no dual was reported).
 
 Every returned schedule is re-traced and re-validated through
-:func:`energy_baseline.battery.simulate`, so the oracle's model and the
+:func:`battery_optimizer.battery.simulate`, so the oracle's model and the
 simulator cannot silently disagree — with full terminal enforcement in ``fixed``
 mode, and with the terminal rule relaxed in ``free`` mode (where the plan
 legitimately ends off-seed and the value is carried by the objective instead).
@@ -197,7 +197,7 @@ class OracleInfeasibleError(OracleError):
 
     Raised for a spec whose terminal SOC the power limit and the per-interval
     charging headroom together cannot reach inside the horizon, or an inverted
-    SOC window caught earlier by :func:`energy_baseline.battery.validate_spec`.
+    SOC window caught earlier by :func:`battery_optimizer.battery.validate_spec`.
     A measured load that alone exceeds the configured ceiling is *not* an
     infeasibility — the kernel reports it as an observation and the problem
     stays feasible (module docstring, invariant 7).
@@ -311,11 +311,11 @@ def build_model(
     carried value silently re-classifies an earlier day's purchased charge as
     unspendable seed — which freezes a filled battery at the ceiling and is a
     functional bug, not a conservatism.  See
-    :func:`energy_baseline.policies.policy_day_ahead`, which uses it.
+    :func:`battery_optimizer.policies.policy_day_ahead`, which uses it.
 
     The single constraint block has ``4n`` rows — two mutual-exclusion rows, one
     SOC recurrence row and one no-export row per interval — plus ``n`` more rows
-    when :attr:`energy_baseline.battery.Horizon.import_limit_kw` is configured
+    when :attr:`battery_optimizer.battery.Horizon.import_limit_kw` is configured
     (the charging-side headroom row ``charge[t] <= max(0, ceiling - load)``).
 
     ``throughput_cost_eur_per_kwh`` (default ``0.0``) adds a per-kWh penalty on AC
@@ -572,7 +572,7 @@ def solve_oracle(
 
     Builds the MILP documented at the top of this module and solves it with
     ``scipy.optimize.milp`` (bundled HiGHS).  The returned schedule is physically
-    feasible (re-checked by :func:`energy_baseline.battery.simulate`);
+    feasible (re-checked by :func:`battery_optimizer.battery.simulate`);
     ``solver_status`` / ``solver_gap`` / ``bound_kind`` / ``is_certified`` say how
     much of it is proven.
 

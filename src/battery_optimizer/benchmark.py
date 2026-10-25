@@ -18,11 +18,11 @@ Guarantees pinned here:
   never of evaluation prices.
 * **The day-ahead forecast looks backwards only.** Day *D*'s load forecast is built
   from intervals strictly before the first interval of day *D*
-  (:func:`energy_baseline.policies.forecast_load_trailing_slot_mean`), and the forecast
+  (:func:`battery_optimizer.policies.forecast_load_trailing_slot_mean`), and the forecast
   never enters the cost: cost is always re-computed against the measured load.  What the
   day-ahead policy may see is today's published price curve (production evidence: the
   household's own AppDaemon apps read ``price_00h``…``price_23h`` at local midnight —
-  see ``energy_baseline.policies`` module docstring) plus a causal load forecast; what it
+  see ``battery_optimizer.policies`` module docstring) plus a causal load forecast; what it
   may not see is any price or load beyond its own local day.
 * **Free terminal accounting.** The oracle is asked for ``terminal_mode="free"`` with
   ``terminal_value_eur_per_kwh=0.0``: SOC stays at or above its initial value, the
@@ -51,7 +51,7 @@ Guarantees pinned here:
   the archived price for an hour equals the price published the evening before, which
   this pipeline records as an assumption it does not verify.
 
-Outputs, via :func:`energy_baseline.paths.write_part_atomic` (no-clobber, ``0600``,
+Outputs, via :func:`battery_optimizer.paths.write_part_atomic` (no-clobber, ``0600``,
 private ``0700`` tree)::
 
     <dataset>/benchmarks/<run_id>/benchmark.json    full detail, all extras
@@ -62,7 +62,7 @@ Bounds, SOC in kWh, the metered/inventory split, tolerances and time limits live
 ``benchmark.json`` and the wide schedules file: ``BENCHMARK_RESULT`` is unchanged.  The
 day-ahead policy's per-day telemetry (local day, solve status, forecast error, clipping,
 degradation) is recorded the same way — in ``benchmark.json``'s ``day_ahead`` block, not
-as new schema columns, and :meth:`energy_baseline.battery.Schedule.as_dict` was
+as new schema columns, and :meth:`battery_optimizer.battery.Schedule.as_dict` was
 deliberately not extended for it either.
 """
 
@@ -85,10 +85,10 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from energy_baseline.config import TariffConfig, load_config, tax_multiplier
-from energy_baseline.manifest import config_hash
-from energy_baseline.paths import write_part_atomic
-from energy_baseline.schemas import BENCHMARK_RESULT, SCHEMA_VERSION, validate_table
+from battery_optimizer.config import TariffConfig, load_config, tax_multiplier
+from battery_optimizer.manifest import config_hash
+from battery_optimizer.paths import write_part_atomic
+from battery_optimizer.schemas import BENCHMARK_RESULT, SCHEMA_VERSION, validate_table
 
 #: Version of this benchmark contract (distinct from the store schema version).
 BENCHMARK_VERSION = 1
@@ -277,7 +277,7 @@ class _Core:
 
 
 def _modules() -> dict[str, Any]:
-    from energy_baseline import battery, cost, oracle, policies, rolling_horizon
+    from battery_optimizer import battery, cost, oracle, policies, rolling_horizon
 
     return {
         "battery": battery,
@@ -809,10 +809,10 @@ def _canonical_sha(payload: Any) -> str:
 def code_version() -> str:
     """Code identity for lineage: the shared definition from ``manifest``.
 
-    Delegates to :func:`energy_baseline.manifest.code_version` so a dirty tree
+    Delegates to :func:`battery_optimizer.manifest.code_version` so a dirty tree
     produces a different ``dataset_id`` from a clean one.
     """
-    from energy_baseline.manifest import code_version as _manifest_code_version
+    from battery_optimizer.manifest import code_version as _manifest_code_version
 
     return _manifest_code_version()
 
@@ -1108,7 +1108,7 @@ def prepare_day_ahead(
 
     Returns:
         ``(days, block)`` — ``days`` are the per-local-day inputs for
-        :func:`energy_baseline.policies.policy_day_ahead` in horizon coordinates, and
+        :func:`battery_optimizer.policies.policy_day_ahead` in horizon coordinates, and
         ``block`` is the artifact record: partition, forecast method plus error summary,
         terminal value plus provenance, and the information-set disclosure.
     """
@@ -1240,7 +1240,7 @@ def _day_ahead_payload(
     """The day-ahead artifact: partition, forecast, terminal value, per-day solves.
 
     Recorded here and in the wide ``schedules.parquet`` only — ``BENCHMARK_RESULT`` and
-    :meth:`energy_baseline.battery.Schedule.as_dict` are deliberately untouched, the same
+    :meth:`battery_optimizer.battery.Schedule.as_dict` are deliberately untouched, the same
     way the solver bounds and the metered/inventory split were handled when they were
     added.  One entry per local day is the point of the block: a rolling optimiser is
     judged day by day, and "the run finished" is not the same claim as "every day was
@@ -1366,7 +1366,7 @@ def prepare_rolling_horizon(
 
     Returns:
         ``(inputs, block)`` — ``inputs`` are the full-array inputs for
-        :func:`energy_baseline.rolling_horizon.run_rolling_horizon`, and ``block`` is the
+        :func:`battery_optimizer.rolling_horizon.run_rolling_horizon`, and ``block`` is the
         artifact record: cadence, horizon, forecast method, terminal value provenance,
         and the information-set disclosure.
     """
@@ -1574,7 +1574,7 @@ def _rolling_horizon_payload(
     """The rolling-horizon artifact: cadence, forecast, terminal value, per-event solves.
 
     Recorded here and in the wide ``schedules.parquet`` only — ``BENCHMARK_RESULT`` and
-    :meth:`energy_baseline.battery.Schedule.as_dict` are deliberately untouched.  One
+    :meth:`battery_optimizer.battery.Schedule.as_dict` are deliberately untouched.  One
     entry per planning event is the point of the block: a rolling optimiser is judged
     event by event, and the multiplicity (how many overlapping horizons covered each
     interval) is what makes clipping totals incomparable across cadences.
@@ -1598,7 +1598,7 @@ def _rolling_horizon_payload(
     )
     merged["wall_clock_note"] = (
         "solver wall-clock time is deliberately NOT recorded.  Run artifacts are "
-        "content-addressed and written no-clobber (energy_baseline.paths.write_part_atomic "
+        "content-addressed and written no-clobber (battery_optimizer.paths.write_part_atomic "
         "refuses the same run id with different bytes), so a timing field would make an "
         "identical re-run raise FileExistsError and destroy byte-level reproducibility.  "
         "Deterministic per-event telemetry (solver_status, is_certified, mip_gap), the "
@@ -2101,9 +2101,9 @@ def _run_policies(
 
 #: Slack inside which a negative net grid import is float noise, not an export.
 #: Deliberately the same number the kernel judges plans with (``battery._TOL_KWH``):
-#: :func:`energy_baseline.battery.check_feasible` accepts ``grid >= -1e-6`` kWh, so a
+#: :func:`battery_optimizer.battery.check_feasible` accepts ``grid >= -1e-6`` kWh, so a
 #: value in that band IS zero by the project's own tolerance, while
-#: :func:`energy_baseline.cost.compute_interval_cost` refuses any negative at all.  The
+#: :func:`battery_optimizer.cost.compute_interval_cost` refuses any negative at all.  The
 #: gap between those two rules is real and was observed on a four-policy run: the
 #: ORACLE's own plan carried ``discharge = 0.09280000000000013`` against
 #: ``load = 0.0928`` at the final interval of a 100-slot DST day — HiGHS returning a
@@ -2772,11 +2772,11 @@ def _run_monthly_quality_gate(
     (finite, ``0 < t <= 1``, never a bool) — the helper refuses the rest.
 
     Under ``reject`` a month below threshold raises
-    :class:`energy_baseline.artifact_integrity.MonthlyQualityGateError` before any artifact
+    :class:`battery_optimizer.artifact_integrity.MonthlyQualityGateError` before any artifact
     is written; under ``report`` the month is retained, marked not-accepted, and the run is
     flagged incomplete.  There is no exclude path (see :data:`QUALITY_POLICIES`).
     """
-    from energy_baseline.artifact_integrity import (
+    from battery_optimizer.artifact_integrity import (
         monthly_usable_fraction_gate,
     )
 
@@ -3498,7 +3498,7 @@ def benchmark_dataset(
     # it hashes exactly what a reader will find. finalize_run_outputs is idempotent on
     # identical content, so re-running the same benchmark does not collide. The manifest
     # itself is not in its own required set (no self-reference).
-    from energy_baseline.artifact_integrity import (
+    from battery_optimizer.artifact_integrity import (
         BENCHMARK_REQUIRED_FILES,
         finalize_run_outputs,
     )

@@ -17,7 +17,7 @@ import dataclasses
 import numpy as np
 import pytest
 
-from energy_baseline.battery import (
+from battery_optimizer.battery import (
     BatteryPhysicsError,
     BatterySpec,
     Horizon,

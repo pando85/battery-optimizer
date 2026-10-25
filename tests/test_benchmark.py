@@ -36,9 +36,9 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 
-from energy_baseline import benchmark as bm
-from energy_baseline.config import BatteryConfig, TariffConfig, TariffPeriods, TaxEntry
-from energy_baseline.schemas import ANALYSIS_INTERVAL, SCHEMA_VERSION
+from battery_optimizer import benchmark as bm
+from battery_optimizer.config import BatteryConfig, TariffConfig, TariffPeriods, TaxEntry
+from battery_optimizer.schemas import ANALYSIS_INTERVAL, SCHEMA_VERSION
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -181,7 +181,7 @@ def write_synthetic_dataset(
     if config_path is None:
         config_path = tmp_path / "tariff.yaml"
         write_tariff_config(config_path, make_tariff_config())
-    from energy_baseline.manifest import config_hash
+    from battery_optimizer.manifest import config_hash
 
     cfg_hash = config_hash(config_path)
     dataset_dir = tmp_path / "analysis" / f"v{SCHEMA_VERSION}" / dataset_id
@@ -500,7 +500,7 @@ class TestResolveBatteryAssumptions:
         green, and because ``config_hash`` feeds ``compute_dataset_id`` it would also
         quietly re-mint the dataset identity.  Update this test deliberately.
         """
-        from energy_baseline.config import load_config
+        from battery_optimizer.config import load_config
 
         shipped = Path(__file__).resolve().parents[1] / "config" / "tariff.yaml"
         if not shipped.exists():  # pragma: no cover - repo layout guard
@@ -538,7 +538,7 @@ class TestResolveBatteryAssumptions:
     ) -> None:
         """A policy that produces no cost gets a JSON error, not a zero-cost row."""
         requires_core()
-        from energy_baseline import oracle as oracle_mod
+        from battery_optimizer import oracle as oracle_mod
 
         class StubbornError(RuntimeError):
             """Stands in for OracleInfeasibleError / OracleNoIncumbentError."""
@@ -588,7 +588,7 @@ class TestResolveBatteryAssumptions:
     def test_no_cost_schedule_produces_no_row(self, tmp_path: Path, monkeypatch) -> None:
         """A schedule object without a cost is refused rather than written as null."""
         requires_core()
-        from energy_baseline import policies as policies_mod
+        from battery_optimizer import policies as policies_mod
 
         class Silent:
             charge_kwh = np.zeros(4)
@@ -774,7 +774,7 @@ class TestTaxBasis:
     def test_rate_change_inside_window_is_not_a_uniform_scaling(self) -> None:
         from dataclasses import replace
 
-        from energy_baseline.config import TaxEntry
+        from battery_optimizer.config import TaxEntry
 
         config = replace(
             make_tariff_config(iee_pct=5.1, iva_pct=21.0),
@@ -842,7 +842,7 @@ class TestBenchmarkDataset:
 
         # Verify results.parquet has exactly BENCHMARK_RESULT schema
         results = pq.read_table(run_dir / bm.RESULTS_PARQUET_NAME)
-        from energy_baseline.schemas import validate_table
+        from battery_optimizer.schemas import validate_table
 
         validate_table("BENCHMARK_RESULT", results)
 
@@ -1020,7 +1020,7 @@ class TestBenchmarkDataset:
 
     def test_results_parquet_matches_canonical_schema(self, tmp_path: Path) -> None:
         requires_core()
-        from energy_baseline.schemas import BENCHMARK_RESULT
+        from battery_optimizer.schemas import BENCHMARK_RESULT
 
         start = datetime(2026, 1, 1, tzinfo=UTC)
         table = make_analysis_table(start=start, intervals=2 * 24 * 4)
@@ -1242,7 +1242,7 @@ class TestBenchmarkDataset:
     def test_min_usable_fraction_enforced(self, tmp_path: Path) -> None:
         """Reject policy (default): a low eval month aborts before any artifact is written."""
         requires_core()
-        from energy_baseline.artifact_integrity import MonthlyQualityGateError
+        from battery_optimizer.artifact_integrity import MonthlyQualityGateError
 
         start = datetime(2026, 1, 1, tzinfo=UTC)
         intervals = 96
@@ -1306,7 +1306,7 @@ class TestBenchmarkDataset:
         is the dilution this gate must prevent.
         """
         requires_core()
-        from energy_baseline.artifact_integrity import MonthlyQualityGateError
+        from battery_optimizer.artifact_integrity import MonthlyQualityGateError
 
         start = datetime(2026, 1, 1, tzinfo=UTC)
         intervals = 2 * 96
@@ -1580,11 +1580,11 @@ class TestFix3DatasetIdDirtyAware:
 
     def test_clean_vs_dirty_different_id(self, monkeypatch) -> None:
         """Same inputs with clean vs dirty tree produce different dataset_id."""
-        from energy_baseline import build as build_mod
+        from battery_optimizer import build as build_mod
 
         # Simulate clean tree
         monkeypatch.setattr(
-            "energy_baseline.manifest._get_code_version",
+            "battery_optimizer.manifest._get_code_version",
             lambda: ("abc123" * 6 + "abcd", False),
         )
         clean_version = build_mod.code_version()
@@ -1600,7 +1600,7 @@ class TestFix3DatasetIdDirtyAware:
 
         # Simulate dirty tree
         monkeypatch.setattr(
-            "energy_baseline.manifest._get_code_version",
+            "battery_optimizer.manifest._get_code_version",
             lambda: ("abc123" * 6 + "abcd", True),
         )
         dirty_version = build_mod.code_version()
@@ -1620,10 +1620,10 @@ class TestFix3DatasetIdDirtyAware:
 
     def test_identical_tree_identical_id(self, monkeypatch) -> None:
         """Identical tree twice produces identical dataset_id."""
-        from energy_baseline import build as build_mod
+        from battery_optimizer import build as build_mod
 
         monkeypatch.setattr(
-            "energy_baseline.manifest._get_code_version",
+            "battery_optimizer.manifest._get_code_version",
             lambda: ("abc123" * 6 + "abcd", False),
         )
         version = build_mod.code_version()
@@ -1700,7 +1700,7 @@ class TestGridNoiseSnapping:
     """
 
     def _costs(self, grid):
-        from energy_baseline.cost import compute_interval_cost
+        from battery_optimizer.cost import compute_interval_cost
 
         usable = np.ones(len(grid), dtype=bool)
         return bm._interval_costs(
@@ -1722,7 +1722,7 @@ class TestGridNoiseSnapping:
 
     def test_a_real_export_still_raises(self) -> None:
         """Beyond the kernel's own slack this is a violation, not noise: never clamped."""
-        from energy_baseline.cost import CostError
+        from battery_optimizer.cost import CostError
 
         with pytest.raises(CostError, match="must be >= 0"):
             self._costs([-1e-3, 0.5])
@@ -1730,7 +1730,7 @@ class TestGridNoiseSnapping:
     def test_the_repair_pass_never_relies_on_snapping(self) -> None:
         """The day-ahead clip pass produces exact zeros, so its count must stay zero."""
         requires_core()
-        from energy_baseline.policies import (
+        from battery_optimizer.policies import (
             DayAheadDay,
             contiguous_day_bounds,
             forecast_load_trailing_slot_mean,
@@ -1743,7 +1743,7 @@ class TestGridNoiseSnapping:
         labels = [i // slots for i in range(prices.size)]
         runs = contiguous_day_bounds(labels)
         forecast, diag = forecast_load_trailing_slot_mean(load, runs, window_days=2)
-        from energy_baseline.battery import BatterySpec, Horizon
+        from battery_optimizer.battery import BatterySpec, Horizon
 
         s = BatterySpec(
             capacity_kwh=5.12,
@@ -2269,8 +2269,8 @@ class TestDayAheadEndToEnd:
     ) -> None:
         """The whole run survives a solver that always refuses: four rows, all held."""
         requires_core()
-        from energy_baseline import policies as policies_mod
-        from energy_baseline.oracle import OracleInfeasibleError
+        from battery_optimizer import policies as policies_mod
+        from battery_optimizer.oracle import OracleInfeasibleError
 
         monkeypatch.setattr(
             policies_mod,

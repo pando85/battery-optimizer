@@ -34,7 +34,7 @@ Integration with ``benchmark.py``
 ---------------------------------
 After the three ``write_part_atomic`` calls in ``benchmark_dataset``::
 
-    from energy_baseline.artifact_integrity import (
+    from battery_optimizer.artifact_integrity import (
         BENCHMARK_REQUIRED_FILES,
         finalize_run_outputs,
     )
@@ -46,7 +46,7 @@ Integration with ``report.py``
 ------------------------------
 After writing ``report.json`` and ``report.md`` in ``generate_report``::
 
-    from energy_baseline.artifact_integrity import (
+    from battery_optimizer.artifact_integrity import (
         REPORT_REQUIRED_FILES,
         finalize_run_outputs,
     )
