@@ -2,6 +2,8 @@ name: Pre-commit
 
 "on":
   pull_request:
+    # edited: re-lint when the PR title changes.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches:
       - main
@@ -49,6 +51,17 @@ jobs:
             uv run --only-group tools pre-commit run commitlint --hook-stage commit-msg \
               --commit-msg-filename "$msg_file" --verbose
           done
+
+      - name: Run commit-msg hooks for the PR title
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # PRs are squash-merged with the PR title as the commit subject.
+          msg_file=$(git rev-parse --git-path COMMIT_EDITMSG)
+          printf '%s\n' "$PR_TITLE" > "$msg_file"
+          uv run --only-group tools pre-commit run commitlint --hook-stage commit-msg \
+            --commit-msg-filename "$msg_file" --verbose
 
       - name: Run pre-commit
         run: uv run --only-group tools pre-commit run --all-files --show-diff-on-failure --verbose
