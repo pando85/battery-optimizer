@@ -11,6 +11,8 @@ The modules that have no CLI surface are described in [Architecture](architectur
 | `extract`      | **functional** | Ingest from Prometheus / HA history to Parquet |
 | `validate`     | **functional** | Validate raw Parquet against schemas + manifest hashes |
 | `build`        | **functional** | Build 15-min analysis dataset                  |
+| `build-features` | **functional** | Build the slot-aligned sub-load feature table, apart from the canonical dataset |
+| `decompose-load` | **functional** | Private report: share of load and of LF-0 error per sub-load |
 | `benchmark`    | **functional** | Run policy benchmarks on a dataset             |
 | `report`       | **functional** | Generate monthly reconciliation report         |
 | `inspect-sql`  | **functional** | Inspect DuckDB SQL queries                     |
@@ -122,6 +124,48 @@ bytes means something outside those inputs changed since the original build — 
 a dirty working tree, whose version string records only a `-dirty` marker, or a provenance field
 the id does not cover. Fix it on your side of the boundary: point `--data-dir` at a fresh data
 directory, or remove that one dataset directory yourself and re-run.
+
+## `build-features`
+
+```bash
+uv run battery-optimizer extract --source prometheus --config config/tariff.yaml \
+  --start 2024-01-01T00:00:00Z --end 2026-10-01T00:00:00Z --allow-coverage-gaps \
+  --entities sensor.shellypmmini_servers_power,sensor.aquarea_heat_power_consumed
+uv run battery-optimizer build-features \
+  --start 2024-01-01T00:00:00Z --end 2026-10-01T00:00:00Z \
+  --dataset ~/data/energy-baseline/analysis/v1/<dataset_id>
+```
+
+Builds a slot-aligned 15-minute UTC table of the observable sub-loads from the raw samples of the
+feature entities (`extract_prom.FEATURE_ENTITY_IDS`: servers circuit, heat-pump consumed and
+produced power, outdoor temperature, AppDaemon control states). Each power series becomes kWh per
+slot by sample-and-hold integration; a gap longer than `--max-gap-seconds` (300) is not held, and
+a slot with less than `--min-coverage` (0.8) covered is `unknown`, never zero. The rule is spelled
+out in the `features` module docstring and pinned in the manifest.
+
+The table is written to `<data_dir>/analysis/v1/features/<feature_set_id>/` with a
+`features_manifest.json` (hashes of every raw part read, code version, parameters, quality checks:
+units, cadence, gaps per month, COP sanity, long constant runs). It never touches a canonical
+dataset directory, and the feature entities are not default entities, so `extract` without
+`--entities` and the canonical `dataset_id` are unchanged. A raw manifest that declares only
+feature entities is also ignored by `build`'s lineage hash. With `--dataset`, the
+`servers + heat pump <= main` check against that dataset's gross load is written to
+`quality/main_meter-<dataset_id12>.json` next to the manifest.
+
+## `decompose-load`
+
+```bash
+uv run battery-optimizer decompose-load \
+  --features ~/data/energy-baseline/analysis/v1/features/<feature_set_id> \
+  --dataset ~/data/energy-baseline/analysis/v1/<dataset_id>
+```
+
+Writes `p3-report/summary.{json,md}` inside the feature-set directory (private: it holds energy and
+price figures). For each season and month it reports the share of kWh from servers, heat pump and
+the residual, runs LF-0 (28-day trailing mean) on the main load and on every component with one
+common mask, and reports each component's error, its share of the error variance and its
+price-weighted error, overall and for the top price tercile. It also replays the AppDaemon climate
+and DHW rules on the day's prices to show how much heat-pump energy they explain.
 
 ## `benchmark`
 
