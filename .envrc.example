@@ -1,0 +1,15 @@
+# Copy to .envrc (gitignored) and run `direnv allow`. Never put real secrets in this example file.
+
+# Private dataset store: must stay OUTSIDE the repository (the tool refuses paths inside a git tree).
+export BATTERY_OPTIMIZER_DATA_DIR="$HOME/data/energy-baseline"
+
+# Optional: tariff configuration (defaults to config/tariff.yaml).
+# export BATTERY_OPTIMIZER_CONFIG="$PWD/config/tariff.yaml"
+
+# Endpoints: placeholders, replace with your own.
+export BATTERY_OPTIMIZER_HA_URL="https://homeassistant.example.org"
+export BATTERY_OPTIMIZER_PROMETHEUS_URL="https://prometheus.example.org"
+
+# Read the token from a password manager at load time instead of writing it down, for example:
+#   export BATTERY_OPTIMIZER_HA_TOKEN="$(pass show home-assistant/battery-optimizer-token)"
+# The token must be READ-ONLY: this project never actuates the battery in the shadow phase.
