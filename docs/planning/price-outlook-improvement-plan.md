@@ -5,7 +5,7 @@
   day** because Load Forecaster P4 met its restart condition (the 14:00 schedule guess on
   `persistence` prices misses 17-24 % of the measured climate energy, see the
   [Load Forecaster plan](load-forecaster-improvement-plan.md)); it is built (`omie_outlook.py`) and
-  evaluated, **gate GC passed** (see §PO-C). PO-D and PO-E stay **deferred**. Refines the
+  evaluated, **gate GC passed** (see §PO-C). PO-D and PO-E stay **deferred**, and the whole plan is **parked** with the Load Forecaster plan (see its [§6](load-forecaster-improvement-plan.md#6-decision-parked-2026-10-25)). The MPC keeps planning on published prices only. Refines the
   [Price Outlook roadmap](components/price-outlook.md) stages PO-1…PO-4 into executable phases.
 - **Why now:** P4 of the [Load Forecaster plan](load-forecaster-improvement-plan.md) replays
   AppDaemon's price-driven heat-pump schedule. At the 14:00 decision tomorrow's PVPC is not

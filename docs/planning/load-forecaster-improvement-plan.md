@@ -1,5 +1,9 @@
 # Load Forecaster — improvement plan
 
+> **Parked on 2026-10-25 (owner decision).** LF-0 (`trailing_mean`) stays the forecaster in the
+> service. The code built here stays in the repository, and the passive archives keep collecting.
+> Why, what is kept and when to resume: [§6](#6-decision-parked-2026-10-25).
+
 - **Status (2026-10-25):** P0, P2 and P3 are done; P2 failed G2, so LF-0 stays the reference. The P1 forecaster seam (`load_forecast.py`) and the
   P1 evaluation harness (`forecast-eval`, see
   [Benchmark reference](../benchmark.md#forecast-evaluation-forecast-eval)) are built. The P0 run
@@ -24,7 +28,7 @@
 | P2 cheap candidates | **Done, G2 failed** | this document, §P2 | G2 |
 | P3 sub-load audit | **Done** | #15: `build-features`, `load_decomposition.py`; private feature set and P3 report | **G3 passed** |
 | P4 structured forecaster | **Done, G4 failed twice** | `structured_forecast.py`; private runs `forecast-eval/p4-structured-*` and `p4b-second-look-*` | G4 failed: cooling holds (2026 only in the second look), heating never |
-| P5–P7 | Not started (P5 collection continues passively) | — | — |
+| P5–P7 | **Parked** (P5 collection continues passively) | §6 | — |
 
 All phases run on the refreshed private dataset `dd5a2178…`, which covers 2024-01-01 to 2026-10-01.
 Its rows for 2024–2025 are identical to the canonical `2e01620b…`, so 2026-01…09 can serve as a
@@ -471,3 +475,53 @@ Start only if P2–P5 leave a large share of the P0 gap uncaptured.
    `sensor.terrace_lavadora_energy_today` and the Home Connect counters instead.
 4. ~~The holiday subdivision for `daytype`~~ — decided: Spain national holidays only.
 5. Whether LightGBM may be added as an image dependency (P6 only).
+
+## 6. Decision: parked (2026-10-25)
+
+**Decision.** After the P4 second look the owner parked the plan. LF-0 (`trailing_mean`, 28 days)
+stays the configured forecaster (`planning.load_forecaster` in `config/service.yaml`). The code is
+kept and documented, not reverted.
+
+**Why.**
+- **Small prize.** P0 says a *perfect* load forecast is worth only a modest amount per year with the
+  planned 5.12 kWh battery.
+- **No gate passed past P3.** No cheap reshaping of the profile passed G2. `structured` failed G4
+  twice. The 14:00 schedule guess was repaired by the OMIE estimate (climate energy inside the
+  replayed hours on estimated-price days rose from about 76–83 % to about 92–94 %), but the money
+  did not follow.
+- **What is left is seasonal and needs forward data.** The only gain is in the cooling season. It is
+  about 10 % of the P0 gap in summer 2026 (interval above zero) and is not significant in summer 2025.
+  The heating season loses, mostly in the hot-water part, whose forecast is worse than LF-0's.
+  A seasonal hybrid (LF-0 in heating, `structured` in cooling) was formulated only after seeing the
+  results, so it may not be adopted without confirmation on unseen data. The next unseen cooling
+  season starts in June 2027. Confirming it live needs P7: running `structured` in the service
+  with live sub-metered features and an OMIE fetch. That engineering is out of proportion to the
+  expected gain today.
+
+**What is kept.**
+
+| Piece | Where | State |
+|---|---|---|
+| Forecaster seam, oracle, P2 candidates | `load_forecast.py` | Registered; `trailing_median` and the others are selectable offline |
+| Structured forecaster (LF-1) with second-look options | `structured_forecast.py` | Offline only; the service refuses it |
+| Evaluation harness with pre-registration, G4 seasons and secondary comparisons | `forecast_eval.py`, `battery-optimizer forecast-eval` | Reusable as is |
+| Price-outlook seam, `persistence`, OMIE estimators | `price_outlook.py`, `omie_outlook.py`, `price_eval.py` | `omie_period` passed gate GC |
+| OMIE day-ahead source with a backfill from 2024-01-01 | `extract --source omie`, `omie_prices.py` | Run by hand; not in the CronJob |
+| Sub-load feature table and decomposition | `features.py`, `load_decomposition.py`, `build-features` | Reusable as is |
+| PVPC snapshots and HA weather-forecast archive | service `archive:` (0.3.0) | **Live**, collecting into `service/v1/` |
+
+**Resume when any of these holds.**
+1. **Spring 2027 (about May).** Pre-register a pure seasonal hybrid that uses LF-0 for every component
+   in heating months and `structured` with `omie_period` in cooling months. Then build P7 so
+   that June–September 2027 is the unseen confirmation season. Use the archived weather forecasts
+   instead of persistence temperature if they are better.
+2. **The real battery appears in Home Assistant.** Its size and the post-commissioning gross load
+   change the prize, so re-run P0 first, as the P7 "revalidate after commissioning" note says.
+3. **The household or the AppDaemon rules change materially**, for example a new heat pump schedule, a
+   new large load, or a tariff change. Re-run P0 and P2.
+4. **A cheap hot-water fix is wanted.** Test LF-0 for the hot-water component inside `structured`.
+   Run it pre-registered, against a held-out period.
+
+**How to resume.** Read §P4 (both runs), the private findings `p4-findings.md` and `p4b-findings.md`
+in `forecast-eval/`, `po-c-findings.md` in `price-eval/`, and the Price Outlook plan. Refresh OMIE
+with `extract --source omie` before any run that uses `omie_period`.
