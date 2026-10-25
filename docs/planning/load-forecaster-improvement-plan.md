@@ -1,6 +1,8 @@
 # Load Forecaster — improvement plan
 
-- **Status (2026-10-25):** proposed, nothing implemented. Refines the
+- **Status (2026-10-25):** the P1 forecaster seam is built (`load_forecast.py`), together with the
+  P0 `perfect` oracle. The P0 run is done and its results are private. Everything else is
+  proposed. Refines the
   [Load Forecaster roadmap](components/load-forecaster.md) stages LF-1…LF-4 into executable phases.
 - **Question:** can a better household load forecast reduce the planned battery's net cost, and by
   how much? Answer it with the least machinery first. Stop as soon as the evidence says the remaining
@@ -70,10 +72,13 @@ The aim is to bound the prize before building anything.
 
 This makes every candidate cheap to compare and impossible to leak future data.
 
-- **Forecaster seam:** introduce a small callable contract,
-  `forecast(history_until_cutoff, as_of, target_slots) -> LoadForecast` with provenance. LF-0 is the
-  first implementation. Select it by name in the benchmark CLI and in `service.yaml`
-  (`planner.load_forecaster`, default `trailing_mean`). Planner and MPC internals stay unchanged.
+- **Forecaster seam (built):** `load_forecast.run_forecaster(name, load, usable, days, cutoff_idx,
+  target_days)` returns the forecast with provenance. A non-oracle forecaster sees only read-only
+  history before the cutoff. LF-0 (`trailing_mean`) is the first implementation, and `perfect` is
+  the P0 oracle. Select a forecaster with `--load-forecaster` in the benchmark CLI and with
+  `planning.load_forecaster` in `service.yaml` (default `trailing_mean`; oracles are rejected).
+  To add a candidate, write one `@register_forecaster` function. Planner and MPC internals stay
+  unchanged.
 - **Walk-forward folds:** use monthly folds from 2025-01 to 2026-09, which gives 21 folds covering
   every season twice. Each fold fits only on data before each decision's cutoff. Decision instants
   are the policy's real events: 00:00 for `day_ahead`, and 14:00 and 20:30 for `rolling_horizon`.
@@ -199,7 +204,7 @@ Start only if P2–P5 leave a large share of the P0 gap uncaptured.
 - Fall back to LF-0 when any input is stale or missing (temperature, schedule replay, appliance
   state). The fallback reason goes on the existing provenance and is exported as a counter.
 - After 4 weeks of shadow in which the live error ordering matches the offline one, promote by
-  changing `planner.load_forecaster` in `config/service.yaml`, re-vendored into the homelab chart.
+  changing `planning.load_forecaster` in `config/service.yaml`, re-vendored into the homelab chart.
   Rollback is the reverse one-line change.
 - **Revalidate after battery commissioning:** gross load becomes
   `import − export + discharge − charge`. Re-run the P1 harness on the post-commissioning data
