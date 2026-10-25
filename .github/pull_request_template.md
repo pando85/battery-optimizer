@@ -18,7 +18,7 @@
 
 - [ ] The diff is limited to the intended outcome.
 - [ ] Tests were added or updated.
-- [ ] `make lint` and `make test` pass, or an exception is explained.
+- [ ] `just lint` and `just test` pass, or an exception is explained.
 - [ ] Commits follow Conventional Commits, are signed and carry `Signed-off-by` (`git commit -s`).
 - [ ] No energy data, tokens or credentials are included (data stays outside the repository).
 - [ ] Documentation reflects user-facing behavior.

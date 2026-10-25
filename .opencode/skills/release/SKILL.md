@@ -13,7 +13,7 @@ Release a new version of battery-optimizer with the release script and the CI pi
 
 ## How a release works
 
-1. `make release` (`.ci/release.sh`) bumps `[project] version` in `pyproject.toml` with
+1. `just release` (`.ci/release.sh`) bumps `[project] version` in `pyproject.toml` with
    `uv version`, refreshes `uv.lock`, prepends the new section to `CHANGELOG.md` with git-cliff,
    commits `release: Version X.Y.Z` (signed, with `Signed-off-by`), and pushes `release/vX.Y.Z`.
 2. Open a PR to `main` with the `gh pr create` command the script prints, and merge it.
@@ -28,7 +28,7 @@ Release a new version of battery-optimizer with the release script and the CI pi
 
 - Clean working tree, on `main`, identical to `origin/main` (not ahead, not behind).
 - Full clone with tags (`git fetch --unshallow` and `git fetch --tags` are done for you).
-- `uv` installed (`UV="uvx uv@<version>" make release` to use another one) and signed commits
+- `uv` and `just` installed (`UV="uvx uv@<version>" just release` to use another one) and signed commits
   configured in git.
 
 ## Version decision guide
@@ -51,7 +51,7 @@ While the project is `0.x`, breaking changes may bump MINOR; say so in the PR de
 
 ```bash
 git checkout main && git pull --ff-only
-make release                 # prompts for the version; or: make release VERSION=0.2.0
+just release                 # prompts for the version; or: just release 0.2.0
 # run the gh pr create command it prints, get the PR merged
 gh run list --limit 5        # watch auto-tag, then the Images run on the new tag
 ```
@@ -63,8 +63,8 @@ script only regenerates the changelog.
 
 | Mistake | Why it is wrong | Fix |
 |---------|-----------------|-----|
-| Editing `CHANGELOG.md` by hand | git-cliff generates it from conventional commits | Fix the commit message convention, run `make update-changelog` |
-| Editing the version in `pyproject.toml` by hand | `uv.lock` and the changelog would drift | Use `make release` |
+| Editing `CHANGELOG.md` by hand | git-cliff generates it from conventional commits | Fix the commit message convention, run `just update-changelog` |
+| Editing the version in `pyproject.toml` by hand | `uv.lock` and the changelog would drift | Use `just release` |
 | Creating tags manually | `auto-tag.yml` creates the signed tag | Merge the release PR |
 | Releasing from a feature branch | The changelog needs the merged `main` commit ids | `git checkout main` first |
 | Passing `--no-gpg-sign` | Release commits and tags must be signed | Fix the local signing setup |
@@ -86,7 +86,7 @@ script only regenerates the changelog.
 | `pyproject.toml` | `[project] version`: single source of truth |
 | `cliff.toml` | git-cliff changelog configuration |
 | `CHANGELOG.md` | Generated changelog; auto-tag reads the version from it |
-| `.ci/release.sh` | Release branch/commit script behind `make release` |
+| `.ci/release.sh` | Release branch/commit script behind `just release` |
 | `.github/workflows/auto-tag.yml` | Creates the signed tag on push to `main` |
 | `.github/workflows/images.yml` | Builds/pushes the image and creates the GitHub release on tags |
 
@@ -94,6 +94,6 @@ script only regenerates the changelog.
 
 - [ ] On `main`, clean, up to date with `origin/main`
 - [ ] Version bump decided from the commits since the last tag
-- [ ] `make release` run, `release/vX.Y.Z` pushed
+- [ ] `just release` run, `release/vX.Y.Z` pushed
 - [ ] PR opened and merged
 - [ ] `auto-tag` and `Images` runs green, GitHub release present

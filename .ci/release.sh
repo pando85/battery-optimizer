@@ -2,7 +2,7 @@
 # Prepare a release: bump the version, update the changelog and push a release/vX branch.
 #
 # Usage: .ci/release.sh [X.Y.Z]     (prompts when the version is omitted)
-#        make release [VERSION=X.Y.Z]
+#        just release [X.Y.Z]
 #
 # The version lives in [project] version of pyproject.toml. After the release PR is merged,
 # .github/workflows/auto-tag.yml creates the signed tag and images.yml publishes everything.
@@ -76,7 +76,7 @@ git checkout -b "$BRANCH"
 
 $UV version --no-sync "$VERSION"
 $UV lock
-UV="$UV" make update-changelog
+UV="$UV" just update-changelog
 
 git add pyproject.toml uv.lock CHANGELOG.md
 git commit -s -m "release: Version $VERSION"

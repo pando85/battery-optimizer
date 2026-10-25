@@ -10,7 +10,7 @@ Reproducible energy measurement and baseline toolkit for the home battery optimi
 
 ## Quick start
 
-Requires Python 3.14 and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.14 and [uv](https://docs.astral.sh/uv/); the development recipes also need [just](https://just.systems).
 
 ```bash
 # Run from a checkout
@@ -24,16 +24,16 @@ uv tool install https://github.com/pando85/battery-optimizer/releases/download/v
 ### Development
 
 ```bash
-make help         # list the targets
-make git-hooks    # install the pre-commit and commit-msg hooks (once)
-make lint         # all pre-commit checks: ruff, yamllint, shellcheck, uv.lock, ...
-make fmt          # ruff check --fix and ruff format
-make test         # pytest
-make image        # build the container image locally
+just              # list the recipes (https://just.systems)
+just git-hooks    # install the pre-commit and commit-msg hooks (once)
+just lint         # all pre-commit checks: ruff, yamllint, shellcheck, uv.lock, ...
+just fmt          # ruff check --fix and ruff format
+just test         # pytest
+just image        # build the container image locally
 ```
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/), are signed and carry
-`Signed-off-by` (`git commit -s`). Releases are cut with `make release`; see
+`Signed-off-by` (`git commit -s`). Releases are cut with `just release`; see
 [`.opencode/skills/release/SKILL.md`](.opencode/skills/release/SKILL.md).
 
 ### Container image

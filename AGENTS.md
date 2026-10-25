@@ -6,17 +6,17 @@ live in `.opencode/skills/` (also exposed to Claude Code through the `.claude/sk
 
 ## Essential commands
 
-Local uv may be stale: use `make UV="uvx uv@<version>" ...` with the version pinned in
-`.github/actions/setup-uv/action.yml`.
+Recipes live in the `justfile` ([just](https://just.systems/)). Local uv may be stale: run
+`UV="uvx uv@<version>" just ...` with the version pinned in `.github/actions/setup-uv/action.yml`.
 
 ```bash
-make help              # list targets
-make git-hooks         # install pre-commit + commit-msg hooks (once)
-make lint              # every pre-commit hook on all files (ruff, yamllint, shellcheck, uv.lock)
-make fmt               # ruff check --fix + ruff format
-make test              # pytest (~1900 tests, several minutes)
-make image             # build the container image locally
-make release           # cut a release (see the release skill)
+just                   # list recipes
+just git-hooks         # install pre-commit + commit-msg hooks (once)
+just lint              # every pre-commit hook on all files (ruff, yamllint, shellcheck, uv.lock)
+just fmt               # ruff check --fix + ruff format
+just test              # pytest (~1900 tests, several minutes)
+just image             # build the container image locally
+just release           # cut a release (see the release skill)
 ```
 
 ## Repository map
@@ -28,16 +28,16 @@ make release           # cut a release (see the release skill)
 
 ## Rules
 
-- Python 3.14, ruff (line length 100; rules E, F, I, N, W, UP). Run `make lint` and `make test`
+- Python 3.14, ruff (line length 100; rules E, F, I, N, W, UP). Run `just lint` and `just test`
   before reporting completion and include the actual results.
 - Dependencies are unconstrained in `pyproject.toml`; `uv.lock` is the source of truth and Renovate
   refreshes it weekly. Commit `uv.lock` with any dependency change.
 - One place per version pin: the project version is `[project] version` in `pyproject.toml` (changed
-  only by `make release`), the uv version is pinned in `.github/actions/setup-uv/action.yml` and the
+  only by `just release`), the uv version is pinned in `.github/actions/setup-uv/action.yml` and the
   `Dockerfile`. Pin GitHub actions to a full commit SHA with a `# vX.Y.Z` comment.
 - Commits: Conventional Commits (`type(scope): Subject`, types in `.commitlintrc.json`), GPG-signed
   and `Signed-off-by` (`git commit -s`). Never pass `--no-gpg-sign` or `--no-verify`.
-- Never edit `CHANGELOG.md` by hand and never create tags: `make release` and CI do it.
+- Never edit `CHANGELOG.md` by hand and never create tags: `just release` and CI do it.
   Read `.opencode/skills/release/SKILL.md` before any release work.
 - Behavioral changes need tests. Keep the smallest correct diff.
 
