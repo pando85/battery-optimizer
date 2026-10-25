@@ -16,6 +16,7 @@ import json
 from collections.abc import Iterable
 from pathlib import Path
 
+from battery_optimizer.extract_omie import OMIE_GAP_FLAG_PREFIXES
 from battery_optimizer.extract_prom import DEAD_DUPLICATE_ENTITY_IDS
 
 #: Process exit code of ``extract`` when a run recorded coverage gaps.  ``1`` is a failed run
@@ -35,6 +36,9 @@ COVERAGE_GAP_PREFIXES: frozenset[str] = frozenset(
         "no_samples_extracted",
         "no_series_chunks",
         "series_without_samples_chunks",
+        # OMIE: a day that is missing after its expected publication, a file that does not
+        # parse, a download that kept failing, a stored part that cannot be read
+        *OMIE_GAP_FLAG_PREFIXES,
     }
 )
 

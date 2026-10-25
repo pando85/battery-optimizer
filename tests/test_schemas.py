@@ -26,7 +26,13 @@ class TestSchemaVersion:
 
 class TestSchemaRegistry:
     def test_all_schemas_registered(self) -> None:
-        expected = {"RAW_SAMPLE", "RAW_ENUM_STATE", "ANALYSIS_INTERVAL", "BENCHMARK_RESULT"}
+        expected = {
+            "RAW_SAMPLE",
+            "RAW_ENUM_STATE",
+            "RAW_OMIE_DAY_AHEAD",
+            "ANALYSIS_INTERVAL",
+            "BENCHMARK_RESULT",
+        }
         assert set(SCHEMAS.keys()) == expected
 
 

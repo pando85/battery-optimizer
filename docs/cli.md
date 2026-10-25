@@ -8,8 +8,8 @@ The modules that have no CLI surface are described in [Architecture](architectur
 
 | Command        | Status       | Purpose                                        |
 |----------------|--------------|------------------------------------------------|
-| `extract`      | **functional** | Ingest from Prometheus / HA history to Parquet |
-| `validate`     | **functional** | Validate raw Parquet against schemas + manifest hashes |
+| `extract`      | **functional** | Ingest from Prometheus / HA history / OMIE day-ahead prices to Parquet |
+| `validate`     | **functional** | Validate raw Parquet against schemas + manifest hashes (prometheus, ha-history, omie) |
 | `build`        | **functional** | Build 15-min analysis dataset                  |
 | `build-features` | **functional** | Build the slot-aligned sub-load feature table, apart from the canonical dataset |
 | `decompose-load` | **functional** | Private report: share of load and of LF-0 error per sub-load |
@@ -85,12 +85,73 @@ already in the store are not written again, and the manifest discloses how many
 were suppressed. See [Overlapping re-extraction is deduplicated at row
 level](known-issues.md#overlapping-re-extraction-is-deduplicated-at-row-level).
 
+### `extract --source omie` (OMIE day-ahead prices)
+
+```bash
+# Public files, no token. Dates are local (Europe/Madrid) delivery dates, both inclusive.
+uv run battery-optimizer extract --source omie --config config/tariff.yaml \
+  --start 2024-01-01 --end 2026-10-26 --allow-coverage-gaps
+uv run battery-optimizer extract --source omie --config config/tariff.yaml --lookback-days 3
+```
+
+Downloads the OMIE `marginalpdbc_YYYYMMDD.1` file of every delivery day from
+`https://www.omie.es/es/file-download?parents=marginalpdbc&filename=...` (a browser-like
+`User-Agent`; the `parents%5B0%5D=` form answers with an HTML redirect). The file suffix is the
+publication version: `.1` normally, but a few days exist only as `.2` or `.3` (and answer 404 for the
+earlier suffixes), so versions 1 to 5 are tried in order and the first present one is stored
+(`source_file_version`, `file_version` in the manifest). It is a **separate source**
+for the price-outlook estimator ([plan PO-C](planning/price-outlook-improvement-plan.md)):
+
+- `--start`/`--end` take `YYYY-MM-DD` (a timestamp is refused). `--end` defaults to today's local date;
+  `--lookback-days N` is `[today - N, today]`. Ask for tomorrow explicitly: its file appears at about
+  13:00 local on D.
+- `--source all` stays prometheus + ha-history; `omie` is always named. `--entities` does not apply.
+- **Store layout:** one immutable part per delivery day,
+  `raw/omie/v1/parts/omie-day-<local midnight UTC>-<next local midnight UTC>-<sha8>.parquet`, and one
+  manifest per run (`source: omie`) listing the new parts with `raw_sha256` (of the downloaded
+  bytes), `observed_at`, `http_status`, period count and resolution, plus a per-day ledger in
+  `params.days` and counts in `params.day_counts`. `params.query_template` records the URL template.
+- **Schema `RAW_OMIE_DAY_AHEAD`:** `delivery_date`, `period` (1-based, local order from local
+  midnight), `period_minutes` (60 or 15), `interval_start`/`interval_end` (UTC; DST-correct, computed
+  from local midnight plus period steps in UTC), `price_es_eur_mwh`, `price_pt_eur_mwh` (EUR/MWh;
+  the file lists PT first, ES second; ES is the one in use), `observed_at`, `source_sha256`,
+  `source_file_version`, `extraction_id`. Periods are hourly (24, or 23/25 on DST days) up to
+  2025-09-30 and quarter-hourly (96, or 92/100) from 2025-10-01; the resolution is inferred from the
+  period count and must fit the length of the local day.
+- **Idempotent:** a day whose part is already on disk is skipped without a request, so re-runs and
+  overlapping windows add nothing (the manifest still records the run). A part left by a crashed run
+  (no manifest) is adopted into the next run's manifest (`omie_orphan_part_adopted`, informational).
+  `observed_at` of a backfilled day is the backfill time, not the publication time.
+- **Polite:** at least 0.5 s between requests, retries with exponential backoff on 429/5xx/transport
+  errors, a response size cap, and an abort (exit 1, no manifest, stored parts kept) after 5
+  consecutive days that could not be downloaded.
+- **Strict parsing:** the response is data. Header, line shape, `*` terminator, date, consecutive
+  periods, a period count that fits the day and finite prices are all checked; one failure stores
+  nothing for that day.
+
+Flags: `omie_missing:<date>` (no file in any version after the day's expected publication, 14:00 local on D-1),
+`omie_parse_error:<date>`, `omie_fetch_failed:<date>` and `omie_part_unreadable:<date>` are **gaps**
+(exit `3`). `omie_not_published_yet:<date>` (no file before that time), `omie_orphan_part_adopted:` and
+`omie_price_outside_expected_range:` (a price outside [-500, 4000] EUR/MWh, stored anyway) stay
+informational.
+
+**The canonical dataset is unaffected:** `build` reads only `source == "prometheus"` manifests and
+`SCHEMA_VERSION` is unchanged, so no OMIE extraction can change a `dataset_id` (pinned by a test).
+
+Reader for the estimator, `battery_optimizer.omie_prices.load_omie_es_prices(data_dir, start_date=,
+end_date=, as_of=None)`: reads through the OMIE manifests (full SHA-256 and schema check per part) and
+returns the ES price on the 15-minute UTC grid (hourly periods repeated over four slots, `NaN` where
+no day is stored), the resolution each slot came from, the local delivery date per slot, the missing
+dates and `first_observed_at` per day. `as_of` blanks the days not yet usable under the as-of rule of
+the plan: an OMIE D+1 value may be used from **13:30 local on D** (`omie_usable_from`).
+
 ## `validate`
 
 ```bash
 uv run battery-optimizer validate --source ha-history
 uv run battery-optimizer validate --source prometheus
-uv run battery-optimizer validate --source all   # default
+uv run battery-optimizer validate --source omie  # explicit: not part of `all`
+uv run battery-optimizer validate --source all   # default: prometheus + ha-history
 ```
 
 Checks per source:
@@ -98,6 +159,9 @@ Checks per source:
 - Filename content hash matches actual SHA-256 of file bytes
 - Every manifest's recorded part hashes match the actual files on disk
 - No zero-row parts, no unreadable parts
+- `omie` also checks each day: one delivery date matching the file name, periods `1..N`, a 60 or
+  15 minute resolution that fits the local day (DST: 23/25 hourly, 92/100 quarter-hourly),
+  contiguous UTC intervals from local midnight to the next, finite prices, and a single part per day
 
 Exit code 0 if all checks pass; 1 otherwise.
 
