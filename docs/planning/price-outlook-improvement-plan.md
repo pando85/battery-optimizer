@@ -120,8 +120,11 @@ Decided 2026-10-25:
   uncontrolled workloads such as LLM harnesses. The policy is removed in the homelab deploy that
   ships PO-B. The read-only guarantee stays in code: `ha_guard` and no write credentials.
 
+- **Benchmark convention:** the canonical `rolling_horizon` rung keeps `exact` prices for tomorrow
+  at 14:00, so it stays bit-identical and comparable with earlier results as the upper bound. The
+  realistic modes, `published_only` and the PO-C estimate, are reported beside it. Once PO-C has
+  measured how precise the estimate is, the owner decides which realistic mode becomes the headline
+  and reworks what is needed.
+
 Still open:
 1. GA minimum worthwhile gain (private).
-2. How the canonical `rolling_horizon` rung treats tomorrow's prices at 14:00: keep `exact` as the
-   upper bound and report the other modes beside it, or switch the canonical rung to a realistic
-   mode.
