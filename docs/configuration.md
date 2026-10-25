@@ -32,6 +32,24 @@ immutable store and stored benchmark JSONs embed its path). The legacy `ENERGY_B
 environment variables are still honoured as a deprecated fallback (`DeprecationWarning`); the
 `BATTERY_OPTIMIZER_*` name wins when both are set.
 
+### Local copy of the deployed store
+
+Since 2026-10-25 the store of record is the homelab PVC (CronJob extraction plus the shadow service).
+`~/data/energy-baseline` is **frozen**: it is the store behind the P0–P4 and PO-A/PO-C evaluation
+runs, and adding manifests to it would change its dataset ids. For new offline analysis pull the
+deployed store into a separate directory:
+
+```bash
+KUBE_CONTEXT=<context> just pull-store            # into ~/data/battery-optimizer-cluster
+export BATTERY_OPTIMIZER_DATA_DIR=~/data/battery-optimizer-cluster
+```
+
+The recipe streams `raw/`, `manifests/`, `analysis/` and `service/` out of the service pod with `tar`
+(read-only on the cluster), runs `validate` on the copy and only then syncs it into the target with
+mode 0700. Re-pulling is safe: parts and manifests are immutable, the service's append-only logs are
+refreshed, and files that exist only locally (your own analysis runs) are kept. The cluster store has
+no OMIE prices; run `extract --source omie` against the copy before anything that needs them.
+
 **Code identity without git (container images).** Lineage records the commit via
 `git rev-parse HEAD`. Where git is unavailable, set `BATTERY_OPTIMIZER_GIT_SHA` at build time to a
 40-character lowercase commit SHA (optionally suffixed `-dirty`); it is used only when git cannot

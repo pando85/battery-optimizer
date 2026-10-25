@@ -42,6 +42,35 @@ test *args:
     {{UV}} run --extra dev pytest {{args}}
 
 # =============================================================================
+# Data
+# =============================================================================
+
+# Copy the deployed store (homelab PVC) into a separate local directory for offline analysis
+pull-store dest=(env("HOME") / "data/battery-optimizer-cluster"):
+    #!/usr/bin/env bash
+    # Read-only on the cluster: tar runs inside the service pod. Override the target with
+    # KUBE_CONTEXT, NAMESPACE, DEPLOYMENT and CONTAINER. Parts and manifests are immutable, so a
+    # re-pull only adds new files and refreshes the service's append-only logs; files that exist
+    # only locally (your own analysis runs) are kept. Never point it at the frozen
+    # ~/data/energy-baseline store: merging stores changes dataset ids.
+    set -euo pipefail
+    umask 077
+    dest="{{dest}}"
+    case "$(realpath -m "$dest")" in
+        "$(realpath -m "$HOME/data/energy-baseline")") echo "refusing to pull into the frozen store $dest" >&2; exit 1 ;;
+    esac
+    ctx=(); [ -n "${KUBE_CONTEXT:-}" ] && ctx=(--context "$KUBE_CONTEXT")
+    staging="$(mktemp -d "${TMPDIR:-/tmp}/battery-optimizer-store.XXXXXX")"
+    trap 'rm -rf "$staging"' EXIT
+    kubectl "${ctx[@]}" -n "${NAMESPACE:-battery-optimizer}" exec "deploy/${DEPLOYMENT:-battery-optimizer-service}" \
+        -c "${CONTAINER:-service}" -- tar -C /data -cf - raw manifests analysis service \
+        | tar -C "$staging" -xf -
+    BATTERY_OPTIMIZER_DATA_DIR="$staging" {{UV}} run battery-optimizer validate
+    mkdir -p "$dest"
+    rsync -a "$staging/" "$dest/"
+    echo "store pulled into $dest (use BATTERY_OPTIMIZER_DATA_DIR=$dest)"
+
+# =============================================================================
 # Build
 # =============================================================================
 
