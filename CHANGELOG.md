@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.2.1](https://github.com/pando85/battery-optimizer/tree/v0.2.1) - 2026-10-25
+
+### Fixed
+
+- extract: Exit non-zero when a run records coverage gaps ([44eb411](https://github.com/pando85/battery-optimizer/commit/44eb411ad341c9ceb9a355ec09ee492bc00cfe13))
+
 ## [v0.2.0](https://github.com/pando85/battery-optimizer/tree/v0.2.0) - 2026-10-25
 
 ### Added
