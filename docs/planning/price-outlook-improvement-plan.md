@@ -1,6 +1,9 @@
 # Price Outlook — improvement plan
 
-- **Status (2026-10-25):** agreed with the owner; PO-B in progress, everything else proposed. Refines the
+- **Status (2026-10-25):** PO-A done, **gate GA failed**: knowing tomorrow's prices at 14:00 is worth
+  very little to dispatch. PO-B shipped in 0.3.0 and is collecting. The OMIE source is extracted and
+  backfilled (`extract --source omie`). PO-C, PO-D and PO-E are **deferred**; Load Forecaster P4
+  proceeds without them. Refines the
   [Price Outlook roadmap](components/price-outlook.md) stages PO-1…PO-4 into executable phases.
 - **Why now:** P4 of the [Load Forecaster plan](load-forecaster-improvement-plan.md) replays
   AppDaemon's price-driven heat-pump schedule. At the 14:00 decision tomorrow's PVPC is not
@@ -45,6 +48,18 @@ PO-D scenarios (optional) ──────────────────
   private. Independent of the dispatch value, P4 still needs a tomorrow schedule at 14:00, so PO-C
   runs anyway, but GA decides whether the MPC should ever use the estimate.
 
+**Result (2026-10-25, private run `price-eval/po-a-*`, `price_outlook.py`, `battery-optimizer price-eval`):**
+- `exact` reproduces the canonical rung bit for bit; leakage tests show `published_only` and
+  `persistence` never see an unpublished price.
+- The gap `published_only − exact` is about **3 %** of the P0 load-forecast gap in 2025 (bootstrap
+  interval above zero) and about **1 %** in 2026-01…09 (interval includes zero). The extra hours
+  change the 14:00–20:30 actions on more than half of the days, but by very little money: the 20:30
+  replan already sees the published prices.
+- `persistence` captures about half of that gap in 2025 and almost none in 2026. As a price
+  estimate it has negligible bias, a within-day rank correlation of about 0.85 (median) and about
+  75 % overlap with the true cheapest 10 hours.
+- **GA failed** (owner, 2026-10-25). An estimated tomorrow is not worth building for dispatch.
+
 ### PO-B — Publication evidence (start now, passive)
 
 - The service appends a private snapshot of every `sensor.esios_pvpc` state change: raw
@@ -56,7 +71,12 @@ PO-D scenarios (optional) ──────────────────
   Both are read-only, and the weather archive needs the `ha_guard` allowlist to permit
   `weather.get_forecasts`.
 
-### PO-C — OMIE-based next-day estimator (offline, ≈3–4 days)
+### PO-C — OMIE-based next-day estimator (offline, ≈3–4 days) — deferred after GA
+
+> Deferred 2026-10-25. Revisit only if Load Forecaster P4 shows that its 14:00 guess of tomorrow's
+> heat-pump schedule (from `persistence` prices) costs material money. The OMIE extract source and
+> its 2024-01-01 onward backfill already exist (`extract --source omie`, `omie_prices.py`, as-of
+> 13:30 local), so restarting PO-C needs only the estimator and its evaluation.
 
 - **Data:**
   - A new `extract` source `omie` writes the public day-ahead files into the raw store with
@@ -126,5 +146,5 @@ Decided 2026-10-25:
   measured how precise the estimate is, the owner decides which realistic mode becomes the headline
   and reworks what is needed.
 
-Still open:
-1. GA threshold: the owner sets it **after seeing the PO-A headroom** (decided 2026-10-25).
+- **GA (after PO-A):** failed. PO-C and everything after it are deferred; P4 uses published prices
+  where they exist and `persistence` for tomorrow at 14:00.
