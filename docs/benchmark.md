@@ -32,7 +32,8 @@ flags (`--train-days`, `--charge-pct`, `--discharge-pct`, `--initial-soc-frac`, 
 `--day-ahead-terminal-value`, `--day-ahead-time-limit-s`,
 `--rolling-horizon-replan-interval-slots`, `--rolling-horizon-horizon-slots`, `--rolling-horizon-sigma`,
 `--rolling-horizon-bias-sigma`, `--rolling-horizon-seed`, `--rolling-horizon-time-limit-s`,
-`--rolling-horizon-load-forecast-mode`, `--throughput-cost-eur-per-kwh`, `--load-forecaster`, `--eval-end`) default to the
+`--rolling-horizon-load-forecast-mode`, `--rolling-horizon-price-outlook`, `--throughput-cost-eur-per-kwh`,
+`--load-forecaster`, `--eval-end`) default to the
 benchmark module's constants. The CLI calls `core_available()` first and refuses with a clear message if
 the numeric core (battery / policies / oracle / cost) is not usable.
 
@@ -306,6 +307,7 @@ Canonical defaults, all verified:
 | `--rolling-horizon-replan-interval-slots` | unset (legacy two-publication 14:00 / 20:30 schedule) | The configuration the golden-value tests pin bit-for-bit and the one validated on real data |
 | `--rolling-horizon-horizon-slots` | unset with the legacy cadence; `96` when a cadence is given | The legacy horizon is DST-dependent and derived from the local-day partition, so a single recorded number would be fabricated |
 | `--rolling-horizon-time-limit-s` | the day-ahead per-solve limit | Per **solve**, like the day-ahead's per-day limit, and unlike the whole-horizon `--time-limit-s` |
+| `--rolling-horizon-price-outlook` | `exact` | The canonical convention: the 14:00 event sees tomorrow's realized prices. It is an upper bound, kept so results stay comparable with earlier runs. See *Price-outlook seam* below |
 | `--rolling-horizon-load-forecast-mode` | `"causal"` at the benchmark and CLI layer (`"frozen"` for a direct `run_rolling_horizon` call) | `"causal"` uses the same trailing-slot-mean function as `day_ahead`, so both rungs share a like-for-like load basis. `"frozen"` is the legacy mode the golden-value tests pin bit-for-bit and remains reachable, and stays the default when the function is called directly so the noise experiments keep one shared load basis. See *Causal load-forecast alignment* below. |
 
 **Cadence, and what it costs.** `--rolling-horizon-replan-interval-slots 1` with
@@ -420,6 +422,36 @@ def _level_adjusted(request: ForecastRequest, *, window_days: int = 28) -> list[
 def _my_model(request: ForecastRequest, *, alpha: float = 0.5) -> list[DayForecast]: ...
 ```
 
+**Price-outlook seam (`--rolling-horizon-price-outlook`).** What a rolling-horizon event knows about
+the prices it plans over comes from a registered price outlook in `price_outlook.py`, through one
+call contract: `run_price_outlook(name, prices, published_end_idx, decision_idx, plan_end_idx, ...)`.
+PVPC for local day D+1 counts as published from 20:15 local on day D
+(`PVPC_NEXT_DAY_PUBLISHED_FROM`), so the 20:30 event sees tomorrow and the 14:00 event does not.
+A non-oracle outlook receives only the published prices, as a read-only view, and answers only for
+the unpublished slots, so a published price is never overwritten. Each slot of the plan gets a
+provenance: `published`, `estimated` or `unavailable`. An event plans only up to its first
+`unavailable` slot and values the energy left there at the run's planning terminal value, which is
+what the live service does at its last published price. `tests/test_price_outlook.py` checks for
+every registered non-oracle outlook that prices after the publication boundary cannot reach it,
+and that perturbing tomorrow's realized prices leaves the 14:00 plan unchanged.
+
+| Name | What the 14:00 event plans on for tomorrow |
+|---|---|
+| `exact` (default) | **Offline oracle**, the upper bound: tomorrow's realized prices, degraded by `--rolling-horizon-sigma` / `--rolling-horizon-bias-sigma` when those are set. Bit-identical to the pre-seam rung |
+| `published_only` | Nothing: the plan ends at midnight, the last published price, and the remaining energy is valued at the terminal value. This is the live service |
+| `persistence` | Today's price at the same local wall-clock time. On a fall-back target day both repeated hours take today's value; a spring-forward source day lends its missing hour from the day before |
+
+The default adds nothing to the run identity and leaves the per-event telemetry unchanged. Any other
+outlook enters the identity as `rolling_horizon_price_outlook`, records `price_outlook` provenance and
+counts in the telemetry, and adds `planned_through_idx`, the estimated and unavailable slot counts
+and a `plan_prices_sha256` to each event. Every run records the outlook under
+`rolling_horizon.price_outlook`. A non-default outlook needs the legacy cadence and zero sigma and
+bias: the noise channels model an estimate of `exact` only, and a finer cadence would put decisions
+between the 20:15 publication and the 20:30 boundary the noise model keeps. To add an outlook, write
+one function decorated with `@register_price_outlook("name")`. An outlook whose inputs only exist from
+a local time of day (OMIE day-ahead prices, usable from `OMIE_NEXT_DAY_USABLE_FROM` = 13:30) declares
+`inputs_usable_from=`; before that time the seam does not call it and falls back to `published_only`.
+
 `--eval-end` cuts the dataset at an instant before anything else runs. The run is then the run on a
 dataset that ends there, with the same rows, partitions and terminal values, and the cut enters the
 run identity. Without the flag nothing changes.
@@ -473,6 +505,34 @@ that period's P0 gap. The secondary policy is reported but not gated.
 - LF-0 against itself is exactly zero, point and interval.
 - When `--p0-summary` is given and `trailing_mean` and `perfect` are both candidates, the LF-0 cost,
   the `perfect` cost and their gap are compared for exact equality with the P0 run (gate G1).
+
+## Price-outlook evaluation (`price-eval`)
+
+`battery-optimizer price-eval` ([CLI](cli.md#price-eval)) measures what knowing tomorrow's prices at
+14:00 is worth. It implements PO-A of the
+[price-outlook plan](planning/price-outlook-improvement-plan.md) and reuses the bootstrap, provenance
+and pre-registration machinery of `forecast-eval`. All its output is private and goes under
+`<dataset>/price-eval/`.
+
+- **Pre-registration.** `preregistration.json` is written before the first benchmark runs: outlooks
+  and their provenance, periods, benchmark parameters, publication rule, metric definitions,
+  bootstrap seed and the GA gap definition.
+- **Economic evaluation.** Each outlook and period gets one `benchmark` run with the P0 parameters on
+  `no_battery` and `rolling_horizon` (LF-0 load forecast). The per-local-day `rolling_horizon` cost
+  is paired against `exact` and against `published_only`, with the same 7-local-day block bootstrap
+  as `forecast-eval`. The GA gap is `published_only` minus `exact`; each outlook's share of it is
+  reported. Whether the gap is material is judged against a private owner threshold, so the run gives
+  no verdict.
+- **Action differences.** Over the slots executed by the 14:00 events (14:00 to 20:30 local), the
+  number of slots and days whose charge or discharge differs between two outlooks, and how many of
+  those days started from the same state of charge, so the difference comes from price information
+  alone.
+- **Price-estimate metrics.** On the slots an outlook estimated at the 14:00 events, from the same
+  seam call the planner used: MAE and bias (estimate minus realized), and per fully estimated local
+  day, on hourly prices, the Spearman rank correlation and the overlap of the 10 cheapest and the 4
+  most expensive hours.
+- **Reference reproduction.** With `--reference-summary`, the `exact` rolling-horizon schedule is
+  compared column by column with the `trailing_mean` run of a `forecast-eval` summary.
 
 ## Throughput cost, input validation and artifacts
 
