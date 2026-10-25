@@ -3,8 +3,9 @@
 - **Status (2026-10-25):** P0 and P3 are done. The P1 forecaster seam (`load_forecast.py`) and the
   P1 evaluation harness (`forecast-eval`, see
   [Benchmark reference](../benchmark.md#forecast-evaluation-forecast-eval)) are built. The P0 run
-  is done and its results are private. P2 waits for the harness. P4 is planned but blocked on the
-  [Price Outlook](components/price-outlook.md) next-day estimate. The plan refines the
+  is done and its results are private. P2 waits for the harness. P4 is unblocked: the
+  [Price Outlook](price-outlook-improvement-plan.md) gate GA failed, so P4 does not wait for an
+  OMIE estimate. The plan refines the
 - **Question:** can a better household load forecast reduce the planned battery's net cost, and by
   how much? Answer it with the least machinery first. Stop as soon as the evidence says the remaining
   gain is not worth the maintenance.
@@ -20,7 +21,7 @@
 | P1 harness | Seam **done** (#14); harness in review (#16) | `load_forecast.py`, `forecast-eval` | G1: seam passed (bit-identical, leakage test) |
 | P2 cheap candidates | Pending P1 | — | G2 pre-registered (see P2) |
 | P3 sub-load audit | **Done** | #15: `build-features`, `load_decomposition.py`; private feature set and P3 report | **G3 passed** |
-| P4 structured forecaster | **Planned, blocked** on Price Outlook PO-1/PO-2 | this document, §P4 | G4 |
+| P4 structured forecaster | **Planned, unblocked** (Price Outlook GA failed) | this document, §P4 | G4 |
 | P5–P7 | Not started (P5 collection continues passively) | — | — |
 
 All phases run on the refreshed private dataset `dd5a2178…`, which covers 2024-01-01 to 2026-10-01.
@@ -60,7 +61,7 @@ Evidence already on record:
 P0 headroom ──► P1 harness ──► P2 cheap baselines ──► P4 structured ──► P6 ML/quantiles ──► P7 shadow
                    ▲                                    ▲   ▲               ▲
 P3 data audit ─────┴────────────────────────────────────┘   │               │
-Price Outlook PO-1/PO-2 (next-day PVPC estimate) ───────────┘               │
+Price Outlook PO-A/PO-B (GA failed: persistence) ───────────┘               │
 P5 appliance data (passive accumulation starts now) ────────────────────────┘
 ```
 
@@ -203,7 +204,7 @@ This phase finds out which part of the load is predictable and where the error c
 - **Correction from P4 planning:** the P3 report treated cooling as unscheduled. In fact
   `climate_control` schedules cooling as well. See P4 for the replay of the full rule.
 
-### P4 — Structured component forecaster (LF-1, planned 2026-10-25, blocked on Price Outlook)
+### P4 — Structured component forecaster (LF-1, planned 2026-10-25)
 
 `forecast = servers + heat_pump + residual`. The residual model is trained on
 `main − servers − heat_pump`, which prevents double counting.
@@ -242,12 +243,15 @@ This phase finds out which part of the load is predictable and where the error c
 - **Dependency:** at the 14:00 decision tomorrow's PVPC is not published, so tomorrow's schedule is
   unknown. The owner wants this solved properly in the
   [Price Outlook](components/price-outlook.md) first. That means PO-1, decision-time publication
-  snapshots, and PO-2, an early next-day PVPC estimate. **P4 implementation waits for that work.**
-  Then P4a replays tomorrow's rule on the estimated prices, flagged as estimated, before
-  publication.
+  snapshots, and PO-2, an early next-day PVPC estimate.
+- **Resolved after PO-A (2026-10-25):** the dispatch value of tomorrow's prices at 14:00 is tiny and
+  gate GA failed, so P4 does not wait for an OMIE estimator. P4a replays the rule on **published**
+  prices where they exist (today, and tomorrow after publication) and on `persistence` prices for
+  tomorrow before publication, flagged as estimated. If that 14:00 guess turns out to cost material
+  money, Price Outlook PO-C is restarted.
 
-**Can start now** (passive data collection, independent of the block): the weather-forecast archive,
-and PO-1's PVPC publication snapshots.
+Passive collection shipped in 0.3.0: the weather-forecast archive and the PVPC publication
+snapshots.
 
 - **Gate G4:** the paired EUR result beats the P2 reference with a bootstrap interval that excludes
   zero, in at least one heating and one cooling season. A mid-run change to the AppDaemon rule is
