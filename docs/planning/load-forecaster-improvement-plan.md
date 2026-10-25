@@ -1,9 +1,10 @@
 # Load Forecaster — improvement plan
 
-- **Status (2026-10-25):** P0 and P3 are done. The P1 forecaster seam is built, and the P1
-  evaluation harness is in review. P2 waits for the harness. P4 is planned but blocked on the
+- **Status (2026-10-25):** P0 and P3 are done. The P1 forecaster seam (`load_forecast.py`) and the
+  P1 evaluation harness (`forecast-eval`, see
+  [Benchmark reference](../benchmark.md#forecast-evaluation-forecast-eval)) are built. The P0 run
+  is done and its results are private. P2 waits for the harness. P4 is planned but blocked on the
   [Price Outlook](components/price-outlook.md) next-day estimate. The plan refines the
-  [Load Forecaster roadmap](components/load-forecaster.md) stages LF-1…LF-4 into executable phases.
 - **Question:** can a better household load forecast reduce the planned battery's net cost, and by
   how much? Answer it with the least machinery first. Stop as soon as the evidence says the remaining
   gain is not worth the maintenance.

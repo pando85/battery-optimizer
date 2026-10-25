@@ -32,7 +32,7 @@ flags (`--train-days`, `--charge-pct`, `--discharge-pct`, `--initial-soc-frac`, 
 `--day-ahead-terminal-value`, `--day-ahead-time-limit-s`,
 `--rolling-horizon-replan-interval-slots`, `--rolling-horizon-horizon-slots`, `--rolling-horizon-sigma`,
 `--rolling-horizon-bias-sigma`, `--rolling-horizon-seed`, `--rolling-horizon-time-limit-s`,
-`--rolling-horizon-load-forecast-mode`, `--throughput-cost-eur-per-kwh`, `--load-forecaster`) default to the
+`--rolling-horizon-load-forecast-mode`, `--throughput-cost-eur-per-kwh`, `--load-forecaster`, `--eval-end`) default to the
 benchmark module's constants. The CLI calls `core_available()` first and refuses with a clear message if
 the numeric core (battery / policies / oracle / cost) is not usable.
 
@@ -396,6 +396,83 @@ records the forecaster's name, params and oracle flag under `lineage.load_foreca
 `--rolling-horizon-load-forecast-mode frozen` is refused, because the frozen profile does not use the
 seam. To add a forecaster, write one function decorated with `@register_forecaster("name")`; its
 keyword-only parameters, with their defaults, become its recorded params.
+
+Two optional capabilities are declared at registration, and both are recorded in the forecaster's
+provenance:
+
+- `fit=fit_fn` for a trained model. `fit_fn(FitRequest, **params)` returns any state. The seam fits
+  once per **monthly walk-forward fold**, the local calendar month of the decision's cutoff, on
+  history strictly before that month's first local day. It hands the state to every decision in
+  the fold as `request.fitted`. The benchmark runs and the evaluation harness therefore use the same
+  folds, 2025-01 to 2026-09 for the P0 periods.
+- `intraday_cutoff=True` lets the rolling rung hand the forecaster history up to the event instant
+  (14:00 or 20:30) instead of the event's local midnight, so it can use the slots of the day
+  observed so far. `day_ahead` decides at local midnight, where both cutoffs are the same. Without
+  the flag the local-midnight cutoff is kept bit for bit. The leakage test in
+  `tests/test_load_forecast.py` perturbs everything from each forecaster's **declared** cutoff on.
+
+```python
+@register_forecaster("level_adjusted", intraday_cutoff=True)
+def _level_adjusted(request: ForecastRequest, *, window_days: int = 28) -> list[DayForecast]: ...
+
+
+@register_forecaster("my_model", fit=_fit_my_model)
+def _my_model(request: ForecastRequest, *, alpha: float = 0.5) -> list[DayForecast]: ...
+```
+
+`--eval-end` cuts the dataset at an instant before anything else runs. The run is then the run on a
+dataset that ends there, with the same rows, partitions and terminal values, and the cut enters the
+run identity. Without the flag nothing changes.
+
+## Forecast evaluation (`forecast-eval`)
+
+`battery-optimizer forecast-eval` ([CLI](cli.md#forecast-eval)) compares registered forecasters
+against LF-0. It implements P1 of the
+[load-forecaster plan](planning/load-forecaster-improvement-plan.md). All its output is private and
+goes under `<dataset>/forecast-eval/`.
+
+**Pre-registration.** `preregistration.json` is written before the first candidate runs. It records
+the candidates and params, periods, policies, metrics, bootstrap seed and gate G2, together with the
+git commit, dirty flag and config hashes.
+
+**Forecast accuracy** is measured at the policies' real decision instants, on usable slots:
+
+- `day_ahead`: one forecast per local day, made at 00:00 local.
+- `rolling_horizon`: one forecast per 14:00 or 20:30 event, over that event's plan horizon. Warm-up
+  events are left out.
+
+The forecasts come from the same seam calls the planner uses. The harness reports MAE, WAPE, bias
+(forecast minus measured), P95 absolute error and the price-weighted absolute error
+`Σ price·|error|`. Each is given overall and broken down by:
+
+- horizon bucket from the decision instant: 0–6 h, 6–24 h, 24–36 h;
+- price tercile, using the terciles of the period's usable prices;
+- day type (weekday or weekend; holidays are not separated);
+- meteorological season;
+- month.
+
+**Economic evaluation.** Each candidate and period gets one `benchmark` run with the P0 parameters:
+`no_battery`, `day_ahead` and `rolling_horizon`, exact prices, monthly usability gate at 0.8 in
+`report` mode, and the previous calendar year as the training window. The harness pairs the
+per-local-day cost with LF-0's on the same days. The saving is LF-0 minus the candidate, so positive
+means the candidate is cheaper. Its sum over the period is the point estimate. The 95 % interval
+comes from a non-overlapping **7-local-day block bootstrap** with a fixed seed, at least 5000
+resamples, and one draw matrix per period that every comparison shares. The harness also reports the
+share of the P0 gap (LF-0 minus `perfect`) that the candidate captures. The gap comes from
+`--p0-summary` if given, otherwise from an in-run `perfect` candidate. With three or more
+candidates it reports the Spearman correlation between price-weighted error and EUR cost, to show
+whether the cheap proxy ranks forecasters the same way the money does.
+
+**Gate G2** (pre-registered). The primary policy is `rolling_horizon` and the secondary is
+`day_ahead`. A non-oracle candidate passes if, for the primary policy in every period, the bootstrap
+interval of its paired saving is entirely above zero **and** the point saving is at least 10 % of
+that period's P0 gap. The secondary policy is reported but not gated.
+
+**Sanity checks** in every summary:
+
+- LF-0 against itself is exactly zero, point and interval.
+- When `--p0-summary` is given and `trailing_mean` and `perfect` are both candidates, the LF-0 cost,
+  the `perfect` cost and their gap are compared for exact equality with the P0 run (gate G1).
 
 ## Throughput cost, input validation and artifacts
 

@@ -13,6 +13,7 @@ The modules that have no CLI surface are described in [Architecture](architectur
 | `build`        | **functional** | Build 15-min analysis dataset                  |
 | `build-features` | **functional** | Build the slot-aligned sub-load feature table, apart from the canonical dataset |
 | `decompose-load` | **functional** | Private report: share of load and of LF-0 error per sub-load |
+| `forecast-eval` | **functional** | Pre-registered load-forecaster evaluation: accuracy and paired EUR against LF-0 |
 | `benchmark`    | **functional** | Run policy benchmarks on a dataset             |
 | `report`       | **functional** | Generate monthly reconciliation report         |
 | `inspect-sql`  | **functional** | Inspect DuckDB SQL queries                     |
@@ -166,6 +167,36 @@ the residual, runs LF-0 (28-day trailing mean) on the main load and on every com
 common mask, and reports each component's error, its share of the error variance and its
 price-weighted error, overall and for the top price tercile. It also replays the AppDaemon climate
 and DHW rules on the day's prices to show how much heat-pump energy they explain.
+
+## `forecast-eval`
+
+```bash
+uv run battery-optimizer forecast-eval \
+  --dataset ~/data/energy-baseline/analysis/v1/<dataset_id> \
+  --name p2-cheap \
+  --candidate trailing_mean:window_days=14 \
+  --candidate <registered name>[:key=value,...] \
+  --p0-summary ~/data/energy-baseline/analysis/v1/<dataset_id>/forecast-eval/<p0 run>/summary.json
+```
+
+The evaluation harness of the [load-forecaster plan](planning/load-forecaster-improvement-plan.md)
+(P1). Each `--candidate` is a registered forecaster with optional param overrides; LF-0
+(`trailing_mean`, default params) is always the reference and is added when missing. `--period`
+(repeatable) picks the evaluation windows, by default both P0 periods: `2025`
+(2025-01-01 to 2026-01-01 UTC) and `2026-01..09` (2026-01-01 to 2026-10-01 UTC). `--resamples`
+(default 10000, at least 5000) and `--seed` (default 20261025) set the bootstrap.
+
+It writes a private run to `<dataset>/forecast-eval/<name>-<UTC timestamp>/`:
+
+- `preregistration.json`, written before any candidate runs: candidates and params, periods,
+  policies, metric definitions, bootstrap seed, and gate G2 with the P0 gaps it reads.
+- `summary.json` and `summary.md`: forecast accuracy, the paired economic result, the gate verdict,
+  sanity checks and provenance (git commit and dirty flag, tariff and evaluation config hashes,
+  dataset id, forecasters, every benchmark run id, runtime per candidate).
+
+The method (decision instants, metrics, block bootstrap, gate, folds) is described in
+[Benchmark reference § Forecast evaluation](benchmark.md#forecast-evaluation-forecast-eval).
+`benchmark --eval-end` is the flag the harness uses to cut a period out of a longer dataset.
 
 ## `benchmark`
 
