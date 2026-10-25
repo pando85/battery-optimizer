@@ -1,16 +1,31 @@
 # Load Forecaster — improvement plan
 
-- **Status (2026-10-25):** the P1 forecaster seam is built (`load_forecast.py`), together with the
-  P0 `perfect` oracle, and so is the P1 evaluation harness (`forecast-eval`, see
-  [Benchmark reference](../benchmark.md#forecast-evaluation-forecast-eval)). The P0 run is done and
-  its results are private. Everything else is proposed. Refines the
-  [Load Forecaster roadmap](components/load-forecaster.md) stages LF-1…LF-4 into executable phases.
+- **Status (2026-10-25):** P0 and P3 are done. The P1 forecaster seam (`load_forecast.py`) and the
+  P1 evaluation harness (`forecast-eval`, see
+  [Benchmark reference](../benchmark.md#forecast-evaluation-forecast-eval)) are built. The P0 run
+  is done and its results are private. P2 waits for the harness. P4 is planned but blocked on the
+  [Price Outlook](components/price-outlook.md) next-day estimate. The plan refines the
 - **Question:** can a better household load forecast reduce the planned battery's net cost, and by
   how much? Answer it with the least machinery first. Stop as soon as the evidence says the remaining
   gain is not worth the maintenance.
 - **Scope:** offline evaluation first. Then a **forecast-only** shadow in the existing service, which
   needs no battery. Read-only throughout: no actuation and no new write credentials. Raw and
   predicted series stay in the private data dir, and no monetary figure goes into this repo.
+
+## Progress
+
+| Phase | Status | Where | Gate |
+|---|---|---|---|
+| P0 headroom | **Done** | `perfect` oracle in #14; private run `forecast-eval/p0-*` | G0: owner threshold pending |
+| P1 harness | Seam **done** (#14); harness in review (#16) | `load_forecast.py`, `forecast-eval` | G1: seam passed (bit-identical, leakage test) |
+| P2 cheap candidates | Pending P1 | — | G2 pre-registered (see P2) |
+| P3 sub-load audit | **Done** | #15: `build-features`, `load_decomposition.py`; private feature set and P3 report | **G3 passed** |
+| P4 structured forecaster | **Planned, blocked** on Price Outlook PO-1/PO-2 | this document, §P4 | G4 |
+| P5–P7 | Not started (P5 collection continues passively) | — | — |
+
+All phases run on the refreshed private dataset `dd5a2178…`, which covers 2024-01-01 to 2026-10-01.
+Its rows for 2024–2025 are identical to the canonical `2e01620b…`, so 2026-01…09 can serve as a
+second evaluation period.
 
 ## 1. Where we start
 
@@ -35,16 +50,17 @@ Evidence already on record:
 | Servers | `sensor.shellypmmini_servers_power` (`hass_sensor_power_w`) | 2024-01-29 | 30-day mean about 215–245 W. That is consistent with the owner's "~250 W" estimate, a little lower. |
 | Heat pump, electrical input | `sensor.aquarea_{heat,dhw,cool}_power_consumed` | 2024-01-29 | Split into heating, DHW and cooling. The total `sensor.aquarea_power_consumed` only exists from 2025-12-10. |
 | Outdoor temperature | `sensor.aquarea_outside_ambient_temperature` (`hass_sensor_unit_celsius`) | 2024-01-29 | Measured, not forecast. Using it as a feature for future slots leaks future information (see P4). |
-| AppDaemon controls | `input_boolean.appdaemon_climate_enable`, `input_number.appdaemon_climate_min_hours_per_day`, `switch.aquarea_force_dhw_mode` | 2024-01-29 | `climate_control` selects the cheapest hours at 00:00:40. `dhw_control` forces DHW every 12 h at the cheapest slot. Both are price-driven, so the rule can be replayed. |
-| Washer submeter (candidate) | `sensor.smart_plug_v2_terrace_power`, `sensor.terrace_lavadora_energy_today` | unverified | Probably the washer's plug, which would give per-cycle energy labels. The owner should confirm. |
+| AppDaemon controls | `input_boolean.appdaemon_climate_enable`, `input_number.appdaemon_climate_min_hours_per_day`, `input_boolean.appdaemon_dhw_enable`, `switch.aquarea_force_dhw_mode` | 2024-01 (DHW enable from 2025-03) | At 00:00:40, `climate_control` takes every hour priced below ⅔ of the trailing 7-day mean, or the cheapest `min_hours_per_day` hours if that gives fewer. It runs in `Heat+DHW` **or `Cool+DHW`** mode (`input_select.appdaemon_climate_heat_mode`, which has no value series), and the off mode is `DHW`. `dhw_control` forces DHW at the cheapest hour of each 12-hour block. Both rules are price-driven and can be replayed (see P3 and P4). |
+| Washer energy | `sensor.terrace_lavadora_energy_today` (from 2026-07), `sensor.lavadora_cycles` / `_energy_yesterday` (from 2025-11) | see notes | Daily washer energy labels for P5. `sensor.smart_plug_v2_terrace_power` is **not** the washer: it reported only between April and July 2024, with small loads. |
 | Appliance enums | `sensor.lavadora_*`, `sensor.lavavajillas_*` (status, remaining, delayed start/end) | HA recorder only, extracted since 2026-10-15 | Prometheus has only `hass_entity_info` for the enum states, so history is short and has to be accumulated. |
 
 ## 2. Phases
 
 ```
 P0 headroom ──► P1 harness ──► P2 cheap baselines ──► P4 structured ──► P6 ML/quantiles ──► P7 shadow
-                   ▲                                    ▲                   ▲
-P3 data audit ─────┴────────────────────────────────────┘                   │
+                   ▲                                    ▲   ▲               ▲
+P3 data audit ─────┴────────────────────────────────────┘   │               │
+Price Outlook PO-1/PO-2 (next-day PVPC estimate) ───────────┘               │
 P5 appliance data (passive accumulation starts now) ────────────────────────┘
 ```
 
@@ -68,6 +84,18 @@ The aim is to bound the prize before building anything.
 - **Gate G0:** the owner writes down a minimum worthwhile annual gain before seeing the result. If
   the whole gap is below it, stop after P2, because only near-zero-cost tweaks are justified. Every
   later phase reports its result as a **share of this gap captured**.
+
+**Result (2026-10-25; amounts private).** Runs were made for 2025 and for 2026-01…09, under
+`day_ahead` and `rolling_horizon`, with exact prices.
+- Perfect load knowledge is worth **about a fifth of the battery's net saving** over the
+  no-battery baseline, and the share is similar in both periods and under both policies.
+- The gap is **broad**. It is positive on most days, the ten largest days carry only about
+  13–17 % of it, and every month contributes.
+- It sits in the **most expensive price tercile, mainly 18:00–21:00 local**. A perfect forecast
+  discharges more into the evening peak, partly by charging in different cheap slots.
+- Clipped charge and discharge disappear entirely under perfect load.
+- LF-0's WAPE is about 47 % per slot, with negligible bias.
+- G0 is pending the owner's threshold, which stays outside the repo.
 
 ### P1 — Evaluation harness (≈2–3 days)
 
@@ -110,9 +138,14 @@ All of these are variations of the existing function:
 | `level_adjusted` | Profile × (last 24 h measured ÷ last 24 h profile), clipped. At 14:00 and 20:30 events it also uses today's observed slots. |
 | `blend` | Weighted mix of recent and same-season-last-year profiles |
 
-**Gate G2:** keep the best candidate only if its bootstrap interval for EUR is entirely better than
-LF-0's and it captures a meaningful share of the gap. In that case it becomes the new reference for
-P4. Otherwise LF-0 remains the reference.
+**Gate G2 (pre-registered in each harness run):** the primary policy is `rolling_horizon` and the
+secondary is `day_ahead`. A candidate passes only if, under the primary policy and in **both**
+periods (2025 and 2026-01…09):
+- the 95 % weekly-block-bootstrap interval of its paired daily saving against `trailing_mean` lies
+  entirely above zero, **and**
+- its point estimate is at least 10 % of that period's P0 gap.
+
+The best passing candidate becomes the new reference for P4. Otherwise LF-0 remains the reference.
 
 ### P3 — Sub-load data audit and extraction (≈2 days, parallel with P0–P2)
 
@@ -137,32 +170,88 @@ This phase finds out which part of the load is predictable and where the error c
 - **Gate G3:** P4 goes ahead only if the heat pump (or another observable component) carries a
   material share of the error. If the residual dominates, skip to P5 or P6.
 
-### P4 — Structured component forecaster (LF-1, ≈4–5 days)
+**Result (2026-10-25, #15; tables in the private P3 report).**
+- **Delivered:** 15 entities registered in `ENTITY_SPECS`, none of them default extraction. They
+  were extracted for 2024-01 to 2026-10. The `build-features` subcommand writes a separate
+  slot-aligned feature table with its own manifest.
+  - **Integration rule:** each sample's power is held until the next sample. A span longer than
+    300 s counts as a gap. Coverage of 0.8 or more is `partial`; below that the slot is `unknown`
+    (null, never zero).
+  - `build` now ignores manifests that contain only feature entities, so extracting them never
+    changes the canonical `dataset_id`.
+- **Quality:**
+  - Every series is sampled every 60 s.
+  - The produced/consumed ratios (heat ≈ 4.5, DHW ≈ 2.9, cool ≈ 5.1) confirm that `*_consumed` is
+    electrical input.
+  - `servers + heat_pump ≤ main` fails in 0.16 % of slots. The causes are main-meter dropouts in
+    March 2024 and one stuck heat-pump reading in December 2024, and those slots are excluded from
+    the decomposition.
+- **Decomposition of LF-0 error:**
+
+  | Component | Share of error variance | In the expensive tercile |
+  |---|---|---|
+  | Heat pump | about 65 % | about 61 % |
+  | ↳ DHW | about 32 % | |
+  | ↳ heating | about 18 % | |
+  | ↳ cooling | about 15 % | |
+  | Residual | about 34 % | |
+  | Servers | about 0 % | |
+
+  A perfect heat-pump forecast would remove about half of the price-weighted error. Its share is
+  55–70 % in every season.
+- **G3 passed:** the heat pump is observable and carries the majority of the error.
+- **Correction from P4 planning:** the P3 report treated cooling as unscheduled. In fact
+  `climate_control` schedules cooling as well. See P4 for the replay of the full rule.
+
+### P4 — Structured component forecaster (LF-1, planned 2026-10-25, blocked on Price Outlook)
 
 `forecast = servers + heat_pump + residual`. The residual model is trained on
 `main − servers − heat_pump`, which prevents double counting.
 
-- **Servers:** the trailing 7-day mean, which is nearly constant. Step changes such as a new node
-  are detected and the model refits.
-- **Heat pump, scheduled hours:** replay the `climate_control` and `dhw_control` rules from the
-  day's PVPC prices, `min_hours_per_day` and the enable flags as known at the decision time.
-  - Today's schedule is fixed at 00:00:40.
-  - Tomorrow's can be reconstructed once prices are published (~20:15). At 14:00 it is estimated
-    from the PVPC estimate.
-  - Validate the replay against the observed heat mode and DHW switch history. Version the replayed
-    rule and fall back to LF-0 for this component when they disagree.
-- **Heat pump, energy per scheduled hour:** a binned or degree-hour regression on outdoor
-  temperature and hour, fitted on history. The temperature input must be an as-of forecast.
-  1. **Default, no new source:** persistence, meaning the same hour yesterday as measured.
-  2. **Owner option:** start archiving HA `weather.forecast_home` hourly forecasts now. This needs
-     `weather.get_forecasts`, a service call with a response, so the `ha_guard` allowlist must be
-     reviewed first.
-  3. **Owner option:** backfill from Open-Meteo's historical-forecast archive. This is an external
-     call that sends the home's coordinates.
-- **Residual:** the best P2 model applied to the residual series.
+**Evidence from P3 and the rule replay (private numbers in the P3 report):**
+- The heat pump carries about two thirds of LF-0's error variance, both overall and in the most
+  expensive tercile. Servers carry almost none.
+- `climate_control` schedules **both heating and cooling**. `input_select.appdaemon_climate_heat_mode`
+  switches between `Heat+DHW` and `Cool+DHW`, while the off mode is `DHW`. The real rule takes every
+  hour priced below ⅔ of the trailing 7-day mean price, and falls back to the cheapest
+  `min_hours_per_day` hours when there are fewer than that. Replaying it on enabled days places
+  about 97 % of heating energy and about 98 % of cooling energy inside the selected hours, which
+  cover about half the day. The simplified "cheapest N hours" rule captures less.
+- So **when** the heat pump runs is almost fully known as-of. **How much** it uses per selected hour
+  is the hard part.
+- On disabled days cooling also runs under manual control, and DHW follows its 12-hour rule only
+  partly.
+
+**Steps:**
+
+| Step | Component | As-of inputs | Model |
+|---|---|---|---|
+| P4a | Schedule mask | Published PVPC for the day, trailing 7-day mean price, `min_hours_per_day`, enable flag, mode (heat or cool) inferred from the last 48 h of heat vs cool consumption, because the mode select has no value series | Exact replay of `climate_control`, versioned against the AppDaemon source and validated against observed heat/cool consumption |
+| P4b | Energy per selected hour | Mask, outdoor temperature (as-of), local hour, block length and position, number of selected hours, mode | Degree-hour or binned regression per mode, fitted walk-forward per monthly fold (owner choice: simple first; LightGBM stays in P6) |
+| P4c | DHW | `dhw_control` 12-hour cheapest-slot replay plus trailing profile of the remainder | Rule-hour energy plus profile |
+| P4d | Servers and residual | `main − heat_pump` | Best P2 forecaster |
+| P4e | Fallbacks | Rule disabled, mode unknown, prices or temperature stale | Heat-pump part falls back to LF-0, with the reason recorded in provenance |
+
+**Owner decisions (2026-10-25):**
+- **Temperature:** backtest with persistence, i.e. the same hour yesterday as measured. Start
+  archiving HA `weather.forecast_home` hourly forecasts now, so a real forecast can be evaluated
+  later. That needs the `ha_guard` allowlist to permit the read-only `weather.get_forecasts` call.
+- **No extra climate signals for now.** Leave out thermostat setpoints, zone request temperatures and
+  compressor frequency, and add them only if P4b underperforms.
+- **Model:** simple regression first.
+- **Dependency:** at the 14:00 decision tomorrow's PVPC is not published, so tomorrow's schedule is
+  unknown. The owner wants this solved properly in the
+  [Price Outlook](components/price-outlook.md) first. That means PO-1, decision-time publication
+  snapshots, and PO-2, an early next-day PVPC estimate. **P4 implementation waits for that work.**
+  Then P4a replays tomorrow's rule on the estimated prices, flagged as estimated, before
+  publication.
+
+**Can start now** (passive data collection, independent of the block): the weather-forecast archive,
+and PO-1's PVPC publication snapshots.
+
 - **Gate G4:** the paired EUR result beats the P2 reference with a bootstrap interval that excludes
-  zero, and the result holds in at least one heating and one non-heating season. A mid-run change to
-  the AppDaemon rule is handled by versioning, not by refitting silently.
+  zero, in at least one heating and one cooling season. A mid-run change to the AppDaemon rule is
+  handled by versioning, not by refitting silently.
 
 ### P5 — Appliance-aware signals (LF-2, collect now, evaluate later)
 
@@ -237,8 +326,10 @@ Start only if P2–P5 leave a large share of the P0 gap uncaptured.
 ## 5. Owner decisions needed
 
 1. G0 minimum worthwhile annual gain (kept private, outside the repo).
-2. The temperature source for P4: persistence only, archiving the HA weather forecast, or the
-   Open-Meteo backfill.
-3. Whether the terrace plug meters the washer.
+2. ~~The temperature source for P4~~ — decided: persistence for the backtest, plus archiving the HA
+   weather forecast (see P4).
+3. ~~Whether the terrace plug meters the washer~~ — P3: it does not. It reported only in
+   April–July 2024 and its loads are small. Washer energy labels come from
+   `sensor.terrace_lavadora_energy_today` and the Home Connect counters instead.
 4. The holiday subdivision for `daytype`.
 5. Whether LightGBM may be added as an image dependency (P6 only).
