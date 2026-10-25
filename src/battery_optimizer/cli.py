@@ -91,6 +91,29 @@ def _add_forecast_eval_parser(subs: Any) -> None:
         help="P0 summary.json: its LF-0 minus perfect gaps feed the gate and the share of "
         "the gap captured, and an in-run perfect candidate is checked against it",
     )
+    p.add_argument(
+        "--gate",
+        choices=["G2", "G4"],
+        default="G2",
+        help="Gate to pre-register: G2 (default) or G4, the structured forecaster against a "
+        "reference per season instance",
+    )
+    p.add_argument(
+        "--gate-candidate", default=None, metavar="LABEL", help="G4: the candidate label"
+    )
+    p.add_argument(
+        "--gate-reference",
+        default=None,
+        metavar="LABEL",
+        help="G4: the reference candidate label (default: trailing_mean)",
+    )
+    p.add_argument(
+        "--compare",
+        action="append",
+        default=[],
+        metavar="CANDIDATE=REFERENCE",
+        help="Secondary, non-gating paired comparison by candidate label (repeatable)",
+    )
     p.add_argument("--resamples", type=int, default=None, help="Bootstrap resamples (10000)")
     p.add_argument("--seed", type=int, default=None, help="Bootstrap seed (20261025)")
 
@@ -1071,9 +1094,15 @@ def cmd_forecast_eval(args: argparse.Namespace) -> int:
         resamples=_or_default(args.resamples, forecast_eval.DEFAULT_RESAMPLES),
         seed=_or_default(args.seed, forecast_eval.DEFAULT_SEED),
         data_dir=args.data_dir,
+        gate=args.gate,
+        gate_candidate=args.gate_candidate,
+        gate_reference=args.gate_reference,
+        compare=[tuple(item.split("=", 1)) for item in args.compare],
     )
     summary = json.loads((run_dir / forecast_eval.SUMMARY_JSON_NAME).read_text())
     print(f"forecast-eval: run directory: {run_dir}")
+    if "g4" in summary:
+        print(f"forecast-eval: gate G4: {'PASS' if summary['g4']['passed'] else 'FAIL'}")
     for label, gate in summary["gate"].items():
         if gate.get("reason") == "the reference itself":
             continue

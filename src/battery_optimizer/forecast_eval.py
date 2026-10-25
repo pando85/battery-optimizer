@@ -57,6 +57,9 @@ from battery_optimizer.config import load_config
 from battery_optimizer.load_forecast import (
     DEFAULT_LOAD_FORECASTER,
     FIT_FOLD_RULE,
+    SIDE_INPUT_RULE,
+    SideInputs,
+    build_side_inputs,
     forecast_each_day_at_its_start,
     get_forecaster,
     resolve_forecaster_params,
@@ -110,6 +113,15 @@ MIN_RESAMPLES = 5_000
 BLOCK_DAYS = 7
 CONFIDENCE = 0.95
 GATE_MIN_SHARE_OF_P0_GAP = 0.10
+
+#: Gate G4 (structured forecaster): season definitions, pre-registered before any run.  A
+#: season instance is one period's days in these local months; April, May and October are
+#: transitional and reported only in the whole-period figures.
+G4_SEASONS: dict[str, tuple[int, ...]] = {
+    "heating": (11, 12, 1, 2, 3),
+    "cooling": (6, 7, 8, 9),
+}
+G4_MIN_SEASON_DAYS = 14
 
 #: ``(label, lower_h, upper_h)`` — hours from the decision instant, half-open.
 HORIZON_BUCKETS: tuple[tuple[str, float, float], ...] = (
@@ -197,6 +209,7 @@ class Candidate:
             "oracle": forecaster.oracle,
             "fit": FIT_FOLD_RULE if forecaster.fit is not None else None,
             "intraday_cutoff": forecaster.intraday_cutoff,
+            "side_inputs": SIDE_INPUT_RULE if forecaster.side_loader is not None else None,
         }
 
 
@@ -212,6 +225,7 @@ def parse_candidate(spec: str | Candidate) -> Candidate:
     if isinstance(spec, Candidate):
         return spec
     name, _, rest = str(spec).strip().partition(":")
+    name, _, alias = name.strip().partition("@")
     name = name.strip()
     overrides: dict[str, Any] = {}
     for item in filter(None, (part.strip() for part in rest.split(","))):
@@ -222,10 +236,16 @@ def parse_candidate(spec: str | Candidate) -> Candidate:
     params = resolve_forecaster_params(name, overrides=overrides)
     defaults = dict(get_forecaster(name).defaults)
     changed = {k: v for k, v in params.items() if defaults.get(k) != v}
-    label = name
-    if changed:
-        label += "[" + ",".join(f"{k}={changed[k]}" for k in sorted(changed)) + "]"
+    label = alias.strip() or name
+    if changed and not alias.strip():
+        label += "[" + ",".join(f"{k}={_short(changed[k])}" for k in sorted(changed)) + "]"
     return Candidate(label=label, name=name, params=params, overrides=changed)
+
+
+def _short(value: Any) -> str:
+    """A label-sized value: long strings (feature set ids) keep their first 12 characters."""
+    text = str(value)
+    return text if len(text) <= 16 else text[:12]
 
 
 def _iso(moment: datetime) -> str:
@@ -341,6 +361,7 @@ class _PeriodData:
     month: np.ndarray
     season: np.ndarray
     daytype: np.ndarray
+    table: Any = None
 
 
 def _as_date(label: Any) -> date:
@@ -397,11 +418,12 @@ def _period_data(loaded: bm.LoadedDataset, period: Period, tz: ZoneInfo) -> _Per
         month=np.array([d.strftime("%Y-%m") for d in dates]),
         season=np.array([SEASON_OF_MONTH[d.month] for d in dates]),
         daytype=np.array(["weekend" if d.weekday() >= 5 else "weekday" for d in dates]),
+        table=table,
     )
 
 
 def _instances(
-    candidate: Candidate, data: _PeriodData, policy: str
+    candidate: Candidate, data: _PeriodData, policy: str, side: SideInputs | None = None
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """``(slot index, decision index, forecast)`` of every forecast slot, and the decisions."""
     idx_parts: list[np.ndarray] = []
@@ -419,6 +441,7 @@ def _instances(
             target_days=data.eval_day_idx,
             params=params,
             allow_oracle=True,
+            side=side,
         )
         for j in data.eval_day_idx:
             _label, lo, hi = data.days[j]
@@ -438,6 +461,7 @@ def _instances(
             tz=data.tz,
             load_forecaster=candidate.name,
             load_forecaster_params=rest or None,
+            side=side,
         )
         for ev in data.events:
             forecast, _meta = provider.forecast_for_event(ev)
@@ -453,8 +477,10 @@ def _instances(
     return idx[keep], dec[keep], val[keep], decisions
 
 
-def _accuracy(candidate: Candidate, data: _PeriodData, policy: str) -> dict[str, Any]:
-    idx, dec, forecast, decisions = _instances(candidate, data, policy)
+def _accuracy(
+    candidate: Candidate, data: _PeriodData, policy: str, side: SideInputs | None = None
+) -> dict[str, Any]:
+    idx, dec, forecast, decisions = _instances(candidate, data, policy, side)
     measured = data.load[idx]
     price = data.prices[idx]
     err = forecast - measured
@@ -485,6 +511,62 @@ def _accuracy(candidate: Candidate, data: _PeriodData, policy: str) -> dict[str,
         "by_season": by(data.season[idx], ["DJF", "MAM", "JJA", "SON"]),
         "by_month": by(data.month[idx]),
     }
+
+
+def _diagnostics(
+    candidate: Candidate, data: _PeriodData, side: SideInputs | None
+) -> dict[str, Any] | None:
+    """The forecaster's own component report over the decisions of both policies, or ``None``."""
+    forecaster = get_forecaster(candidate.name)
+    if forecaster.diagnose is None or side is None:
+        return None
+    params = dict(candidate.params)
+    out: dict[str, Any] = {}
+    day_decisions = [
+        {
+            "kind": "00:00",
+            "cutoff_idx": data.days[j][1],
+            "target_days": [j],
+            "start_idx": max(data.days[j][1], data.eval_start),
+            "stop_idx": min(data.days[j][2], data.eval_end),
+        }
+        for j in data.eval_day_idx
+    ]
+    out[bm.POLICY_DAY_AHEAD] = forecaster.diagnose(
+        side=side,
+        load=data.load,
+        usable=data.usable,
+        days=data.days,
+        decisions=day_decisions,
+        params=params,
+    )
+    rolling = []
+    for ev in data.events:
+        touched = [
+            j
+            for j, (_l, lo, hi) in enumerate(data.days)
+            if hi > ev.start_idx and lo < ev.plan_end_idx
+        ]
+        rolling.append(
+            {
+                "kind": str(ev.kind),
+                "cutoff_idx": (
+                    ev.start_idx if forecaster.intraday_cutoff else data.days[touched[0]][1]
+                ),
+                "target_days": touched,
+                "start_idx": ev.start_idx,
+                "stop_idx": ev.plan_end_idx,
+            }
+        )
+    out[bm.POLICY_ROLLING_HORIZON] = forecaster.diagnose(
+        side=side,
+        load=data.load,
+        usable=data.usable,
+        days=data.days,
+        decisions=rolling,
+        params=params,
+    )
+    return out
 
 
 def _folds(data: _PeriodData) -> list[dict[str, Any]]:
@@ -673,6 +755,68 @@ def _evaluate_gate(
     return record
 
 
+def _g4_definition(
+    candidate: str,
+    reference: str,
+    comparisons: Sequence[tuple[str, str]],
+    periods: Sequence[Period],
+) -> dict[str, Any]:
+    """Gate G4, pre-registered: the structured forecaster against the P2 reference."""
+    return {
+        "id": "G4",
+        "candidate": candidate,
+        "reference": reference,
+        "primary_policy": PRIMARY_POLICY,
+        "secondary_policy": SECONDARY_POLICY,
+        "periods": [p.label for p in periods],
+        "seasons": {name: list(months) for name, months in G4_SEASONS.items()},
+        "season_definition": (
+            "local calendar months of each period's days: heating = Nov, Dec, Jan, Feb, Mar; "
+            "cooling = Jun, Jul, Aug, Sep; Apr, May and Oct are transitional (reported in the "
+            "whole-period figures only). A season instance is one period's days in a season"
+        ),
+        "min_season_days": G4_MIN_SEASON_DAYS,
+        "confidence": CONFIDENCE,
+        "rule": (
+            f"{candidate} PASSES if, for the primary policy, the {CONFIDENCE:.0%} weekly "
+            f"block-bootstrap interval of its paired saving against {reference} lies entirely "
+            "above 0 in at least one heating season instance AND at least one cooling season "
+            "instance (blocks of 7 consecutive days of that season instance). Whole-period "
+            "figures, the secondary policy and the comparisons below are reported, not gated"
+        ),
+        "secondary_comparisons": [
+            {"candidate": c, "reference": r, "gating": False} for c, r in comparisons
+        ],
+    }
+
+
+def _season_pairs(
+    reference: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    resamples: int,
+    seed: Sequence[int],
+) -> dict[str, Any]:
+    """Whole-period and per-season paired saving of *candidate* against *reference*."""
+    out: dict[str, Any] = {
+        "period": _paired(reference, candidate, resamples=resamples, seed=(*seed, 0))
+    }
+    days, ref_daily = _daily(reference)
+    _days, cand_daily = _daily(candidate)
+    diff = ref_daily - cand_daily
+    months = np.array([int(d[5:7]) for d in days])
+    for k, (name, selected) in enumerate(G4_SEASONS.items(), start=1):
+        mask = np.isin(months, selected)
+        if int(mask.sum()) < G4_MIN_SEASON_DAYS:
+            out[name] = {"days": int(mask.sum()), "status": "too few days", "holds": False}
+            continue
+        record = block_bootstrap(diff[mask], resamples=resamples, seed=(*seed, k))
+        record["holds"] = bool(record["ci_low_eur"] > 0.0)
+        record["worse"] = bool(record["ci_high_eur"] < 0.0)
+        out[name] = record
+    return out
+
+
 def run_forecast_eval(
     *,
     dataset: Path | str,
@@ -686,6 +830,10 @@ def run_forecast_eval(
     data_dir: Path | str | None = None,
     benchmark_overrides: Mapping[str, Any] | None = None,
     now: datetime | None = None,
+    gate: str = "G2",
+    gate_candidate: str | None = None,
+    gate_reference: str | None = None,
+    compare: Sequence[tuple[str, str]] = (),
 ) -> Path:
     """Pre-register, run and summarise one forecast evaluation; return its directory.
 
@@ -704,7 +852,15 @@ def run_forecast_eval(
         benchmark_overrides: extra ``benchmark_dataset`` keywords (tests use it for
             shorter solver limits); recorded in the pre-registration.
         now: the timestamp of the run directory (tests).
+        gate: ``"G2"`` (default: the P2 gate against LF-0) or ``"G4"``.  Either way the
+            G2 figures are reported; G4 additionally pre-registers and evaluates the
+            structured forecaster *gate_candidate* against *gate_reference* (default LF-0)
+            per season instance.
+        compare: ``(candidate label, reference label)`` pairs reported like G4 but never
+            gated (secondary comparisons).
     """
+    if gate not in ("G2", "G4"):
+        raise ValueError(f"gate must be 'G2' or 'G4', got {gate!r}")
     if not _NAME_RE.match(name):
         raise ValueError(f"forecast-eval name must match {_NAME_RE.pattern}, got {name!r}")
     if int(resamples) < MIN_RESAMPLES:
@@ -723,6 +879,16 @@ def run_forecast_eval(
     if len(set(labels)) != len(labels):
         raise ValueError(f"duplicate candidates: {labels}")
 
+    gate_ref_label = gate_reference or reference.label
+    gate_cand_label = gate_candidate or ""
+    if gate == "G4":
+        for needed in (gate_ref_label, gate_cand_label):
+            if needed not in labels:
+                raise ValueError(f"G4 names {needed!r}, which is not a candidate: {labels}")
+    for pair in compare:
+        for needed in pair:
+            if needed not in labels:
+                raise ValueError(f"comparison names {needed!r}, not a candidate: {labels}")
     dataset_dir = Path(dataset).expanduser()
     cfg_path = Path(config_path).expanduser()
     loaded = bm.load_dataset(dataset_dir, data_dir=data_dir)
@@ -789,6 +955,35 @@ def run_forecast_eval(
         "gate": _gate_definition(p0, periods),
         "p0_reference": p0,
     }
+    side_full: dict[str, SideInputs] = {}
+    for candidate in parsed:
+        built = build_side_inputs(
+            candidate.name, candidate.params, table=loaded.table, data_dir=data_dir
+        )
+        if built is not None:
+            side_full[candidate.label] = built
+    if side_full:
+        from battery_optimizer.structured_forecast import RULE_MIRROR
+
+        config_block["side_inputs"] = {label: side.describe() for label, side in side_full.items()}
+        config_block["structured"] = {
+            "rule_mirror": RULE_MIRROR,
+            "temperature": "persistence: the same local clock hour of the most recent of the "
+            "last three days it was measured by the decision cutoff (usually yesterday)",
+            "price_outlook_for_unpublished_days": "the candidate's price_outlook param "
+            "(persistence), flagged estimated; published prices are used wherever they are "
+            "public at the decision (D+1 from 20:15 local)",
+            "diagnostics": "per policy and decision kind: component WAPE of the heat pump "
+            "(climate, hot water, total) against the LF-0 trailing mean of the same component, "
+            "mask hit-rate (observed climate kWh inside the replayed hours) by price "
+            "provenance, and counts of price provenance and climate / hot-water fallbacks",
+        }
+    if gate == "G4":
+        config_block["gate_g4"] = _g4_definition(gate_cand_label, gate_ref_label, compare, periods)
+    elif compare:
+        config_block["secondary_comparisons"] = [
+            {"candidate": c, "reference": r, "gating": False} for c, r in compare
+        ]
     preregistration = {
         "schema": SCHEMA,
         "kind": "preregistration",
@@ -811,6 +1006,10 @@ def run_forecast_eval(
     for period in periods:
         data = _period_data(loaded, period, tz)
         folds[period.label] = _folds(data)
+        sides = {
+            label: side.slice(data.eval_end) if data.eval_end < side.n else side
+            for label, side in side_full.items()
+        }
         period_out: dict[str, Any] = {
             "window": period.window,
             "price_tercile_edges_eur_per_kwh": list(data.tercile_edges),
@@ -818,7 +1017,11 @@ def run_forecast_eval(
         }
         for candidate in parsed:
             t0 = time.perf_counter()
-            accuracy = {policy: _accuracy(candidate, data, policy) for policy in EVAL_POLICIES}
+            side = sides.get(candidate.label)
+            accuracy = {
+                policy: _accuracy(candidate, data, policy, side) for policy in EVAL_POLICIES
+            }
+            diagnostics = _diagnostics(candidate, data, side)
             t1 = time.perf_counter()
             bench_dir = bm.benchmark_dataset(
                 dataset=loaded.directory,
@@ -837,6 +1040,7 @@ def run_forecast_eval(
             }
             period_out["candidates"][candidate.label] = {
                 "accuracy": accuracy,
+                "diagnostics": diagnostics,
                 "benchmark_run_id": Path(bench_dir).name,
                 "benchmark_dir": str(bench_dir),
                 "_costs": _run_costs(Path(bench_dir)),
@@ -850,6 +1054,8 @@ def run_forecast_eval(
         p0=p0,
         resamples=int(resamples),
         seed=int(seed),
+        g4=config_block.get("gate_g4"),
+        compare=compare,
     )
     summary.update(
         {
@@ -896,6 +1102,8 @@ def _summarise(
     p0: dict[str, Any] | None,
     resamples: int,
     seed: int,
+    g4: dict[str, Any] | None = None,
+    compare: Sequence[tuple[str, str]] = (),
 ) -> dict[str, Any]:
     ref_label = parsed[0].label
     labels = [c.label for c in parsed]
@@ -947,7 +1155,28 @@ def _summarise(
             )
             for policy in EVAL_POLICIES
         }
-        out_periods[period.label] = {**res, "economic": economic, "proxy_check": proxy}
+        pairwise: dict[str, Any] = {}
+        pair_specs = [(g4["candidate"], g4["reference"], "gate")] if g4 else []
+        pair_specs += [(c, r, "secondary") for c, r in compare]
+        for cand_label, ref_name, role in pair_specs:
+            pairwise[f"{cand_label} vs {ref_name}"] = {
+                "role": role,
+                **{
+                    policy: _season_pairs(
+                        costs[ref_name][policy],
+                        costs[cand_label][policy],
+                        resamples=resamples,
+                        seed=(seed, k, 1000 + 10 * len(pairwise) + e),
+                    )
+                    for e, policy in enumerate(EVAL_POLICIES)
+                },
+            }
+        out_periods[period.label] = {
+            **res,
+            "economic": economic,
+            "proxy_check": proxy,
+            "pairwise": pairwise,
+        }
 
     gate_gaps: dict[str, float | None] = {}
     for period in periods:
@@ -1012,12 +1241,40 @@ def _summarise(
             "bit_identical": exact if reproduction else None,
             "periods": reproduction,
         }
-    return {
+    out: dict[str, Any] = {
         "periods": out_periods,
         "gate": gate,
         "in_run_p0_gap_eur": in_run_gaps,
         "sanity": sanity,
     }
+    if g4:
+        key = f"{g4['candidate']} vs {g4['reference']}"
+        instances: dict[str, Any] = {}
+        holds: dict[str, list[str]] = {name: [] for name in G4_SEASONS}
+        for period in periods:
+            record = out_periods[period.label]["pairwise"][key][PRIMARY_POLICY]
+            for name in G4_SEASONS:
+                row = record[name]
+                instances[f"{period.label}/{name}"] = row
+                if row.get("holds"):
+                    holds[name].append(period.label)
+        passed = all(holds[name] for name in G4_SEASONS)
+        out["g4"] = {
+            "id": "G4",
+            "candidate": g4["candidate"],
+            "reference": g4["reference"],
+            "passed": passed,
+            "holds": holds,
+            "instances": instances,
+            "periods": {
+                period.label: {
+                    policy: out_periods[period.label]["pairwise"][key][policy]["period"]
+                    for policy in EVAL_POLICIES
+                }
+                for period in periods
+            },
+        }
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1126,6 +1383,62 @@ def _markdown(
                 f"  - {label}: point {_f(row['point_eur'])}, CI low {_f(row['ci_low_eur'])}, "
                 f"share of P0 gap {_pct(row['share_of_p0_gap'])}"
             )
+    g4 = summary.get("g4")
+    if g4:
+        verdict = "PASS" if g4["passed"] else "FAIL"
+        lines += [
+            "",
+            f"## Gate G4: `{g4['candidate']}` vs `{g4['reference']}`: {verdict}",
+            "",
+            "Primary policy rolling_horizon; a season instance holds when its 95 % interval "
+            "is entirely above zero.",
+            "",
+            f"- seasons holding: {json.dumps(g4['holds'])}",
+        ]
+        for label, row in g4["instances"].items():
+            if "status" in row:
+                lines.append(f"  - {label}: {row['status']} ({row['days']} days)")
+            else:
+                lines.append(
+                    f"  - {label}: {row['days']} days, saving {_f(row['point_eur'])}, "
+                    f"[{_f(row['ci_low_eur'])}, {_f(row['ci_high_eur'])}], "
+                    f"holds {_f(row['holds'])}"
+                )
+    for period in periods:
+        pairwise = summary["periods"][period.label].get("pairwise") or {}
+        if not pairwise:
+            continue
+        lines += ["", f"### Paired comparisons, {period.label}", ""]
+        lines += [
+            "| comparison | role | policy | scope | days | saving | 95 % CI |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for key, record in pairwise.items():
+            for policy in EVAL_POLICIES:
+                for scope in ("period", *G4_SEASONS):
+                    row = record[policy][scope]
+                    if "status" in row:
+                        continue
+                    lines.append(
+                        f"| {key} | {record['role']} | {policy} | {scope} | {row['days']} | "
+                        f"{_f(row['point_eur'])} | [{_f(row['ci_low_eur'])}, "
+                        f"{_f(row['ci_high_eur'])}] |"
+                    )
+    for period in periods:
+        for label, cand in summary["periods"][period.label]["candidates"].items():
+            diag = cand.get("diagnostics")
+            if not diag:
+                continue
+            lines += ["", f"### Component diagnostics, `{label}`, {period.label}", ""]
+            for policy, report in diag.items():
+                lines.append(f"- {policy}: {report['decisions']} decisions")
+                for group, row in report["groups"].items():
+                    cells = ", ".join(
+                        f"{k} {_pct(v) if isinstance(v, float) else v}" for k, v in row.items()
+                    )
+                    lines.append(f"  - {group}: {cells}")
+                for group, row in report["counts"].items():
+                    lines.append(f"  - {group}: {json.dumps(row, sort_keys=True)}")
     lines += ["", "## Sanity", ""]
     for label, by_policy in summary["sanity"]["reference_vs_itself"].items():
         for policy, row in by_policy.items():

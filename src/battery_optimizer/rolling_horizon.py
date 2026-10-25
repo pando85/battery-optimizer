@@ -107,6 +107,7 @@ from .battery import (
 )
 from .load_forecast import (
     DEFAULT_LOAD_FORECASTER,
+    SideInputs,
     get_forecaster,
     resolve_forecaster_params,
     run_forecaster,
@@ -911,6 +912,7 @@ class CausalForecastProvider:
         tz: ZoneInfo | None = None,
         load_forecaster: str = DEFAULT_LOAD_FORECASTER,
         load_forecaster_params: Mapping[str, Any] | None = None,
+        side: SideInputs | None = None,
     ) -> None:
         """Initialize the provider with the full dataset.
 
@@ -927,6 +929,9 @@ class CausalForecastProvider:
                 the default is LF-0, the day-ahead rung's trailing slot mean.
             load_forecaster_params: param overrides for *load_forecaster*, applied on
                 top of its defaults and ``window_days``.
+            side: side inputs for a forecaster registered with ``side_loader=``
+                (:func:`battery_optimizer.load_forecast.build_side_inputs`); it only ever
+                sees the as-of view of them.
         """
         self._load = np.asarray(load_kwh, dtype=float).reshape(-1)
         self._local_days = list(local_days)
@@ -940,6 +945,7 @@ class CausalForecastProvider:
             load_forecaster, window_days=self._window_days, overrides=load_forecaster_params
         )
         self._day_bounds = contiguous_day_bounds(self._local_days)
+        self._side = side
         # Cache: (cutoff_idx, window_days) -> (forecast, metadata)
         # Two events on the same local day produce identical forecasts, so we cache
         # to avoid redundant full-dataset fits.  The cache key includes window_days
@@ -1030,6 +1036,7 @@ class CausalForecastProvider:
             target_days=targets,
             params=self._forecaster_params,
             allow_oracle=True,
+            side=self._side,
         )
         forecast, per_day_diag = result.values, result.per_day
 
@@ -1127,6 +1134,13 @@ class CausalForecastProvider:
                 "leaks D's measured load into D+1's fit).  Conservative and correct."
             ),
         }
+
+        if self._forecaster.side_loader is not None:
+            # What each horizon day was built from: prices published or estimated, and
+            # whether each component was structured or fell back (reason included).
+            metadata["horizon_forecaster_labels"] = [
+                dict(d.get("labels") or {}) for d in horizon_diag
+            ]
 
         # Cache the result (without event-specific fields, which are added on retrieval)
         base_metadata = dict(metadata)
@@ -1524,6 +1538,7 @@ def run_rolling_horizon(
     load_forecaster_params: Mapping[str, Any] | None = None,
     price_outlook: str = DEFAULT_PRICE_OUTLOOK,
     price_outlook_params: Mapping[str, Any] | None = None,
+    load_forecaster_side: SideInputs | None = None,
 ) -> RollingResult:
     """Run the rolling horizon dispatcher.
 
@@ -1664,6 +1679,7 @@ def run_rolling_horizon(
             tz=tz,
             load_forecaster=load_forecaster,
             load_forecaster_params=load_forecaster_params,
+            side=load_forecaster_side,
         )
         forecast_metadata = {
             "method": causal_provider.method,
@@ -1854,6 +1870,11 @@ def run_rolling_horizon(
                 zero_support_events += 1
             forecast_metadata["events_served"] = causal_events_served
             forecast_metadata["zero_support_events"] = zero_support_events
+            for day_labels in event_forecast_meta.get("horizon_forecaster_labels") or ():
+                label_counts = forecast_metadata.setdefault("forecaster_labels", {})
+                for label_field, label_value in day_labels.items():
+                    label_key = f"{ev.kind}/{label_field}={label_value}"
+                    label_counts[label_key] = label_counts.get(label_key, 0) + 1
             # Record the first event that produced a forecast for the run-level audit.
             if "first_event_cutoff_idx" not in forecast_metadata:
                 for key in (
