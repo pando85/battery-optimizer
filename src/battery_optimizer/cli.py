@@ -116,6 +116,44 @@ def build_parser() -> argparse.ArgumentParser:
         "assumption, which then requires registered battery telemetry to establish gross load",
     )
 
+    # -- build-features ---------------------------------------------------
+    p_feat = subs.add_parser(
+        "build-features",
+        help="Build the slot-aligned sub-load feature table (separate from the canonical dataset)",
+    )
+    _add_common(p_feat)
+    p_feat.add_argument("--start", required=True, help="Start time (ISO 8601 UTC, 15-min aligned)")
+    p_feat.add_argument("--end", required=True, help="End time (ISO 8601 UTC, 15-min aligned)")
+    p_feat.add_argument(
+        "--dataset",
+        default=None,
+        help="Canonical dataset directory: also write the servers + heat pump <= main-meter check",
+    )
+    p_feat.add_argument(
+        "--max-gap-seconds",
+        type=float,
+        default=None,
+        help="A span between two samples longer than this is a gap, not held (default 300)",
+    )
+    p_feat.add_argument(
+        "--min-coverage",
+        type=float,
+        default=None,
+        help="Below this covered fraction of a slot, a value is unknown (default 0.8)",
+    )
+
+    # -- decompose-load ---------------------------------------------------
+    p_dec = subs.add_parser(
+        "decompose-load",
+        help="Private report: share of load and of LF-0 error per sub-load (P3 of the plan)",
+    )
+    _add_common(p_dec)
+    p_dec.add_argument("--features", required=True, help="Feature-set directory (build-features)")
+    p_dec.add_argument("--dataset", required=True, help="Canonical dataset directory")
+    p_dec.add_argument(
+        "--window-days", type=int, default=28, help="LF-0 trailing window in local days (28)"
+    )
+
     # -- benchmark --------------------------------------------------------
     p_bench = subs.add_parser("benchmark", help="Run policy benchmarks on a dataset")
     _add_common(p_bench)
@@ -818,6 +856,46 @@ def cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build_features(args: argparse.Namespace) -> int:
+    """Build the sub-load feature table next to (never inside) the canonical datasets."""
+    from battery_optimizer import features
+
+    kwargs: dict[str, Any] = {}
+    if args.max_gap_seconds is not None:
+        kwargs["max_gap_seconds"] = args.max_gap_seconds
+    if args.min_coverage is not None:
+        kwargs["min_coverage"] = args.min_coverage
+    try:
+        directory = features.build_features(
+            data_dir=args.data_dir,
+            start=args.start,
+            end=args.end,
+            dataset=args.dataset,
+            **kwargs,
+        )
+    except features.FeatureError as exc:
+        raise ValueError(str(exc)) from exc
+    print(f"build-features: feature set directory: {directory}")
+    return 0
+
+
+def cmd_decompose_load(args: argparse.Namespace) -> int:
+    """Write the private decomposition report for a feature set and a canonical dataset."""
+    from battery_optimizer import features, load_decomposition
+
+    try:
+        out_dir = load_decomposition.write_report(
+            features_dir=args.features,
+            dataset_dir=args.dataset,
+            data_dir=args.data_dir,
+            window_days=args.window_days,
+        )
+    except features.FeatureError as exc:
+        raise ValueError(str(exc)) from exc
+    print(f"decompose-load: report directory: {out_dir}")
+    return 0
+
+
 def _or_default(value: float | int | None, default: float | int) -> float | int:
     """Take the module's default when the flag was not given (0 is a real value)."""
     return default if value is None else value
@@ -1250,6 +1328,8 @@ _HANDLERS = {
     "extract": cmd_extract,
     "validate": cmd_validate,
     "build": cmd_build,
+    "build-features": cmd_build_features,
+    "decompose-load": cmd_decompose_load,
     "benchmark": cmd_benchmark,
     "report": cmd_report,
     "inspect-sql": cmd_inspect_sql,
