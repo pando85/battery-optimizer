@@ -11,7 +11,14 @@ how identities map, and the caveats when comparing old artifacts.
 | [0001](adr/0001-home-battery-economic-dispatch.md) | Forecast-informed economic dispatch | Proposed |
 | [0002](adr/0002-appliance-aware-load-forecasting.md) | Appliance-aware load forecasting | Proposed |
 | [0003](adr/0003-phase1-measurement-and-baseline.md) | Phase 1 measurement and baseline | Accepted (2026-10-23) |
-| [0004](adr/0004-battery-optimizer-production-architecture.md) | Production runtime and independent source repository | Proposed |
+| [0004](adr/0004-battery-optimizer-production-architecture.md) | Production runtime and independent source repository | Accepted (2026-10-25; software architecture, shadow only) |
+
+## Delivery snapshot (2026-10-25)
+
+- **Application and releases:** v0.2.1 published with wheel, sdist and multi-arch OCI image; associated CI, image and scan jobs succeeded. See [releases](https://github.com/pando85/battery-optimizer/releases).
+- **Deployed via homelab GitOps:** a daily extract/validate/periodic-build CronJob and resident read-only shadow service, using a ZFS PVC, ServiceMonitor, Grafana dashboard and alert rules. See the [operator runbook](https://github.com/pando85/homelab/blob/master/docs/deployment/battery-optimizer.md).
+- **Not accepted yet:** repeated unattended pipeline success, alert and backup-restore drills, two-week live native-battery shadow comparison. The service uses **simulated SOC** before Marstek/Omnibattery commissioning. **No device writer or live dispatch exists.**
+- **Release policy follow-up:** image publication runs independently of the CI workflow and a tagged release does not require the scan job to pass, although v0.2.1 checks succeeded. See the [production gates](planning/home-battery-optimizer-implementation.md#16-production-packaging-and-runtime-rollout).
 
 ## Service
 
