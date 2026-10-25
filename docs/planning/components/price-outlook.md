@@ -3,7 +3,7 @@
 - **Status (2026-10-25):** V0 published-price adapter built; live estimation of unpublished prices **does not exist**.
 - **Domain responsibility:** provide the electricity-price curve **available at decision time**, including publication cutoff and (only in a later phase) clearly marked estimates beyond that cutoff.
 - **Current code:** `src/battery_optimizer/service/pvpc.py` (`PriceCurve`, `parse_pvpc_state`); offline publication/price-noise experiments in `src/battery_optimizer/rolling_horizon.py`.
-- **Execution plan:** [Price Outlook improvement plan](../price-outlook-improvement-plan.md) (phases PO-A…PO-E with gates).
+- **Execution plan:** [Price Outlook improvement plan](../price-outlook-improvement-plan.md) (phases PO-A…PO-E with gates). **Parked 2026-10-25** with the Load Forecaster plan; the OMIE estimator is built and passed gate GC.
 - **Architecture:** [four DECIDE components](../../architecture.md#planning-components); [implementation plan](../home-battery-optimizer-implementation.md); [price experiment records](../energy-baseline-forecast-experiments.md).
 
 ## Contract and non-goals

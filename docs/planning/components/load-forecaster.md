@@ -3,7 +3,7 @@
 - **Status (2026-10-25):** V0 implemented; enhancements proposed, not implemented.
 - **Domain responsibility:** forecast **gross household demand** in kWh per aligned 15-minute UTC slot, as information existed when a decision was made.
 - **Current code:** `src/battery_optimizer/load_forecast.py` (forecaster registry and `run_forecaster` seam: `trailing_mean` = LF-0, `perfect` = offline oracle), `src/battery_optimizer/service/history.py` (`LoadForecast`, `forecast_load`), `src/battery_optimizer/policies.py` (`forecast_load_trailing_slot_mean`), `src/battery_optimizer/rolling_horizon.py` (causal/frozen offline evaluation), `src/battery_optimizer/ha_states.py` (as-of appliance-state reader).
-- **Execution plan:** [Load Forecaster improvement plan](../load-forecaster-improvement-plan.md) (phases P0–P7 with gates).
+- **Execution plan:** [Load Forecaster improvement plan](../load-forecaster-improvement-plan.md) (phases P0–P7 with gates). **Parked 2026-10-25**: LF-0 stays; see the plan's §6 for why and when to resume.
 - **Architecture:** [four DECIDE components](../../architecture.md#planning-components); [ADR-0002](../../adr/0002-appliance-aware-load-forecasting.md); [implementation TODO-3.1–3.9](../home-battery-optimizer-implementation.md#6-phase-3--predict-demand-only-if-it-creates-savings).
 
 ## Contract and non-goals
