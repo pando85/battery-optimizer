@@ -624,7 +624,7 @@ class TestInspectSQL:
     def test_report_states_the_utc_scoped_horizon(self, tmp_path: Path) -> None:
         """The horizon's calendar scope is stated, not implied by ``Z`` labels.
 
-        The README rule: a report must say the scope is UTC-scoped when the bounds are
+        The docs/benchmark.md rule: a report must say the scope is UTC-scoped when the bounds are
         UTC instants rather than leave the reader to infer it.  The fixture's bounds are
         2026-01-03 → 2026-01-08 UTC, which are 01:00 Europe/Madrid — a local day is cut
         on both edges, so the note must say the window is not a local calendar year.

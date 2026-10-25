@@ -1595,8 +1595,8 @@ def extract_ha_history(
             f"{index.prior_distinct_keys} distinct logical key(s), i.e. the store already "
             "held these duplicates before this run. They pre-date cross-run dedup. This run "
             "cannot repair them and will not try to: stored parts are immutable, never "
-            "rewritten, deleted or appended to. Auditable offline; see the energy-baseline "
-            "README, 'Overlapping re-extraction'."
+            "rewritten, deleted or appended to. Auditable offline; see docs/known-issues.md, "
+            "'Overlapping re-extraction is deduplicated at row level'."
         )
         log.warning(
             "the store already holds %d duplicate HA row(s) from extractions made before "
