@@ -24,6 +24,12 @@ immutable store and stored benchmark JSONs embed its path). The legacy `ENERGY_B
 environment variables are still honoured as a deprecated fallback (`DeprecationWarning`); the
 `BATTERY_OPTIMIZER_*` name wins when both are set.
 
+**Code identity without git (container images).** Lineage records the commit via
+`git rev-parse HEAD`. Where git is unavailable, set `BATTERY_OPTIMIZER_GIT_SHA` at build time to a
+40-character lowercase commit SHA (optionally suffixed `-dirty`); it is used only when git cannot
+answer, a malformed value raises `ValueError`, and with neither the identity is the
+`nogit@battery-optimizer==<version>` sentinel.
+
 **Development (this repo, local runs):** data lives under `/tmp/opencode/energy-baseline`
 (chmod 0700, ephemeral, wiped on reboot). Used for first-extraction milestones and
 offline tests. All files written with mode 0600, dirs with 0700.

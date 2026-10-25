@@ -125,8 +125,37 @@ def _package_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+#: Environment variable carrying a commit identity baked in at build time, for
+#: environments with no git (e.g. a container image built from a clean checkout).
+GIT_SHA_ENV_VAR = "BATTERY_OPTIMIZER_GIT_SHA"
+
+_GIT_SHA_ENV_RE = re.compile(r"[0-9a-f]{40}(-dirty)?")
+
+
+def _build_time_code_version() -> tuple[str, bool] | None:
+    """Parse :data:`GIT_SHA_ENV_VAR` into ``(sha, dirty)``; ``None`` when unset/empty.
+
+    The value must be a full lowercase 40-hex commit SHA, optionally followed by
+    ``-dirty``.  Anything else raises :class:`ValueError`: a malformed identity must
+    fail loudly rather than be recorded as lineage.
+    """
+    raw = os.environ.get(GIT_SHA_ENV_VAR)
+    if not raw:
+        return None
+    if _GIT_SHA_ENV_RE.fullmatch(raw) is None:
+        raise ValueError(
+            f"{GIT_SHA_ENV_VAR}={raw!r} is not a 40-character lowercase hex commit SHA "
+            f"optionally followed by {DIRTY_SUFFIX!r}"
+        )
+    return raw[:40], raw.endswith(DIRTY_SUFFIX)
+
+
 def _get_code_version() -> tuple[str | None, bool | None]:
-    """Best-effort git rev-parse HEAD using the **package** directory.
+    """Best-effort code identity as ``(commit_sha, dirty)``.
+
+    Precedence: (1) ``git rev-parse HEAD`` using the **package** directory; (2) when
+    git is unavailable, the build-time :data:`GIT_SHA_ENV_VAR` (see
+    :func:`_build_time_code_version`); (3) ``(None, None)``.
 
     Uses the package location (not cwd) so the version is deterministic
     regardless of where the process is invoked from.  Dirty check
@@ -151,7 +180,7 @@ def _get_code_version() -> tuple[str | None, bool | None]:
         dirty = bool(dirty_output.strip())
         return rev, dirty
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return None, None
+        return _build_time_code_version() or (None, None)
 
 
 def _ensure_private_dir(path: Path) -> None:
@@ -298,9 +327,11 @@ def code_version() -> str:
     """Single shared code identity for lineage, including an unambiguous dirty marker.
 
     Clean working tree: the bare 40-character commit SHA.  Dirty tree: the SHA
-    followed by :data:`DIRTY_SUFFIX` (``-dirty``).  Git unavailable: the sentinel
-    :data:`NO_GIT_MARKER` (``nogit``) followed by the package distribution
-    version, so "nothing is known" can never be mistaken for a clean tree.
+    followed by :data:`DIRTY_SUFFIX` (``-dirty``).  Git unavailable: the build-time
+    :data:`GIT_SHA_ENV_VAR` value (validated, returned verbatim, so a container image
+    stays distinguishable per build); neither: the sentinel :data:`NO_GIT_MARKER`
+    (``nogit``) followed by the package distribution version, so "nothing is known"
+    can never be mistaken for a clean tree.
 
     Used by both :mod:`build` and :mod:`benchmark` so a dirty tree produces a
     different ``dataset_id`` from a clean one — the reproducibility guarantee

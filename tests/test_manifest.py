@@ -538,3 +538,138 @@ class TestCodeVersionHelper:
         )
         assert build_mod.code_version() == bm.code_version()
         assert build_mod.code_version() == "b" * 40 + "-dirty"
+
+
+class TestBuildTimeCodeIdentity:
+    """``BATTERY_OPTIMIZER_GIT_SHA`` is used only when git is unavailable."""
+
+    SHA = "c" * 40
+    ENV = "BATTERY_OPTIMIZER_GIT_SHA"
+
+    @staticmethod
+    def _no_git(monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess
+
+        def boom(*args, **kwargs):
+            raise FileNotFoundError("git")
+
+        monkeypatch.setattr(subprocess, "check_output", boom)
+
+    @staticmethod
+    def _git(monkeypatch: pytest.MonkeyPatch, rev: str, porcelain: bytes) -> None:
+        import subprocess
+
+        def fake(cmd, **kwargs):
+            return (rev.encode() + b"\n") if cmd[1] == "rev-parse" else porcelain
+
+        monkeypatch.setattr(subprocess, "check_output", fake)
+
+    @staticmethod
+    def _config(tmp_path: Path) -> Path:
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("version: 1\n")
+        return cfg
+
+    @staticmethod
+    def _manifest(cfg: Path):
+        return new_manifest(
+            source="prometheus",
+            config_path=cfg,
+            params={},
+            entities=[],
+            source_window_start="2026-01-01T00:00:00Z",
+            source_window_end="2026-01-02T00:00:00Z",
+            started_at="2026-01-01T00:00:00Z",
+        )
+
+    def test_git_wins_over_env(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from battery_optimizer.manifest import code_version
+
+        self._git(monkeypatch, "a" * 40, b"")
+        monkeypatch.setenv(self.ENV, self.SHA)
+        assert code_version() == "a" * 40
+        m = self._manifest(self._config(tmp_path))
+        assert (m.code_version, m.code_dirty) == ("a" * 40, False)
+
+    def test_git_wins_even_when_env_invalid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from battery_optimizer.manifest import code_version
+
+        self._git(monkeypatch, "a" * 40, b" M x.py\n")
+        monkeypatch.setenv(self.ENV, "not-a-sha")
+        assert code_version() == "a" * 40 + "-dirty"
+
+    def test_env_used_when_git_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from battery_optimizer.manifest import code_version
+
+        self._no_git(monkeypatch)
+        monkeypatch.setenv(self.ENV, self.SHA)
+        assert code_version() == self.SHA
+        m = self._manifest(self._config(tmp_path))
+        assert (m.code_version, m.code_dirty) == (self.SHA, False)
+
+    def test_env_used_when_not_a_git_repo(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess
+
+        from battery_optimizer.manifest import code_version
+
+        def not_a_repo(cmd, **kwargs):
+            raise subprocess.CalledProcessError(128, cmd)
+
+        monkeypatch.setattr(subprocess, "check_output", not_a_repo)
+        monkeypatch.setenv(self.ENV, self.SHA)
+        assert code_version() == self.SHA
+
+    def test_env_dirty_suffix(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from battery_optimizer.manifest import code_version
+
+        self._no_git(monkeypatch)
+        monkeypatch.setenv(self.ENV, self.SHA + "-dirty")
+        assert code_version() == self.SHA + "-dirty"
+        m = self._manifest(self._config(tmp_path))
+        assert (m.code_version, m.code_dirty) == (self.SHA, True)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "abc123",  # short SHA
+            "C" * 40,  # uppercase
+            "g" * 40,  # non-hex
+            "c" * 41,
+            "c" * 40 + "-DIRTY",
+            "c" * 40 + "-dirty-dirty",
+            "c" * 40 + "\n",
+            " " + "c" * 40,
+        ],
+    )
+    def test_invalid_env_raises(self, monkeypatch: pytest.MonkeyPatch, bad: str) -> None:
+        from battery_optimizer.manifest import code_version
+
+        self._no_git(monkeypatch)
+        monkeypatch.setenv(self.ENV, bad)
+        with pytest.raises(ValueError, match=self.ENV):
+            code_version()
+
+    def test_invalid_env_raises_from_new_manifest(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._no_git(monkeypatch)
+        monkeypatch.setenv(self.ENV, "nope")
+        with pytest.raises(ValueError, match=self.ENV):
+            self._manifest(self._config(tmp_path))
+
+    @pytest.mark.parametrize("value", [None, ""])
+    def test_neither_gives_sentinel(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: str | None
+    ) -> None:
+        from battery_optimizer.manifest import code_version
+
+        self._no_git(monkeypatch)
+        if value is None:
+            monkeypatch.delenv(self.ENV, raising=False)
+        else:
+            monkeypatch.setenv(self.ENV, value)
+        assert code_version().startswith("nogit@battery-optimizer==")
+        m = self._manifest(self._config(tmp_path))
+        assert (m.code_version, m.code_dirty) == (None, None)
