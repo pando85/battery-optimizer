@@ -1,9 +1,9 @@
 # Load Forecaster — improvement plan
 
-- **Status (2026-10-25):** P0 and P3 are done. The P1 forecaster seam (`load_forecast.py`) and the
+- **Status (2026-10-25):** P0, P2 and P3 are done; P2 failed G2, so LF-0 stays the reference. The P1 forecaster seam (`load_forecast.py`) and the
   P1 evaluation harness (`forecast-eval`, see
   [Benchmark reference](../benchmark.md#forecast-evaluation-forecast-eval)) are built. The P0 run
-  is done and its results are private. P2 waits for the harness. P4 is unblocked: the
+  is done and its results are private. P4 is in progress and unblocked: the
   [Price Outlook](price-outlook-improvement-plan.md) gate GA failed, so P4 does not wait for an
   OMIE estimate. The plan refines the
 - **Question:** can a better household load forecast reduce the planned battery's net cost, and by
@@ -19,7 +19,7 @@
 |---|---|---|---|
 | P0 headroom | **Done** | `perfect` oracle in #14; private run `forecast-eval/p0-*` | G0: owner threshold pending |
 | P1 harness | Seam **done** (#14); harness in review (#16) | `load_forecast.py`, `forecast-eval` | G1: seam passed (bit-identical, leakage test) |
-| P2 cheap candidates | Pending P1 | — | G2 pre-registered (see P2) |
+| P2 cheap candidates | **Done, G2 failed** | this document, §P2 | G2 |
 | P3 sub-load audit | **Done** | #15: `build-features`, `load_decomposition.py`; private feature set and P3 report | **G3 passed** |
 | P4 structured forecaster | **Planned, unblocked** (Price Outlook GA failed) | this document, §P4 | G4 |
 | P5–P7 | Not started (P5 collection continues passively) | — | — |
@@ -148,6 +148,22 @@ periods (2025 and 2026-01…09):
 
 The best passing candidate becomes the new reference for P4. Otherwise LF-0 remains the reference.
 
+**Result (2026-10-25, private run `forecast-eval/p2-candidates-*`, PR #19):**
+- 15 parametrisations were evaluated (`trailing_mean` windows 7/14/56, `trailing_median` 14/28,
+  `trailing_trimmed_mean`, `ewma` half-lives 3/7/14, `daytype` N 4/6/8, `level_adjusted`, `blend`
+  0.5/0.75). **None passes G2.**
+- Closest: `trailing_median` (28 days) passes both criteria in 2026-01…09 (about 14 % of the gap)
+  but is slightly negative in 2025 with an interval including zero. With 15 comparisons and no
+  multiplicity correction, the near-pass would not survive one anyway.
+- Most candidates land within about ±10 % of the P0 gap with intervals including zero; `blend` and
+  the 56-day window are worse than LF-0. The best candidate captures only about 5 % of the summed
+  gap. The median family's gain comes from a lower, biased profile in the expensive tercile.
+- MAE and price-weighted error rank candidates almost identically (correlation 0.97–0.99) and agree
+  with EUR on the top three, so they are fit for shortlisting but not for deciding.
+- **Conclusion:** cheap reshaping of the same profile is exhausted; the gap needs new information
+  (P3/P4 sub-loads). **LF-0 stays the P4 reference**; `trailing_median` is reported beside it as a
+  secondary, non-gating comparison.
+
 ### P3 — Sub-load data audit and extraction (≈2 days, parallel with P0–P2)
 
 This phase finds out which part of the load is predictable and where the error comes from.
@@ -230,7 +246,7 @@ This phase finds out which part of the load is predictable and where the error c
 | P4a | Schedule mask | Published PVPC for the day, trailing 7-day mean price, `min_hours_per_day`, enable flag, mode (heat or cool) inferred from the last 48 h of heat vs cool consumption, because the mode select has no value series | Exact replay of `climate_control`, versioned against the AppDaemon source and validated against observed heat/cool consumption |
 | P4b | Energy per selected hour | Mask, outdoor temperature (as-of), local hour, block length and position, number of selected hours, mode | Degree-hour or binned regression per mode, fitted walk-forward per monthly fold (owner choice: simple first; LightGBM stays in P6) |
 | P4c | DHW | `dhw_control` 12-hour cheapest-slot replay plus trailing profile of the remainder | Rule-hour energy plus profile |
-| P4d | Servers and residual | `main − heat_pump` | Best P2 forecaster |
+| P4d | Servers and residual | `main − heat_pump` | P2 reference (LF-0, since G2 failed); `trailing_median` as a secondary variant |
 | P4e | Fallbacks | Rule disabled, mode unknown, prices or temperature stale | Heat-pump part falls back to LF-0, with the reason recorded in provenance |
 
 **Owner decisions (2026-10-25):**
