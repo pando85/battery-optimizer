@@ -31,6 +31,13 @@ Components
   or no fitted model make the climate part fall back to LF-0 (the trailing mean of the climate
   series).  The hot-water part falls back the same way.  Every fallback and its reason is
   recorded per target day.  Without side inputs the forecast is LF-0 of the main load.
+* **Second look (P4 second pass, all off by default so the first P4 results reproduce)**:
+  ``price_outlook="omie_period"`` replays the schedule of tomorrow on the OMIE-based price
+  estimate (PO-C) instead of on ``persistence``; ``disabled_fallback="disabled_history"``
+  forecasts the climate part of a day whose rule is disabled from the recent *disabled-state*
+  days instead of from the trailing mean of every day (which still carries the climate energy of
+  the enabled days before it); ``climate_lf0_season="heating"`` is the seasonal hybrid: on the
+  days of that season the climate part is the LF-0 trailing mean even when the rule is enabled.
 
 All information is as-of the cutoff of the seam: this forecaster declares an intraday cutoff,
 so the 14:00 and 20:30 events see the slots of their own day before the event.  Prices of the
@@ -67,6 +74,7 @@ from .load_forecast import (
 from .policies import DEFAULT_FORECAST_WINDOW_DAYS, trailing_slot_mean_for_day
 from .price_outlook import (
     SLOT_ESTIMATED,
+    OutlookSide,
     get_price_outlook,
     run_price_outlook,
 )
@@ -76,6 +84,8 @@ __all__ = [
     "DHW_RULE_VERSIONS",
     "RULE_MIRROR",
     "ClimateRuleVersion",
+    "COOLING_MONTHS",
+    "HEATING_MONTHS",
     "ClimateSchedule",
     "DhwRuleVersion",
     "block_positions",
@@ -155,6 +165,15 @@ RULE_MIRROR = {
     "cheap_limit_fraction_of_trailing_mean": "2/3",
     "decision_time_local": "00:00:40",
 }
+
+#: Local months of the pre-registered seasons (gate G4; the shoulder months Apr, May and Oct
+#: belong to neither).  ``forecast_eval.G4_SEASONS`` repeats them and a test pins that.
+HEATING_MONTHS = (11, 12, 1, 2, 3)
+COOLING_MONTHS = (6, 7, 8, 9)
+_SEASON_MONTHS = {"": (), "heating": HEATING_MONTHS, "cooling": COOLING_MONTHS}
+DISABLED_FALLBACKS = ("lf0", "disabled_history")
+#: A prior day counts as a disabled-state sample only with at least this share of its slots usable.
+DISABLED_MIN_KNOWN_FRACTION = 0.9
 
 SLOTS_PER_HOUR = 4
 #: The mode is read from the last 48 h of measured heat and cool energy.
@@ -506,6 +525,52 @@ def _climate_schedule_for_day(
     return schedule, "", version.label
 
 
+def disabled_state_profile(
+    climate_series: np.ndarray,
+    keep: np.ndarray,
+    enable: np.ndarray,
+    days: Sequence[tuple[Any, int, int]],
+    j: int,
+    *,
+    history_days: int,
+    lookback_days: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Climate energy of day *j* from the recent days whose rule was **disabled**.
+
+    The slot-wise mean over the last *history_days* complete local days within *lookback_days*
+    before day *j* whose enable flag, read at the day's first slot, is 0 (a day with fewer than
+    :data:`DISABLED_MIN_KNOWN_FRACTION` of its slots usable is skipped).  With no such day the
+    profile is zero: a disabled rule that nobody has been running by hand adds no climate
+    energy, and the trailing mean of *every* day would carry the enabled days' energy into it.
+
+    *climate_series* and *keep* are the history the decision knows (cut at the local midnight
+    of the cutoff's day), so a day past that cut is never complete and never a sample.
+    """
+    known = int(keep.size)
+    chosen: list[int] = []
+    for k in range(j - 1, max(-1, j - 1 - int(lookback_days)), -1):
+        _label, lo, hi = days[k]
+        if hi > known or not (np.isfinite(enable[lo]) and enable[lo] == 0.0):
+            continue
+        if keep[lo:hi].mean() < DISABLED_MIN_KNOWN_FRACTION:
+            continue
+        chosen.append(k)
+        if len(chosen) >= int(history_days):
+            break
+    chosen_keep = np.zeros(known, dtype=bool)
+    for k in chosen:
+        lo, hi = days[k][1], days[k][2]
+        chosen_keep[lo:hi] = keep[lo:hi]
+    window = (j - min(chosen)) if chosen else 1
+    values, _record = trailing_slot_mean_for_day(climate_series, chosen_keep, days, j, window)
+    return values, {
+        "samples": len(chosen),
+        "history_days": int(history_days),
+        "lookback_days": int(lookback_days),
+        "source": "disabled_state_mean" if chosen else "zero_no_disabled_history",
+    }
+
+
 def replay_mask_for_day(
     view: SideView,
     days: Sequence[tuple[Any, int, int]],
@@ -717,6 +782,13 @@ def _working_prices(
             interval_starts_utc=view.interval_starts_utc,
             days=days,
             tz=view.tz,
+            # The view already holds only the OMIE days usable at the cutoff; the seam cuts it
+            # again at the decision instant, which is the same instant.
+            side=(
+                None
+                if view.omie_eur_per_kwh is None
+                else OutlookSide(view.omie_eur_per_kwh, fingerprint="as-of view")
+            ),
         )
         start = max(cut, published)
         values = result.values[start - cut :]
@@ -746,6 +818,10 @@ def _parts(
     residual_forecaster: str,
     price_outlook: str,
     calibration_days: int,
+    disabled_fallback: str = "lf0",
+    disabled_history_days: int = 28,
+    disabled_lookback_days: int = 60,
+    climate_lf0_season: str = "",
 ) -> list[_DayParts]:
     """The structured forecast of *targets* by component, knowing only what *view* shows."""
     heat = view.series["hp_heat_kwh"]
@@ -782,6 +858,7 @@ def _parts(
     h_m, c_m, d_m, keep_m = _known(midnight)
     climate_series = np.where(keep_m, h_m + c_m, 0.0)
     dhw_series = np.where(keep_m, d_m, 0.0)
+    hybrid_months = _SEASON_MONTHS[climate_lf0_season]
 
     mode, mode_reason = infer_mode(heat, cool, cut)
     prices_arr, provenance = _working_prices(view, days, cut, targets, price_outlook)
@@ -828,12 +905,26 @@ def _parts(
             climate_reason = "min_hours_unknown"
         elif mode is None:
             climate_reason = mode_reason
+        elif _as_date(label).month in hybrid_months:
+            climate_reason = "season_hybrid"
         elif provenance[j] == "unavailable":
             climate_reason = "prices_unavailable"
         else:
             schedule, climate_reason, rule_label = _climate_schedule_for_day(
                 j=j, view=view, days=days, prices=prices, min_hours=hours_flag
             )
+        if climate_reason == "rule_disabled" and disabled_fallback == "disabled_history":
+            climate, history_record = disabled_state_profile(
+                climate_series,
+                keep_m,
+                enable,
+                days,
+                j,
+                history_days=int(disabled_history_days),
+                lookback_days=int(disabled_lookback_days),
+            )
+            climate_source = "disabled_history"
+            record["disabled_history"] = history_record
         if schedule is not None:
             model = models.get(mode)
             if model is None:
@@ -1099,6 +1190,10 @@ def _diagnose(
             residual_forecaster=str(resolved["residual_forecaster"]),
             price_outlook=str(resolved["price_outlook"]),
             calibration_days=int(resolved["calibration_days"]),
+            disabled_fallback=str(resolved["disabled_fallback"]),
+            disabled_history_days=int(resolved["disabled_history_days"]),
+            disabled_lookback_days=int(resolved["disabled_lookback_days"]),
+            climate_lf0_season=str(resolved["climate_lf0_season"]),
         )
         kind = str(decision["kind"])
         lo_h, hi_h = int(decision["start_idx"]), int(decision["stop_idx"])
@@ -1195,7 +1290,29 @@ def summarise_diagnostics(raw: Mapping[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _check_params(residual_forecaster: str, price_outlook: str) -> None:
+def _check_params(
+    residual_forecaster: str,
+    price_outlook: str,
+    *,
+    disabled_fallback: str = "lf0",
+    disabled_history_days: int = 28,
+    disabled_lookback_days: int = 60,
+    climate_lf0_season: str = "",
+) -> None:
+    if disabled_fallback not in DISABLED_FALLBACKS:
+        raise ValueError(
+            f"disabled_fallback={disabled_fallback!r} must be one of {list(DISABLED_FALLBACKS)}"
+        )
+    if int(disabled_history_days) < 1 or int(disabled_lookback_days) < int(disabled_history_days):
+        raise ValueError(
+            "disabled_history_days must be >= 1 and disabled_lookback_days >= "
+            f"disabled_history_days, got {disabled_history_days} and {disabled_lookback_days}"
+        )
+    if climate_lf0_season not in _SEASON_MONTHS:
+        raise ValueError(
+            f"climate_lf0_season={climate_lf0_season!r} must be one of "
+            f"{[k for k in _SEASON_MONTHS if k]} or empty"
+        )
     resid = get_forecaster(residual_forecaster)
     if resid.oracle or resid.side_loader is not None:
         raise ValueError(
@@ -1217,7 +1334,14 @@ def _load_side(
     from .features import FEATURES_DIRNAME, column_array, load_features
     from .paths import resolve_data_dir
 
-    _check_params(str(params["residual_forecaster"]), str(params["price_outlook"]))
+    _check_params(
+        str(params["residual_forecaster"]),
+        str(params["price_outlook"]),
+        disabled_fallback=str(params["disabled_fallback"]),
+        disabled_history_days=int(params["disabled_history_days"]),
+        disabled_lookback_days=int(params["disabled_lookback_days"]),
+        climate_lf0_season=str(params["climate_lf0_season"]),
+    )
     feature_id = str(params.get("features") or "")
     if not feature_id:
         raise ValueError("the structured forecaster needs features=<feature set id>")
@@ -1246,17 +1370,27 @@ def _load_side(
         if "tz_local" in table.column_names
         else ZoneInfo("Europe/Madrid")
     )
+    starts = table.column("interval_start").to_pylist()
+    source: dict[str, Any] = {
+        "kind": "structured_side_inputs",
+        "feature_set_id": str(manifest.get("feature_set_id") or matches[0].name),
+        "feature_manifest_sha256": _manifest_sha(matches[0]),
+        "slots_without_features": int((~found).sum()),
+    }
+    omie = None
+    if get_price_outlook(str(params["price_outlook"])).needs_omie:
+        from .omie_outlook import load_omie_side
+
+        omie_side = load_omie_side(starts, data_dir=data_dir, tz=tz)
+        omie = omie_side.omie_eur_per_kwh
+        source["omie"] = omie_side.describe()
     return SideInputs(
-        interval_starts_utc=table.column("interval_start").to_pylist(),
+        interval_starts_utc=starts,
         tz=tz,
         prices=prices,
         series=series,
-        source={
-            "kind": "structured_side_inputs",
-            "feature_set_id": str(manifest.get("feature_set_id") or matches[0].name),
-            "feature_manifest_sha256": _manifest_sha(matches[0]),
-            "slots_without_features": int((~found).sum()),
-        },
+        source=source,
+        omie_eur_per_kwh=omie,
     )
 
 
@@ -1312,11 +1446,22 @@ def _structured(
     residual_forecaster: str = DEFAULT_LOAD_FORECASTER,
     price_outlook: str = "persistence",
     calibration_days: int = 7,
+    disabled_fallback: str = "lf0",
+    disabled_history_days: int = 28,
+    disabled_lookback_days: int = 60,
+    climate_lf0_season: str = "",
 ) -> list[DayForecast]:
     """LF-1: replayed heat-pump schedule x fitted energy per hour, plus a residual forecaster."""
     if int(window_days) < 1:
         raise ValueError(f"window_days must be >= 1, got {window_days}")
-    _check_params(residual_forecaster, price_outlook)
+    _check_params(
+        residual_forecaster,
+        price_outlook,
+        disabled_fallback=disabled_fallback,
+        disabled_history_days=disabled_history_days,
+        disabled_lookback_days=disabled_lookback_days,
+        climate_lf0_season=climate_lf0_season,
+    )
     if request.side is None:
         return _lf0_total(request, int(window_days))
     parts = _parts(
@@ -1331,5 +1476,9 @@ def _structured(
         residual_forecaster=residual_forecaster,
         price_outlook=price_outlook,
         calibration_days=int(calibration_days),
+        disabled_fallback=disabled_fallback,
+        disabled_history_days=int(disabled_history_days),
+        disabled_lookback_days=int(disabled_lookback_days),
+        climate_lf0_season=climate_lf0_season,
     )
     return [(p.total, p.diag) for p in parts]

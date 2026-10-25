@@ -503,6 +503,27 @@ class TestG4EndToEnd:
         tmp = tmp_path_factory.mktemp("g4")
         dataset, config = _dataset(tmp)
         feature_id = _write_feature_set(tmp, n=DAYS * 96)
+        from datetime import date
+
+        from test_extract_omie import Net, omie_file
+        from test_extract_omie import run as run_omie
+
+        first = date(2025, 3, 3)
+        run_omie(
+            tmp,
+            Net(
+                {
+                    first + timedelta(days=k): (200, omie_file(first + timedelta(days=k)))
+                    for k in range(24)
+                }
+            ),
+            first,
+            first + timedelta(days=23),
+        )
+        second_look = (
+            f"structured@lf1_omie:features={feature_id},price_outlook=omie_period,"
+            "disabled_fallback=disabled_history,climate_lf0_season=heating"
+        )
         out = fe.run_forecast_eval(
             dataset=dataset,
             config_path=config,
@@ -512,6 +533,7 @@ class TestG4EndToEnd:
                 f"structured@lf1:features={feature_id}",
                 f"structured@lf1_median:features={feature_id},residual_forecaster=trailing_median",
                 "trailing_median",
+                second_look,
             ],
             periods=PERIODS[:1],
             resamples=5000,
@@ -521,6 +543,8 @@ class TestG4EndToEnd:
             gate_candidate="lf1",
             gate_reference="trailing_mean",
             compare=[("lf1", "trailing_median"), ("lf1_median", "trailing_mean")],
+            label="second look at seen periods",
+            notes=["a pass is provisional until confirmed on forward data"],
         )
         return {
             "dir": out,
@@ -535,6 +559,27 @@ class TestG4EndToEnd:
         assert prereg["structured"]["rule_mirror"]["climate_control"][0]["history_days"] == 10
         assert prereg["side_inputs"]["lf1"]["feature_set_id"] == "ab" * 32
         assert {c["label"] for c in prereg["candidates"]} >= {"lf1", "lf1_median"}
+
+    def test_the_run_label_and_notes_are_preregistered(self, run) -> None:
+        label = run["prereg"]["run_label"]
+        assert label["label"] == "second look at seen periods"
+        assert label["notes"] == ["a pass is provisional until confirmed on forward data"]
+
+    def test_the_second_look_candidate_reads_the_omie_series_and_estimates_tomorrow(
+        self, run
+    ) -> None:
+        prereg = run["prereg"]
+        assert prereg["side_inputs"]["lf1_omie"]["omie"]["kind"] == "omie_es_day_ahead"
+        assert "omie" not in prereg["side_inputs"]["lf1"]
+        params = next(c for c in prereg["candidates"] if c["label"] == "lf1_omie")["params"]
+        assert params["price_outlook"] == "omie_period"
+        assert params["disabled_fallback"] == "disabled_history"
+        assert params["climate_lf0_season"] == "heating"
+        diag = run["summary"]["periods"]["a"]["candidates"]["lf1_omie"]["diagnostics"]
+        counts = diag["rolling_horizon"]["counts"]["afternoon/prices"]
+        assert counts.get("estimated", 0) > 0
+        base = run["summary"]["periods"]["a"]["candidates"]["lf1"]["diagnostics"]
+        assert base["rolling_horizon"]["counts"]["afternoon/prices"].get("estimated", 0) > 0
 
     def test_the_summary_carries_g4_pairwise_and_diagnostics(self, run) -> None:
         summary = run["summary"]
