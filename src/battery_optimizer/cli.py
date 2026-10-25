@@ -320,6 +320,16 @@ def build_parser() -> argparse.ArgumentParser:
         "golden-value tests pin bit-for-bit)",
     )
     p_bench.add_argument(
+        "--load-forecaster",
+        default=None,
+        metavar="NAME",
+        help="Registered load forecaster the day-ahead and causal rolling-horizon rungs plan "
+        "on (default: trailing_mean, the 28-day same-slot mean LF-0). 'perfect' is an OFFLINE "
+        "ORACLE that hands the planner the measured load, for headroom measurement only. "
+        "--day-ahead-forecast-window-days feeds any forecaster with a window. Recorded in "
+        "the run lineage, and in the run identity whenever it is not the default",
+    )
+    p_bench.add_argument(
         "--throughput-cost-eur-per-kwh",
         type=float,
         default=None,
@@ -885,6 +895,7 @@ def _benchmark_kwargs(args: argparse.Namespace, benchmark: Any) -> dict[str, Any
             else benchmark.DEFAULT_ROLLING_HORIZON_LOAD_FORECAST_MODE
         ),
         "throughput_cost_eur_per_kwh": _or_default(args.throughput_cost_eur_per_kwh, 0.0),
+        "load_forecaster": args.load_forecaster or benchmark.DEFAULT_LOAD_FORECASTER,
         "data_dir": args.data_dir,
     }
 

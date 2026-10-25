@@ -32,7 +32,7 @@ flags (`--train-days`, `--charge-pct`, `--discharge-pct`, `--initial-soc-frac`, 
 `--day-ahead-terminal-value`, `--day-ahead-time-limit-s`,
 `--rolling-horizon-replan-interval-slots`, `--rolling-horizon-horizon-slots`, `--rolling-horizon-sigma`,
 `--rolling-horizon-bias-sigma`, `--rolling-horizon-seed`, `--rolling-horizon-time-limit-s`,
-`--rolling-horizon-load-forecast-mode`, `--throughput-cost-eur-per-kwh`) default to the
+`--rolling-horizon-load-forecast-mode`, `--throughput-cost-eur-per-kwh`, `--load-forecaster`) default to the
 benchmark module's constants. The CLI calls `core_available()` first and refuses with a clear message if
 the numeric core (battery / policies / oracle / cost) is not usable.
 
@@ -375,6 +375,27 @@ benchmark and CLI default is now `"causal"`**; `run_rolling_horizon` called dire
 golden has been added. The frozen profile's original design intent — keeping every noise arm
 on one identical load basis so arms are comparable to each other — is preserved: `"causal"` only
 changes the *canonical rung's* default load basis, not the experiment module's behaviour.
+
+**Load-forecaster seam (`--load-forecaster`).** `day_ahead` and the causal `rolling_horizon` rung get
+their load forecast from a registered forecaster in `load_forecast.py`, through one call contract:
+`run_forecaster(name, load_kwh, usable, days, cutoff_idx, target_days)`. A non-oracle forecaster is
+handed only the history before `cutoff_idx`, as read-only views, so post-cutoff data cannot reach it.
+`tests/test_load_forecast.py` checks that for every registered non-oracle forecaster. `day_ahead` cuts
+each day at its own local midnight (`forecast_each_day_at_its_start`), and the causal rolling rung cuts
+at the event's local-day start, the same rules as before the seam. Registered forecasters:
+
+| Name | What it forecasts | Params |
+|---|---|---|
+| `trailing_mean` (default) | LF-0, the 28-day same-slot trailing mean. Bit-identical to the pre-seam path | `window_days`, fed by `--day-ahead-forecast-window-days` |
+| `perfect` | **Offline oracle.** It returns the measured load of the target slots. Gap-excluded slots pass through the same value the whole-horizon oracle sees, and the shared usable mask gives them zero flow, so the value cannot change a plan. It is flagged `oracle=True`, refused by the service, and recorded as an oracle in the artifact | none |
+
+The default adds nothing to the run identity, so a pre-seam identity is reproduced except for
+`code_version`. Any other forecaster adds `load_forecaster` and `load_forecaster_params`. Every run
+records the forecaster's name, params and oracle flag under `lineage.load_forecaster`, next to
+`code_version` (with its dirty marker), `config_hash` and `dataset_id`. A non-default forecaster with
+`--rolling-horizon-load-forecast-mode frozen` is refused, because the frozen profile does not use the
+seam. To add a forecaster, write one function decorated with `@register_forecaster("name")`; its
+keyword-only parameters, with their defaults, become its recorded params.
 
 ## Throughput cost, input validation and artifacts
 

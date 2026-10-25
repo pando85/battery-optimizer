@@ -330,6 +330,7 @@ class ShadowService:
                     tz=self._tz,
                     window_days=self.config.planning.forecast_window_days,
                     interval_seconds=self._interval,
+                    forecaster=self.config.planning.load_forecaster,
                 ).load_kwh[0]
         try:
             spec, limit, _ = battery_spec_from_tariff(self.tariff, self.virtual_soc)
@@ -442,6 +443,7 @@ class ShadowService:
                 tz=self._tz,
                 window_days=self.config.planning.forecast_window_days,
                 interval_seconds=self._interval,
+                forecaster=self.config.planning.load_forecaster,
             )
         except (ForecastUnavailableError, ValueError) as exc:
             self.forecast_error = str(exc)

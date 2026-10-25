@@ -12,11 +12,14 @@ offline pipeline uses, so live and offline agree on what a kWh is:
   UTC quarter-hour grid by :func:`~battery_optimizer.build.allocate_energy`
   (energy from counter deltas only, gaps and resets left unknown, never invented).
 
-The forecast itself is :func:`battery_optimizer.policies.forecast_load_trailing_slot_mean`
-— the function the day-ahead policy and the rolling-horizon benchmark's causal
-mode use — with the usable mask truncated at the **local midnight of the decision
-day**, which is exactly :class:`~battery_optimizer.rolling_horizon.CausalForecastProvider`'s
-cutoff rule.  Nothing measured today enters today's or tomorrow's forecast.
+The forecast itself runs through the load-forecaster seam
+(:func:`battery_optimizer.load_forecast.run_forecaster`) — the same seam the day-ahead
+policy and the rolling-horizon benchmark's causal mode use — with the information cut
+at the **local midnight of the decision day**, which is exactly
+:class:`~battery_optimizer.rolling_horizon.CausalForecastProvider`'s cutoff rule.
+Nothing measured today enters today's or tomorrow's forecast.  The forecaster is
+``planning.load_forecaster`` (default ``trailing_mean``, LF-0); oracle forecasters are
+refused here as well as at config validation.
 
 Gross load: with no battery telemetry mapped, gross load is the grid import
 counter (the offline build's ``battery_absent`` assumption, recorded as the
@@ -39,7 +42,12 @@ import numpy as np
 
 from battery_optimizer import build as build_mod
 from battery_optimizer import extract_prom
-from battery_optimizer.policies import contiguous_day_bounds, forecast_load_trailing_slot_mean
+from battery_optimizer.load_forecast import (
+    DEFAULT_LOAD_FORECASTER,
+    resolve_forecaster_params,
+    run_forecaster,
+)
+from battery_optimizer.policies import contiguous_day_bounds
 
 from .timegrid import local_date, local_day_bounds_utc, slot_range
 
@@ -118,12 +126,14 @@ def forecast_load(
     tz: ZoneInfo,
     window_days: int,
     interval_seconds: int = 900,
+    forecaster: str = DEFAULT_LOAD_FORECASTER,
 ) -> LoadForecast:
-    """Causal trailing slot-mean forecast for *target_starts*.
+    """Causal load forecast for *target_starts* from the registered *forecaster*.
 
     Raises:
         ForecastUnavailableError: a target lies before the history cutoff, or a target
             slot would get the zero-history fallback (no usable data at all).
+        ValueError: *forecaster* is unknown or an oracle.
     """
     if not target_starts:
         raise ForecastUnavailableError("no target slots")
@@ -139,9 +149,17 @@ def forecast_load(
     usable = np.concatenate([history.usable, np.zeros(len(future), dtype=bool)])
     labels = [local_date(s, tz).isoformat() for s in starts]
     days = contiguous_day_bounds(labels)
-    forecast, per_day = forecast_load_trailing_slot_mean(
-        load, days, window_days=window_days, usable=usable
+    target_labels = {local_date(s, tz).isoformat() for s in target_starts}
+    result = run_forecaster(
+        forecaster,
+        load_kwh=load,
+        usable=usable,
+        days=days,
+        cutoff_idx=len(history.starts),
+        target_days=[j for j, (label, _lo, _hi) in enumerate(days) if label in target_labels],
+        params=resolve_forecaster_params(forecaster, window_days=window_days),
     )
+    forecast, per_day = result.values, result.per_day
     index = {s: i for i, s in enumerate(starts)}
     values: list[float] = []
     for s in target_starts:
@@ -149,8 +167,7 @@ def forecast_load(
         if i is None:
             raise ForecastUnavailableError(f"target slot {s.isoformat()} is off the slot grid")
         values.append(float(forecast[i]))
-    target_days = {local_date(s, tz).isoformat() for s in target_starts}
-    diag = [d for d in per_day if d["local_day"] in target_days]
+    diag = [d for d in per_day if d["local_day"] in target_labels]
     if any(d["slots_zero_no_history"] for d in diag):
         raise ForecastUnavailableError(
             "no usable load history for some target slots: refusing to plan on a zero forecast"
@@ -159,7 +176,12 @@ def forecast_load(
         starts=tuple(target_starts),
         load_kwh=tuple(values),
         meta={
-            "method": "trailing_slot_mean_causal (policies.forecast_load_trailing_slot_mean)",
+            "method": (
+                "trailing_slot_mean_causal (policies.forecast_load_trailing_slot_mean)"
+                if forecaster == DEFAULT_LOAD_FORECASTER
+                else f"{forecaster}_causal (load_forecast.run_forecaster)"
+            ),
+            "load_forecaster": {k: result.provenance[k] for k in ("name", "params", "oracle")},
             "cutoff": history.cutoff.isoformat(),
             "window_days": window_days,
             "basis": history.basis,

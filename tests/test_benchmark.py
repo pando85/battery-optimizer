@@ -2264,6 +2264,68 @@ class TestDayAheadEndToEnd:
         assert payload["day_ahead"]["forecast"]["window_days"] == 1
         assert payload["frozen_inputs"]["day_ahead_forecast_window_days"] == 1
 
+    def test_default_load_forecaster_is_recorded_but_not_hashed(self, tmp_path: Path) -> None:
+        """LF-0 adds nothing to the identity (pre-seam run ids reproduce), only lineage."""
+        _run_dir, payload = self.run(tmp_path)
+        assert "load_forecaster" not in payload["frozen_inputs"]
+        assert "load_forecaster_params" not in payload["frozen_inputs"]
+        record = payload["lineage"]["load_forecaster"]
+        assert record["name"] == "trailing_mean"
+        assert record["params"] == {"window_days": 28}
+        assert record["oracle"] is False
+        assert record["used_by"] == [bm.POLICY_DAY_AHEAD, bm.POLICY_ROLLING_HORIZON]
+        assert payload["lineage"]["code_version"]
+        assert payload["day_ahead"]["forecast"]["load_forecaster"]["name"] == "trailing_mean"
+        rh = payload["rolling_horizon"]["forecast"]["metadata"]
+        assert rh["method"] == "trailing_slot_mean_causal_event_specific"
+        assert rh["load_forecaster"]["name"] == "trailing_mean"
+
+    def test_perfect_load_forecaster_is_a_disclosed_separate_run(self, tmp_path: Path) -> None:
+        import shutil
+
+        policies = "no_battery,day_ahead,rolling_horizon"
+        lf0_dir, lf0 = self.run(tmp_path, policies=policies)
+        other = tmp_path / "perfect"
+        shutil.copytree(tmp_path / "analysis", other / "analysis")
+        shutil.copy(tmp_path / "tariff.yaml", other / "tariff.yaml")
+        perfect_dir, perfect = self.run_with_dir(
+            other, policies=policies, load_forecaster="perfect"
+        )
+        assert perfect_dir.name != lf0_dir.name
+        assert perfect["frozen_inputs"]["load_forecaster"] == "perfect"
+        assert perfect["frozen_inputs"]["load_forecaster_params"] == {}
+        assert perfect["lineage"]["load_forecaster"]["oracle"] is True
+        da = perfect["day_ahead"]
+        assert da["forecast"]["method"] == "perfect_measured_load"
+        assert da["forecast"]["summary"]["mae_kwh"] == 0.0
+        assert da["information_set"]["load"].startswith("ORACLE")
+        # Measured load as the forecast: nothing the plan asks for is refused.
+        assert da["charge_clipped_kwh"] == pytest.approx(0.0, abs=1e-9)
+        assert da["discharge_clipped_kwh"] == pytest.approx(0.0, abs=1e-9)
+        rh = perfect["rolling_horizon"]
+        assert rh["information_set"]["load"].startswith("ORACLE")
+        assert rh["causal_runtime_metadata"]["load_forecaster"]["name"] == "perfect"
+        assert rh["discharge_clipped_kwh"] == pytest.approx(0.0, abs=1e-9)
+        # The baseline does not depend on the load forecaster.
+        assert (
+            perfect["policies"]["no_battery"]["cost_eur"]
+            == lf0["policies"]["no_battery"]["cost_eur"]
+        )
+
+    def test_unknown_load_forecaster_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(bm.BenchmarkInputError, match="unknown load forecaster"):
+            self.run(tmp_path, load_forecaster="nope")
+
+    def test_non_default_forecaster_with_frozen_rolling_mode_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.raises(bm.BenchmarkInputError, match="needs rolling_horizon_load_forecast"):
+            self.run(
+                tmp_path,
+                load_forecaster="perfect",
+                rolling_horizon_load_forecast_mode="frozen",
+            )
+
     def test_per_day_solver_failure_degrades_inside_the_run(
         self, tmp_path: Path, monkeypatch
     ) -> None:

@@ -104,6 +104,12 @@ from .battery import (
     simulate,
     validate_spec,
 )
+from .load_forecast import (
+    DEFAULT_LOAD_FORECASTER,
+    get_forecaster,
+    resolve_forecaster_params,
+    run_forecaster,
+)
 from .oracle import OracleError, solve_oracle
 from .policies import (
     DayAheadDay,
@@ -886,6 +892,7 @@ class CausalForecastProvider:
         window_days: int = 28,
         interval_seconds: float = 900.0,
         tz: ZoneInfo | None = None,
+        load_forecaster: str = DEFAULT_LOAD_FORECASTER,
     ) -> None:
         """Initialize the provider with the full dataset.
 
@@ -894,12 +901,13 @@ class CausalForecastProvider:
             local_days: Local day labels for each interval.
             usable: Per-interval usability mask.
             interval_starts_utc: UTC timestamps for each interval.
-            window_days: Trailing window in local days for slot means.
+            window_days: Trailing window in local days for slot means (fed to every
+                registered forecaster that declares a ``window_days`` param).
             interval_seconds: Interval length in seconds (for slot positioning).
             tz: Timezone for local-wall-clock conversion.
+            load_forecaster: registered name in :mod:`battery_optimizer.load_forecast`;
+                the default is LF-0, the day-ahead rung's trailing slot mean.
         """
-        from .policies import forecast_load_trailing_slot_mean
-
         self._load = np.asarray(load_kwh, dtype=float).reshape(-1)
         self._local_days = list(local_days)
         self._usable = np.asarray(usable, dtype=bool).reshape(-1)
@@ -907,13 +915,28 @@ class CausalForecastProvider:
         self._window_days = int(window_days)
         self._interval_seconds = float(interval_seconds)
         self._tz = tz if tz is not None else ZoneInfo("Europe/Madrid")
-        self._forecast_fn = forecast_load_trailing_slot_mean
+        self._forecaster = get_forecaster(load_forecaster)
+        self._forecaster_params = resolve_forecaster_params(
+            load_forecaster, window_days=self._window_days
+        )
         self._day_bounds = contiguous_day_bounds(self._local_days)
         # Cache: (cutoff_idx, window_days) -> (forecast, metadata)
         # Two events on the same local day produce identical forecasts, so we cache
         # to avoid redundant full-dataset fits.  The cache key includes window_days
         # in case the caller changes it between events (though the dispatcher doesn't).
         self._cache: dict[tuple[int, int], tuple[np.ndarray, dict[str, Any]]] = {}
+
+    @property
+    def method(self) -> str:
+        """The run-level method label; LF-0 keeps its historical name."""
+        if self._forecaster.name == DEFAULT_LOAD_FORECASTER:
+            return "trailing_slot_mean_causal_event_specific"
+        return f"{self._forecaster.name}_causal_event_specific"
+
+    @property
+    def load_forecaster(self) -> dict[str, Any]:
+        """Provenance of the forecaster this provider runs."""
+        return self._forecaster.provenance(self._forecaster_params)
 
     def forecast_for_event(
         self,
@@ -954,16 +977,24 @@ class CausalForecastProvider:
             return forecast, metadata
 
         # Truncate the usable mask to exclude all data at or after the local-day start
+        # (kept for the support count and the training hash below).
         truncated_usable = self._usable.copy()
         truncated_usable[event_local_day_start:] = False
 
-        # Compute forecasts for all days using the truncated mask
-        forecast, per_day_diag = self._forecast_fn(
-            self._load,
-            self._day_bounds,
-            window_days=self._window_days,
-            usable=truncated_usable,
+        # Forecast every day through the seam, which hands a non-oracle forecaster only
+        # the history strictly before the cutoff.  Every day, not just the horizon, so
+        # the array stays full-length like the day-ahead vintage it is compared with.
+        result = run_forecaster(
+            self._forecaster.name,
+            load_kwh=self._load,
+            usable=self._usable,
+            days=self._day_bounds,
+            cutoff_idx=event_local_day_start,
+            target_days=range(len(self._day_bounds)),
+            params=self._forecaster_params,
+            allow_oracle=True,
         )
+        forecast, per_day_diag = result.values, result.per_day
 
         # Aggregate diagnostics for the event's horizon
         horizon_days = [
@@ -1017,7 +1048,8 @@ class CausalForecastProvider:
             )
 
         metadata: dict[str, Any] = {
-            "method": "trailing_slot_mean_causal_event_specific",
+            "method": self.method,
+            "load_forecaster": self._forecaster.provenance(self._forecaster_params),
             "event_index": event.index,
             "event_local_day": str(event.local_day),
             "event_kind": event.kind,
@@ -1449,6 +1481,7 @@ def run_rolling_horizon(
     load_forecast_mode: str = LOAD_FORECAST_MODE_FROZEN,
     throughput_cost_eur_per_kwh: float = 0.0,
     forecast_window_days: int = 28,
+    load_forecaster: str = DEFAULT_LOAD_FORECASTER,
 ) -> RollingResult:
     """Run the rolling horizon dispatcher.
 
@@ -1502,6 +1535,11 @@ def run_rolling_horizon(
     for the causal mode's slot means.  Ignored in frozen mode (the frozen profile
     has its own window baked in at build time).
 
+    ``load_forecaster`` (default ``"trailing_mean"``, LF-0) names the registered
+    forecaster (:mod:`battery_optimizer.load_forecast`) the causal mode runs through
+    :class:`CausalForecastProvider`.  Frozen mode has no seam, so any other name is
+    refused there rather than silently ignored.
+
     Cost is always computed against TRUE prices and actual grid import.
 
     **Cost of a run is visible in the artifact**: ``telemetry["solve_count"]``
@@ -1527,6 +1565,15 @@ def run_rolling_horizon(
         raise ValueError(f"horizon_slots must be >= 1, got {horizon_slots}")
     if forecast_window_days < 1:
         raise ValueError(f"forecast_window_days must be >= 1, got {forecast_window_days}")
+    get_forecaster(load_forecaster)  # unknown names fail before any work
+    if (
+        load_forecast_mode != LOAD_FORECAST_MODE_CAUSAL
+        and load_forecaster != DEFAULT_LOAD_FORECASTER
+    ):
+        raise ValueError(
+            f"load_forecaster={load_forecaster!r} needs load_forecast_mode='causal': the "
+            "frozen profile is built once at the training cut and does not use the seam"
+        )
 
     validate_spec(spec)
     n_eval = eval_end_idx - eval_start_idx
@@ -1548,9 +1595,11 @@ def run_rolling_horizon(
             window_days=forecast_window_days,  # B1: wire through from caller
             interval_seconds=interval_seconds,
             tz=tz,
+            load_forecaster=load_forecaster,
         )
         forecast_metadata = {
-            "method": "trailing_slot_mean_causal_event_specific",
+            "method": causal_provider.method,
+            "load_forecaster": causal_provider.load_forecaster,
             "events_served": 0,
             "forecast_window_days": forecast_window_days,
             # B8: zero-support events are counted and visible, never refused.

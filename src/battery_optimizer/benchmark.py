@@ -214,6 +214,20 @@ DEFAULT_ROLLING_HORIZON_HORIZON_SLOTS = 96
 #: cut) is reachable through flags and is what the golden-value tests pin bit-for-bit.
 DEFAULT_ROLLING_HORIZON_LOAD_FORECAST_MODE = "causal"
 
+#: Registered load forecaster (:mod:`battery_optimizer.load_forecast`) the day-ahead
+#: rung and the causal rolling-horizon rung plan on.  ``trailing_mean`` is LF-0; with it
+#: the run identity carries no forecaster key, so pre-seam run identities are unchanged.
+#: Same value as ``load_forecast.DEFAULT_LOAD_FORECASTER`` (pinned by a test), spelled
+#: out here because this module imports the numeric core lazily.
+DEFAULT_LOAD_FORECASTER = "trailing_mean"
+
+#: Information-set text for a rung run with an ``oracle=True`` load forecaster.
+_ORACLE_LOAD_DISCLOSURE = (
+    "ORACLE load forecaster: the planner was handed the MEASURED load of the slots it "
+    "plans, i.e. perfect load knowledge nobody has at decision time. Offline headroom "
+    "measurement only; never a deployable result"
+)
+
 _EPS = 1e-9
 
 
@@ -1093,6 +1107,7 @@ def prepare_day_ahead(
     terminal_value_source: str,
     time_limit_s: float,
     timezone: str,
+    load_forecaster: str = DEFAULT_LOAD_FORECASTER,
 ) -> tuple[list[Any], dict[str, Any]]:
     """Partition the evaluation window into local days and build its causal forecast.
 
@@ -1106,6 +1121,11 @@ def prepare_day_ahead(
     make the first evaluation days forecast-free for a reason that has nothing to do
     with causality.
 
+    The forecast goes through the load-forecaster seam
+    (:func:`battery_optimizer.load_forecast.forecast_each_day_at_its_start`): each
+    evaluated local day is forecast by *load_forecaster* knowing only what precedes its
+    own local midnight, then scored against the measured day for the artifact.
+
     Returns:
         ``(days, block)`` — ``days`` are the per-local-day inputs for
         :func:`battery_optimizer.policies.policy_day_ahead` in horizon coordinates, and
@@ -1116,13 +1136,40 @@ def prepare_day_ahead(
         raise BenchmarkInputError(
             f"day_ahead_forecast_window_days must be >= 1, got {forecast_window_days}"
         )
-    full_days = core.contiguous_day_bounds(list(local_days))
-    forecast_values, forecast_diag = core.forecast_load(
-        load_kwh, full_days, window_days=int(forecast_window_days), usable=usable
+    from battery_optimizer.load_forecast import (
+        forecast_each_day_at_its_start,
+        get_forecaster,
+        resolve_forecaster_params,
     )
-    diag_by_label = {str(d["local_day"]): d for d in forecast_diag}
-    forecast_eval = forecast_values[np.asarray(eval_index, dtype=int)]
+    from battery_optimizer.policies import score_day_forecast
+
+    try:
+        forecaster = get_forecaster(load_forecaster)
+        params = resolve_forecaster_params(load_forecaster, window_days=int(forecast_window_days))
+    except ValueError as exc:
+        raise BenchmarkInputError(str(exc)) from exc
+    full_days = core.contiguous_day_bounds(list(local_days))
     eval_runs = core.contiguous_day_bounds([local_days[i] for i in eval_index])
+    day_index = {label: j for j, (label, _lo, _hi) in enumerate(full_days)}
+    targets = [day_index[label] for label, _lo, _hi in eval_runs]
+    load_arr = np.asarray(load_kwh, dtype=float)
+    usable_arr = np.asarray(usable, dtype=bool)
+    result = forecast_each_day_at_its_start(
+        load_forecaster,
+        load_kwh=load_arr,
+        usable=usable_arr,
+        days=full_days,
+        target_days=targets,
+        params=params,
+        allow_oracle=True,
+    )
+    forecast_diag = []
+    for j, record in zip(targets, result.per_day, strict=True):
+        _label, lo, hi = full_days[j]
+        scored = score_day_forecast(result.values[lo:hi], load_arr[lo:hi], usable_arr[lo:hi])
+        forecast_diag.append({**record, **scored})
+    diag_by_label = {str(d["local_day"]): d for d in forecast_diag}
+    forecast_eval = result.values[np.asarray(eval_index, dtype=int)]
 
     days: list[Any] = []
     eval_diag: list[dict[str, Any]] = []
@@ -1166,9 +1213,10 @@ def prepare_day_ahead(
             ),
         },
         "forecast": {
-            "method": str(core.forecast_method),
+            "method": forecaster.method,
             "window_days": int(forecast_window_days),
-            "fallback_rule": str(core.forecast_fallback_rule),
+            "fallback_rule": forecaster.fallback_rule,
+            "load_forecaster": forecaster.provenance(params),
             "history_may_cross_train_end": True,
             "history_note": (
                 "the trailing window may reach back past train_end into the training split: "
@@ -1209,8 +1257,10 @@ def prepare_day_ahead(
                 "rather than assumed"
             ),
             "load": (
-                "a strictly causal trailing-window forecast only; day D's measured load is "
-                "unreachable from day D's solve, and so is every later day's"
+                _ORACLE_LOAD_DISCLOSURE
+                if forecaster.oracle
+                else "a strictly causal trailing-window forecast only; day D's measured load "
+                "is unreachable from day D's solve, and so is every later day's"
             ),
             "state": "own SOC carried forward from the previous day's actual execution",
             "assumptions_disclosed": [
@@ -1334,6 +1384,7 @@ def prepare_rolling_horizon(
     replan_interval_slots: int | None,
     horizon_slots: int | None,
     load_forecast_mode: str = DEFAULT_ROLLING_HORIZON_LOAD_FORECAST_MODE,
+    load_forecaster: str = DEFAULT_LOAD_FORECASTER,
 ) -> tuple[RollingHorizonInputs, dict[str, Any]]:
     """Build the load forecast inputs and resolve the planning terminal value.
 
@@ -1386,6 +1437,21 @@ def prepare_rolling_horizon(
             f"rolling_horizon_load_forecast_mode must be 'frozen' or 'causal', "
             f"got {load_forecast_mode!r}"
         )
+    from battery_optimizer.load_forecast import get_forecaster, resolve_forecaster_params
+
+    try:
+        forecaster = get_forecaster(load_forecaster)
+        forecaster_params = resolve_forecaster_params(
+            load_forecaster, window_days=int(forecast_window_days)
+        )
+    except ValueError as exc:
+        raise BenchmarkInputError(str(exc)) from exc
+    if load_forecast_mode != "causal" and load_forecaster != DEFAULT_LOAD_FORECASTER:
+        raise BenchmarkInputError(
+            f"load_forecaster={load_forecaster!r} needs rolling_horizon_load_forecast_mode="
+            "'causal': the frozen profile is built once at the training cut and does not "
+            "use the load-forecaster seam"
+        )
 
     # Build the load profile according to the selected mode.
     # Frozen: profile fixed at the training cut, reused by every solve.
@@ -1397,7 +1463,12 @@ def prepare_rolling_horizon(
         # builds the event-specific CausalForecastProvider from the raw load arrays.
         frozen_load = np.zeros_like(load_kwh)
         forecast_meta = {
-            "method": "trailing_slot_mean_causal_event_specific",
+            "method": (
+                "trailing_slot_mean_causal_event_specific"
+                if load_forecaster == DEFAULT_LOAD_FORECASTER
+                else f"{load_forecaster}_causal_event_specific"
+            ),
+            "load_forecaster": forecaster.provenance(forecaster_params),
             "mode": "causal",
             "window_days": int(forecast_window_days),
             "training_end_idx": int(eval_start_idx),
@@ -1451,6 +1522,7 @@ def prepare_rolling_horizon(
         horizon_slots=horizon_slots,
         load_forecast_mode=load_forecast_mode,
         forecast_window_days=forecast_window_days,
+        load_forecaster=load_forecaster,
     )
 
     cadence_text, horizon_text = _rh_cadence_text(
@@ -1535,7 +1607,9 @@ def prepare_rolling_horizon(
                 "more informed than day_ahead on prices"
             ),
             "load": (
-                "an advancing trailing-window forecast using the SAME function as day_ahead "
+                _ORACLE_LOAD_DISCLOSURE
+                if forecaster.oracle
+                else "an advancing trailing-window forecast using the SAME function as day_ahead "
                 "(policies.forecast_load_trailing_slot_mean); each local day's forecast is "
                 "recomputed from that day's own trailing window of strictly prior "
                 "observations.  The two rungs therefore share a like-for-like load basis, "
@@ -1826,6 +1900,7 @@ class RollingHorizonInputs:
     load_forecast_mode: str = "frozen"
     throughput_cost_eur_per_kwh: float = 0.0
     forecast_window_days: int = 28
+    load_forecaster: str = DEFAULT_LOAD_FORECASTER
 
 
 def _rh_cadence_text(
@@ -1999,6 +2074,7 @@ def _run_policies(
                     load_forecast_mode=rolling_horizon.load_forecast_mode,
                     throughput_cost_eur_per_kwh=throughput_cost_eur_per_kwh,
                     forecast_window_days=rolling_horizon.forecast_window_days,
+                    load_forecaster=rolling_horizon.load_forecaster,
                 )
                 # The returned schedule comes from simulate() with solver_status="not_applicable"
                 # (a traced plan).  But the rolling horizon IS a solver-based policy (many MILP
@@ -2304,6 +2380,40 @@ _LINEAGE_KEYS = (
     "series",
     "entity_audit",
 )
+
+
+def _load_forecaster_record(
+    name: str,
+    *,
+    window_days: int,
+    selected: Sequence[str],
+    rolling_horizon_load_forecast_mode: str,
+) -> dict[str, Any]:
+    """Resolve the run's load forecaster and the lineage record that names it.
+
+    Refuses an unknown name, and a non-default forecaster that could only be silently
+    ignored: the frozen rolling-horizon profile does not go through the seam.
+    """
+    from battery_optimizer.load_forecast import get_forecaster, resolve_forecaster_params
+
+    try:
+        forecaster = get_forecaster(name)
+        params = resolve_forecaster_params(name, window_days=int(window_days))
+    except ValueError as exc:
+        raise BenchmarkInputError(str(exc)) from exc
+    used_by = []
+    if POLICY_DAY_AHEAD in selected:
+        used_by.append(POLICY_DAY_AHEAD)
+    if POLICY_ROLLING_HORIZON in selected:
+        if rolling_horizon_load_forecast_mode == "causal":
+            used_by.append(POLICY_ROLLING_HORIZON)
+        elif name != DEFAULT_LOAD_FORECASTER:
+            raise BenchmarkInputError(
+                f"load_forecaster={name!r} needs rolling_horizon_load_forecast_mode='causal': "
+                "the frozen profile is built once at the training cut and does not use the "
+                "load-forecaster seam"
+            )
+    return {**forecaster.provenance(params), "used_by": used_by}
 
 
 def _lineage(
@@ -2885,6 +2995,7 @@ def benchmark_dataset(
     rolling_horizon_time_limit_s: float = DEFAULT_ROLLING_HORIZON_TIME_LIMIT_S,
     rolling_horizon_load_forecast_mode: str = DEFAULT_ROLLING_HORIZON_LOAD_FORECAST_MODE,
     throughput_cost_eur_per_kwh: float = 0.0,
+    load_forecaster: str = DEFAULT_LOAD_FORECASTER,
     data_dir: Path | str | None = None,
 ) -> Path:
     """Run the selected policies on a built dataset and write an immutable run.
@@ -2988,6 +3099,12 @@ def benchmark_dataset(
             basis (default ``0.0``).  ``0.0`` leaves every plan bit-identical to a run
             without the argument; it is a planning-only term and never enters the
             reported (true-price) cost.  Recorded in the run identity.
+        load_forecaster: registered load forecaster
+            (:mod:`battery_optimizer.load_forecast`) that ``day_ahead`` and the causal
+            ``rolling_horizon`` rung plan on.  ``"trailing_mean"`` (default, LF-0) adds
+            nothing to the run identity; any other name adds the name and its params.
+            ``"perfect"`` is the offline oracle (measured load as the forecast), for
+            headroom measurement only.  Always recorded under ``lineage.load_forecaster``.
         data_dir: data root, when the manifest lists parts relative to it.
 
     Returns:
@@ -3055,6 +3172,12 @@ def benchmark_dataset(
             replan_interval_slots=rolling_horizon_replan_interval_slots,
             horizon_slots=rolling_horizon_horizon_slots,
         )
+    forecaster_record = _load_forecaster_record(
+        load_forecaster,
+        window_days=day_ahead_forecast_window_days,
+        selected=selected,
+        rolling_horizon_load_forecast_mode=rolling_horizon_load_forecast_mode,
+    )
 
     dataset_dir = Path(dataset).expanduser()
     cfg_path = Path(config_path).expanduser()
@@ -3186,6 +3309,7 @@ def benchmark_dataset(
             terminal_value_source=terminal_value_source,
             time_limit_s=day_ahead_time_limit_s,
             timezone=config.tariff_periods.timezone,
+            load_forecaster=load_forecaster,
         )
         day_ahead = DayAheadInputs(
             days=da_days,
@@ -3248,6 +3372,7 @@ def benchmark_dataset(
             replan_interval_slots=rolling_horizon_replan_interval_slots,
             horizon_slots=rh_horizon_slots,
             load_forecast_mode=rolling_horizon_load_forecast_mode,
+            load_forecaster=load_forecaster,
         )
     records, solver_info, plans = _run_policies(
         core=core,
@@ -3384,13 +3509,22 @@ def benchmark_dataset(
             if day_ahead_terminal_value_eur_per_kwh is not None
             else TERMINAL_VALUE_DEFAULT_RULE
         )
+    # The load forecaster enters the identity only when it is not LF-0, so every
+    # pre-seam run identity is reproduced unchanged by the default (G1); a run on another
+    # forecaster is a different measurement and must never share a run id with LF-0.
+    if load_forecaster != DEFAULT_LOAD_FORECASTER:
+        identity["load_forecaster"] = load_forecaster
+        identity["load_forecaster_params"] = forecaster_record["params"]
     run_id = _canonical_sha(identity)[:32]
 
     payload: dict[str, Any] = {
         "benchmark_version": BENCHMARK_VERSION,
         "run_id": run_id,
         "frozen_inputs": identity,
-        "lineage": _lineage(loaded, cfg_path, cfg_hash, version),
+        "lineage": {
+            **_lineage(loaded, cfg_path, cfg_hash, version),
+            "load_forecaster": forecaster_record,
+        },
         "evaluation": {
             "horizon_start": _iso(eval_starts[0]),
             "horizon_end": _iso(eval_ends[-1]),

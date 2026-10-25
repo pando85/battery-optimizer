@@ -1741,6 +1741,15 @@ class TestRollingHorizonLoadForecastModeCLI:
         )
         assert captured["throughput_cost_eur_per_kwh"] == 0.0
 
+    def test_load_forecaster_default_and_flag(self, monkeypatch):
+        from battery_optimizer import benchmark
+
+        argv = ["benchmark", "--dataset", "/tmp/ds", "--train-end", "2026-01-01T00:00:00+00:00"]
+        captured = self._capture(monkeypatch, argv)
+        assert captured["load_forecaster"] == benchmark.DEFAULT_LOAD_FORECASTER == "trailing_mean"
+        captured = self._capture(monkeypatch, [*argv, "--load-forecaster", "perfect"])
+        assert captured["load_forecaster"] == "perfect"
+
     def test_throughput_cost_reaches_contract(self, monkeypatch):
         captured = self._capture(
             monkeypatch,
