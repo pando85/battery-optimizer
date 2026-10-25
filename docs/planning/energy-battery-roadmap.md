@@ -1,6 +1,6 @@
 # Battery controller — component roadmap
 
-- **Updated:** 2026-10-24
+- **Updated:** 2026-10-25
 - **Purpose:** the component view of the battery controller — what each piece is, what
   state it is in, and how each one iterates from "working simply" to "fully improved".
   This replaces the phase-by-phase framing for day-to-day decisions; the phase list
@@ -13,8 +13,11 @@
   [forecast experiments](energy-baseline-forecast-experiments.md),
   [package README](../../README.md)
 
-No monetary figure appears in this file. Nothing described here is deployed, and no
-battery is actuated by any of it.
+No monetary figure appears in this file. The offline components and a read-only **shadow service**
+plus an **extraction CronJob** are now present in homelab GitOps (v0.2.1), but **no battery is actuated**.
+Their operational status and the first successful manual extraction are documented in the
+[homelab deployment runbook](https://github.com/pando85/homelab/blob/master/docs/deployment/battery-optimizer.md).
+Do not confuse a deployed shadow service with a passed two-week real-device evaluation.
 
 ## 1. The system in four columns
 
@@ -77,8 +80,8 @@ offline iteration safe, and it is why the absence of hardware blocks only one co
 | **Appliance states** | preserved in Parquet by `extract`, invisible to Prometheus — **and now readable**: `src/battery_optimizer/ha_states.py` with the `ha-states` subcommand (2026-10-24), deduplicating at read time and answering as-of queries that cannot leak a later transition | feeding those states into the load forecast | appliance-conditioned forecasting / NILM | No |
 | **Device writer** | absent — Omnibattery native control only | single-writer adapter with lease and heartbeat | progressive power gates, observed → limited discharge → limited charge → full | **Yes** |
 | **Safety guard** | offline invariants only | staleness detection → safe idle at 0 W | kill switch, verified idle handoff, alerting with explicit acknowledgement | **Yes** |
-| **Observability** | offline artifacts (`benchmark.json`, `report.md`, schedules) | Grafana plan-versus-actual, forecast quality, opportunity cost | invoice reconciliation and realized savings against a matched baseline | Partly |
-| **Deployment** | CLI on the development machine | `apps/battery-optimizer/` chart with a PVC on prusik | scheduled extraction cadence, HA custom-component deployment | Partly |
+| **Observability** | offline artifacts (`benchmark.json`, `report.md`, schedules) | **Configured**: shadow metrics, ServiceMonitor, Grafana and alert rules; real-device plan-versus-actual is still pending | invoice reconciliation and realized savings against a matched baseline | Partly: operational acceptance still pending |
+| **Deployment** | CLI and released multi-arch OCI image **v0.2.1** | **Built/configured in homelab**: `apps/battery-optimizer/` CronJob, PVC, one-replica shadow service, monitoring | verify consecutive CronJobs, backups/alerts and two-week real-device shadow comparison; HA/Omnibattery commissioning remains separate | Partly: gates B/C open |
 
 ## 3. The scheduling fact that matters
 
@@ -113,6 +116,17 @@ writer, app-level safety guard and failure-tested fallback are still absent, so
 
 ## 4. Where we are
 
+### Production rollout snapshot — 2026-10-25
+
+| Gate | Evidence and limitations |
+|---|---|
+| **A — app repository/releases** | **Functional packaging and published v0.2.1:** CI/pre-commit/image scan all succeeded on that release. Wheel/sdist, multi-arch image, SBOM/provenance exist. **Policy caveat:** image publication is not dependent on the separate CI workflow, and release is not dependent on its scan job. |
+| **B — scheduled extraction** | **GitOps configured**, daily 03:30 UTC in homelab; first manually triggered Job succeeded, with persistent ZFS volume and snapshot/alert resources. **Exit gate remains open** pending a series of scheduled runs, failure alert delivery, and tested backup restore. |
+| **C — resident shadow** | **Service built and GitOps configured**, with GET-only status/metrics, HA read-only guards and simulated SOC. **Exit gate remains open:** the actual Marstek/Omnibattery entities are not present; no two-week native comparison exists. |
+| **D — live control** | **Not built or authorized.** The Omnibattery HA entity interface and failure semantics still require physical commissioning. |
+
+See the [single production checklist](home-battery-optimizer-implementation.md#16-production-packaging-and-runtime-rollout) and [homelab operations](https://github.com/pando85/homelab/blob/master/docs/deployment/battery-optimizer.md). The current section below preserves older experiment context but the table above is authoritative for **current deployment status**.
+
 Built and tested, all offline:
 
 - **SENSE** — Prometheus extraction with lineage and dedup; HA recorder extraction
@@ -136,14 +150,17 @@ Present but not actuating: the **dispatch contract** (`dispatch.py`), which is A
 committed piece and is types, validation and canonical serialization only — no writer, no I/O,
 no subcommand. It cannot move a battery and was not built to.
 
-Completed (committed): artifact-integrity sidecars (wired into the canonical benchmark and report
-writers), economic-sensitivity sweeps, replay runtime (recording only, not deployed), and causal
-load-forecast alignment (now the default load basis at the benchmark and CLI layer). None are
-deployed.
+Completed in the independent application repository: artifact-integrity sidecars (canonical
+benchmark/report writers), economic-sensitivity sweeps, **recording-only replay runtime**, causal
+load-forecast alignment, CI and v0.2.1 releases. A **separate resident shadow service** (with
+read-only HA/Prometheus adapters, FastAPI and an append-only sink) was subsequently built and
+configured as a Deployment in `pando85/homelab`; it does **not** turn the replay runtime into a
+writer or enable physical actuation. Until commissioning, its battery SOC is simulated.
 
 Absent: the device writer and the safety guard — **ACT cannot actuate anything**, which is what
 "the whole ACT column is absent" meant and still means in substance — plus battery telemetry in
-SENSE. Nothing on this roadmap is deployed, and no hardware is authorized.
+SENSE. Only the extraction CronJob and non-actuating shadow service are deployed/configured;
+no hardware control is authorized.
 
 **The harness now has current numbers.** The shipped round-trip efficiency moved from
 0.88 to 0.80 on 2026-10-24, `config_hash` changed, and `compute_dataset_id` hashes `config_hash`,
