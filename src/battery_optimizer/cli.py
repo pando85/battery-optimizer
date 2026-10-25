@@ -57,6 +57,44 @@ def _add_time_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--end", default=None, help="End time (ISO 8601 UTC, default: now)")
 
 
+def _add_forecast_eval_parser(subs: Any) -> None:
+    """The ``forecast-eval`` subcommand (P1 of the load-forecaster plan)."""
+    p = subs.add_parser(
+        "forecast-eval",
+        help="Pre-registered load-forecaster evaluation: accuracy and paired EUR against LF-0",
+    )
+    _add_common(p)
+    p.add_argument("--dataset", required=True, help="Built dataset directory")
+    p.add_argument(
+        "--name",
+        required=True,
+        help="Run name; the run is written to <dataset>/forecast-eval/<name>-<UTC timestamp>",
+    )
+    p.add_argument(
+        "--candidate",
+        action="append",
+        default=[],
+        metavar="NAME[:KEY=VALUE,...]",
+        help="Registered load forecaster to evaluate, with optional param overrides "
+        "(repeatable). trailing_mean (LF-0) is always the reference",
+    )
+    p.add_argument(
+        "--period",
+        action="append",
+        default=None,
+        metavar="LABEL",
+        help="Evaluation period label (repeatable; default: every P0 period: 2025, 2026-01..09)",
+    )
+    p.add_argument(
+        "--p0-summary",
+        default=None,
+        help="P0 summary.json: its LF-0 minus perfect gaps feed the gate and the share of "
+        "the gap captured, and an in-run perfect candidate is checked against it",
+    )
+    p.add_argument("--resamples", type=int, default=None, help="Bootstrap resamples (10000)")
+    p.add_argument("--seed", type=int, default=None, help="Bootstrap seed (20261025)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -154,6 +192,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--window-days", type=int, default=28, help="LF-0 trailing window in local days (28)"
     )
 
+    # -- forecast-eval ----------------------------------------------------
+    _add_forecast_eval_parser(subs)
+
     # -- benchmark --------------------------------------------------------
     p_bench = subs.add_parser("benchmark", help="Run policy benchmarks on a dataset")
     _add_common(p_bench)
@@ -182,6 +223,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="How far back before --train-end the thresholds may look "
         "(default: the benchmark module's train_days)",
+    )
+    p_bench.add_argument(
+        "--eval-end",
+        default=None,
+        help="Exclusive end of the evaluation window (ISO 8601 with an offset).  The dataset "
+        "is cut there first, so the run equals a run on a dataset ending at that instant "
+        "(default: the end of the dataset)",
     )
     p_bench.add_argument(
         "--charge-pct",
@@ -906,6 +954,38 @@ def cmd_decompose_load(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_forecast_eval(args: argparse.Namespace) -> int:
+    """Run a pre-registered load-forecaster evaluation into the private data dir."""
+    from battery_optimizer import forecast_eval
+    from battery_optimizer.config import resolve_config_path
+
+    known = {p.label: p for p in forecast_eval.DEFAULT_PERIODS}
+    labels = args.period or list(known)
+    unknown = [label for label in labels if label not in known]
+    if unknown:
+        raise ValueError(f"unknown period(s) {unknown}; known: {sorted(known)}")
+    run_dir = forecast_eval.run_forecast_eval(
+        dataset=args.dataset,
+        config_path=resolve_config_path(args.config),
+        name=args.name,
+        candidates=args.candidate,
+        periods=[known[label] for label in labels],
+        p0_summary=args.p0_summary,
+        resamples=_or_default(args.resamples, forecast_eval.DEFAULT_RESAMPLES),
+        seed=_or_default(args.seed, forecast_eval.DEFAULT_SEED),
+        data_dir=args.data_dir,
+    )
+    summary = json.loads((run_dir / forecast_eval.SUMMARY_JSON_NAME).read_text())
+    print(f"forecast-eval: run directory: {run_dir}")
+    for label, gate in summary["gate"].items():
+        if gate.get("reason") == "the reference itself":
+            continue
+        verdict = {True: "PASS", False: "FAIL", None: "UNDETERMINED"}[gate["passed"]]
+        suffix = "" if gate["eligible"] else " (oracle, not eligible)"
+        print(f"forecast-eval: gate G2 {label}: {verdict}{suffix}")
+    return 0
+
+
 def _or_default(value: float | int | None, default: float | int) -> float | int:
     """Take the module's default when the flag was not given (0 is a real value)."""
     return default if value is None else value
@@ -974,6 +1054,7 @@ def _benchmark_kwargs(args: argparse.Namespace, benchmark: Any) -> dict[str, Any
         ),
         "throughput_cost_eur_per_kwh": _or_default(args.throughput_cost_eur_per_kwh, 0.0),
         "load_forecaster": args.load_forecaster or benchmark.DEFAULT_LOAD_FORECASTER,
+        "eval_end": args.eval_end,
         "data_dir": args.data_dir,
     }
 
@@ -1341,6 +1422,7 @@ _HANDLERS = {
     "build": cmd_build,
     "build-features": cmd_build_features,
     "decompose-load": cmd_decompose_load,
+    "forecast-eval": cmd_forecast_eval,
     "benchmark": cmd_benchmark,
     "report": cmd_report,
     "inspect-sql": cmd_inspect_sql,
