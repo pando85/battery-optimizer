@@ -40,11 +40,13 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          msg_file=$(mktemp)
+          # The commitlint hook ignores the filename it is given and always reads
+          # .git/COMMIT_EDITMSG, so each message has to be written there.
+          msg_file=$(git rev-parse --git-path COMMIT_EDITMSG)
           for commit in $(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA"); do
             echo "Checking commit $commit"
             git show --no-patch --format=%B "$commit" > "$msg_file"
-            uv run --only-group tools pre-commit run --hook-stage commit-msg \
+            uv run --only-group tools pre-commit run commitlint --hook-stage commit-msg \
               --commit-msg-filename "$msg_file" --verbose
           done
 
