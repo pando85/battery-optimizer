@@ -25,7 +25,7 @@ flags are in the [CLI reference](cli.md); the service-specific settings (`config
 ### Data directory
 
 All output goes to a private data directory **outside the git worktree**.
-Default: `~/data/energy-baseline`. Override with `--data-dir` or `BATTERY_OPTIMIZER_DATA_DIR`.
+Default: `~/data/energy-baseline`. Override with `--data-dir` or `BATTERY_OPTIMIZER_DATA_DIR`. For new work set it to the pulled copy of the deployed store (see below).
 
 The default directory keeps its pre-rename `energy-baseline` name on purpose (it is an existing
 immutable store and stored benchmark JSONs embed its path). The legacy `ENERGY_BASELINE_*`
@@ -43,6 +43,11 @@ deployed store into a separate directory:
 KUBE_CONTEXT=<context> just pull-store            # into ~/data/battery-optimizer-cluster
 export BATTERY_OPTIMIZER_DATA_DIR=~/data/battery-optimizer-cluster
 ```
+
+With [direnv](https://direnv.net/), copy `.envrc.example` to `.envrc`: it already points
+`BATTERY_OPTIMIZER_DATA_DIR` at the pulled copy and has a `KUBE_CONTEXT` line to fill in, so
+`just pull-store` and every CLI command use the same directory. Switch to the commented
+`~/data/energy-baseline` line only to reproduce a recorded evaluation run.
 
 The recipe streams `raw/`, `manifests/`, `analysis/` and `service/` out of the service pod with `tar`
 (read-only on the cluster), runs `validate` on the copy and only then syncs it into the target with
