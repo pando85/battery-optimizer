@@ -2857,7 +2857,7 @@ class TestBuildDatasetValidation:
         assert directory.is_dir()
 
     def test_data_dir_inside_a_git_tree_is_refused(self, tmp_path: Path, config: Path) -> None:
-        repo_dir = Path(__file__).resolve().parents[2] / "energy-baseline"
+        repo_dir = Path(__file__).resolve().parents[1]
         with pytest.raises(ValueError, match="inside git worktree"):
             build_dataset(
                 data_dir=str(repo_dir),
