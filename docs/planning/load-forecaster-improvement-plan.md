@@ -1,8 +1,9 @@
 # Load Forecaster — improvement plan
 
 - **Status (2026-10-25):** the P1 forecaster seam is built (`load_forecast.py`), together with the
-  P0 `perfect` oracle. The P0 run is done and its results are private. Everything else is
-  proposed. Refines the
+  P0 `perfect` oracle, and so is the P1 evaluation harness (`forecast-eval`, see
+  [Benchmark reference](../benchmark.md#forecast-evaluation-forecast-eval)). The P0 run is done and
+  its results are private. Everything else is proposed. Refines the
   [Load Forecaster roadmap](components/load-forecaster.md) stages LF-1…LF-4 into executable phases.
 - **Question:** can a better household load forecast reduce the planned battery's net cost, and by
   how much? Answer it with the least machinery first. Stop as soon as the evidence says the remaining
