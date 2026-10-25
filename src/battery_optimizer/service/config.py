@@ -294,7 +294,9 @@ def _load_forecaster(value: Any) -> str:
     """A registered, non-oracle load forecaster name (``perfect`` is offline only)."""
     from battery_optimizer.load_forecast import forecaster_names, get_forecaster
 
-    allowed = forecaster_names(include_oracle=False)
+    allowed = tuple(
+        n for n in forecaster_names(include_oracle=False) if get_forecaster(n).side_loader is None
+    )
     if not isinstance(value, str):
         raise ValueError(f"service config: planning.load_forecaster must be one of {allowed}")
     try:
@@ -309,6 +311,12 @@ def _load_forecaster(value: Any) -> str:
             f"service config: planning.load_forecaster={value!r} is an offline oracle (it "
             "reads measurements from after the decision) and can never plan live; one of "
             f"{allowed}"
+        )
+    if forecaster.side_loader is not None:
+        raise ValueError(
+            f"service config: planning.load_forecaster={value!r} needs offline side inputs "
+            "(a sub-metered heat-pump feature table) that the service does not have yet; "
+            "it is evaluated offline only"
         )
     return value
 

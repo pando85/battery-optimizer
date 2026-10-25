@@ -3,9 +3,9 @@
 - **Status (2026-10-25):** P0, P2 and P3 are done; P2 failed G2, so LF-0 stays the reference. The P1 forecaster seam (`load_forecast.py`) and the
   P1 evaluation harness (`forecast-eval`, see
   [Benchmark reference](../benchmark.md#forecast-evaluation-forecast-eval)) are built. The P0 run
-  is done and its results are private. P4 is in progress and unblocked: the
-  [Price Outlook](price-outlook-improvement-plan.md) gate GA failed, so P4 does not wait for an
-  OMIE estimate. The plan refines the
+  is done and its results are private. P4 is built and evaluated: **G4 failed**, with the gain
+  concentrated in the cooling season and on days whose prices are published, and a loss in the
+  heating season (see §P4). The plan refines the
 - **Question:** can a better household load forecast reduce the planned battery's net cost, and by
   how much? Answer it with the least machinery first. Stop as soon as the evidence says the remaining
   gain is not worth the maintenance.
@@ -21,7 +21,7 @@
 | P1 harness | Seam **done** (#14); harness in review (#16) | `load_forecast.py`, `forecast-eval` | G1: seam passed (bit-identical, leakage test) |
 | P2 cheap candidates | **Done, G2 failed** | this document, §P2 | G2 |
 | P3 sub-load audit | **Done** | #15: `build-features`, `load_decomposition.py`; private feature set and P3 report | **G3 passed** |
-| P4 structured forecaster | **Planned, unblocked** (Price Outlook GA failed) | this document, §P4 | G4 |
+| P4 structured forecaster | **Done, G4 failed** | `structured_forecast.py`; private run `forecast-eval/p4-structured-*` | G4 failed: cooling holds, heating does not |
 | P5–P7 | Not started (P5 collection continues passively) | — | — |
 
 All phases run on the refreshed private dataset `dd5a2178…`, which covers 2024-01-01 to 2026-10-01.
@@ -272,6 +272,46 @@ snapshots.
 - **Gate G4:** the paired EUR result beats the P2 reference with a bootstrap interval that excludes
   zero, in at least one heating and one cooling season. A mid-run change to the AppDaemon rule is
   handled by versioning, not by refitting silently.
+
+**Status (2026-10-25): built and evaluated, G4 failed.** The forecaster is `structured` in
+`structured_forecast.py` (design in the
+[Benchmark reference](../benchmark.md#forecast-evaluation-forecast-eval) and the module docstring).
+It is offline only: the service refuses it, because it needs the sub-metered feature table.
+
+What was built, against the steps above:
+
+| Step | What it does |
+|---|---|
+| P4a | Exact replay of `climate_control`, versioned by effective date against the homelab commits it mirrors (10-day price window until 2026-04-27, 7 days after; negative prices accepted from 2026-09-05). Published prices wherever they are public at the decision, the `persistence` outlook for tomorrow at 14:00 (recorded `estimated`). Mode from the last 48 h of measured heat against cool energy. Enable flag and `min_hours_per_day` as of the decision |
+| P4b | One ridge regression per mode, refit per monthly fold: piecewise-linear in the persisted outdoor temperature (same clock hour of the latest of the last three days measured), block position, start-up term, hours selected. The in-mask prediction is scaled by the measured-over-predicted ratio of the last 7 enabled days (chosen on 2024 data, before the evaluation periods) |
+| P4c | `dhw_control` replay (one forced hour per day from 2025-03-16, per 12-hour block from 2025-12-29), trailing mean by hours since the forced hour and quarter of the hour |
+| P4d | Residual forecaster is a parameter (default `trailing_mean`), trained on `main - heat pump` |
+| P4e | Fallback to the LF-0 trailing mean of the component, per target day, with the reason recorded and counted |
+
+**Result (private run `forecast-eval/p4-structured-*`; relative figures only).** Reference LF-0, since
+P2 passed no candidate. Primary policy `rolling_horizon`; seasons were pre-registered as heating =
+Nov to Mar, cooling = Jun to Sep, one season instance per period.
+- **G4 fails.** Cooling holds in both periods, with the interval entirely above zero: about 4 % of
+  that period's P0 gap in 2025 and about 8 % in 2026. Heating holds in neither: about -4 % in 2025
+  (interval includes zero) and about -7 % in 2026 (interval entirely below zero). Over a whole period
+  the two cancel: -1 % and +0.5 % of the P0 gap, intervals include zero. Under `day_ahead` the signs
+  are the same (cooling +6 % and +12 %, heating -2 % and -8 %).
+- **Accuracy is better, money less so.** WAPE falls from about 47 % (LF-0) to 41-39 % under
+  `day_ahead` and 43-42 % under `rolling_horizon`. The gain is large in cooling months (WAPE about
+  48 % to 33-36 % in August) and absent in heating months. The heat-pump climate component alone
+  falls from about 100 % WAPE (LF-0 on the same component) to about 70 %. The hot-water component
+  is **worse** than LF-0 (about 131 % against 125 %).
+- **The replay is right; the 14:00 price guess is not.** The mask holds 98-99.5 % of measured climate
+  energy on days with published prices, but only 76-83 % on days planned on `persistence` prices,
+  which is tomorrow at 14:00 in 96-100 % of the events. On those days the heat-pump forecast is no
+  better than LF-0. This is the trigger the Price Outlook plan set for restarting PO-C.
+- **Secondary comparisons** (not gated): against `trailing_median` the structured forecaster is level
+  in 2025 and clearly worse in 2026 under `rolling_horizon`. With the residual forecast by
+  `trailing_median` the cooling gain grows (about 5 % and 15 % of the P0 gap) and the heating loss
+  stays.
+- **Next:** restart PO-C and re-run P4 on an OMIE-based tomorrow estimate; or pre-register a
+  season-conditional use (structured in cooling mode, LF-0 in heating mode); add climate signals
+  only if heating stays weak.
 
 ### P5 — Appliance-aware signals (LF-2, collect now, evaluate later)
 

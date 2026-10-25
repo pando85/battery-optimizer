@@ -1142,6 +1142,7 @@ def prepare_day_ahead(
     timezone: str,
     load_forecaster: str = DEFAULT_LOAD_FORECASTER,
     load_forecaster_params: Mapping[str, Any] | None = None,
+    load_forecaster_side: Any = None,
 ) -> tuple[list[Any], dict[str, Any]]:
     """Partition the evaluation window into local days and build its causal forecast.
 
@@ -1200,6 +1201,7 @@ def prepare_day_ahead(
         target_days=targets,
         params=params,
         allow_oracle=True,
+        side=load_forecaster_side,
     )
     forecast_diag = []
     for j, record in zip(targets, result.per_day, strict=True):
@@ -1444,6 +1446,7 @@ def prepare_rolling_horizon(
     load_forecaster: str = DEFAULT_LOAD_FORECASTER,
     load_forecaster_params: Mapping[str, Any] | None = None,
     price_outlook: str = DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK,
+    load_forecaster_side: Any = None,
 ) -> tuple[RollingHorizonInputs, dict[str, Any]]:
     """Build the load forecast inputs and resolve the planning terminal value.
 
@@ -1593,6 +1596,7 @@ def prepare_rolling_horizon(
         load_forecaster=load_forecaster,
         load_forecaster_params=dict(load_forecaster_params or {}),
         price_outlook=price_outlook,
+        load_forecaster_side=load_forecaster_side,
     )
     from battery_optimizer.price_outlook import get_price_outlook
 
@@ -1984,6 +1988,7 @@ class RollingHorizonInputs:
     load_forecaster: str = DEFAULT_LOAD_FORECASTER
     load_forecaster_params: dict[str, Any] = field(default_factory=dict)
     price_outlook: str = DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK
+    load_forecaster_side: Any = None
 
 
 def _rh_cadence_text(
@@ -2160,6 +2165,7 @@ def _run_policies(
                     load_forecaster=rolling_horizon.load_forecaster,
                     load_forecaster_params=rolling_horizon.load_forecaster_params or None,
                     price_outlook=rolling_horizon.price_outlook,
+                    load_forecaster_side=rolling_horizon.load_forecaster_side,
                 )
                 # The returned schedule comes from simulate() with solver_status="not_applicable"
                 # (a traced plan).  But the rolling horizon IS a solver-based policy (many MILP
@@ -3337,6 +3343,19 @@ def benchmark_dataset(
     gross = _col("gross_kwh")
     prices = _col("price_eur_per_kwh")
 
+    # Side inputs for a forecaster that reads more than the load (aligned to this very
+    # table, so an ``eval_end`` cut applies to them too); ``None`` for every other one.
+    from battery_optimizer.load_forecast import build_side_inputs
+
+    try:
+        load_side = build_side_inputs(
+            load_forecaster, forecaster_overrides, table=table, data_dir=data_dir
+        )
+    except ValueError as exc:
+        raise BenchmarkInputError(str(exc)) from exc
+    if load_side is not None:
+        forecaster_record["side_inputs_source"] = load_side.describe()
+
     # ---- train / eval split -------------------------------------------------
     train_window_start = cut - timedelta(days=int(train_days))
     train_mask = np.array([s < cut and s >= train_window_start for s in starts])
@@ -3427,6 +3446,7 @@ def benchmark_dataset(
             timezone=config.tariff_periods.timezone,
             load_forecaster=load_forecaster,
             load_forecaster_params=forecaster_overrides,
+            load_forecaster_side=load_side,
         )
         day_ahead = DayAheadInputs(
             days=da_days,
@@ -3492,6 +3512,7 @@ def benchmark_dataset(
             load_forecaster=load_forecaster,
             load_forecaster_params=forecaster_overrides,
             price_outlook=rolling_horizon_price_outlook,
+            load_forecaster_side=load_side,
         )
     records, solver_info, plans = _run_policies(
         core=core,

@@ -395,6 +395,7 @@ at the event's local-day start, the same rules as before the seam. Registered fo
 | `ewma` | Same-slot exponentially weighted mean over days, weight `0.5^(age/half_life_days)` with age counted from the target day | `half_life_days` (7), `window_days` (56, the cap) |
 | `daytype` | Mean of the last `n_days` local days of the target's day type: weekday, Saturday, or Sunday-or-holiday. Spanish national holidays (plus an optional subdivision) come from the [`holidays`](https://pypi.org/project/holidays/) package. Days without usable data are skipped | `n_days` (6), `window_days` (84, the search limit), `subdivision` (none = national only) |
 | `level_adjusted` | The 28-day trailing-mean profile times `clip(observed last 24 h ÷ profile of those slots, lo, hi)`. **Declares `intraday_cutoff`**: at the 14:00 and 20:30 events the last 24 h include today's observed slots. One factor scales every target day; under 24 observed slots it stays 1.0 | `window_days` (28), `lo` (0.7), `hi` (1.4), `min_slots` (24) |
+| `structured` | **LF-1.** Heat pump plus residual, with the heat-pump schedule replayed from the prices (see below). **Declares `intraday_cutoff` and a `fit` step, and needs side inputs: offline only, refused by the service** | `features` (feature set id, required), `window_days` (28), `residual_forecaster` (`trailing_mean`), `price_outlook` (`persistence`), `calibration_days` (7) |
 | `blend` | `w · trailing mean + (1 − w) ·` the same-season-last-year profile: the mean of the local days within `last_year_half_width_days` of the same date one year earlier. Trailing alone where fewer than `min_last_year_days` of those days have usable data | `w` (0.5), `window_days` (28), `last_year_half_width_days` (14), `min_last_year_days` (7) |
 
 The six statistical candidates (`trailing_median` to `blend`) read the
@@ -413,7 +414,7 @@ records the forecaster's name, params and oracle flag under `lineage.load_foreca
 seam. To add a forecaster, write one function decorated with `@register_forecaster("name")`; its
 keyword-only parameters, with their defaults, become its recorded params.
 
-Two optional capabilities are declared at registration, and both are recorded in the forecaster's
+Three optional capabilities are declared at registration, and all are recorded in the forecaster's
 provenance:
 
 - `fit=fit_fn` for a trained model. `fit_fn(FitRequest, **params)` returns any state. The seam fits
@@ -427,6 +428,14 @@ provenance:
   the flag the local-midnight cutoff is kept bit for bit. The leakage test in
   `tests/test_load_forecast.py` perturbs everything from each forecaster's **declared** cutoff on.
 
+- `side_loader=loader` for a forecaster that reads more than the load. The caller builds one
+  `SideInputs` for the whole index space (`build_side_inputs`; `benchmark` and `forecast-eval` do it
+  from the dataset table) and passes it as `side=`. The seam hands the forecaster a `SideView`:
+  every measured side series is cut at `cutoff_idx` like the load, and the prices at the first index
+  that is not yet public at the cutoff instant (D+1 from 20:15 local). A forecaster without a
+  `side_loader` is never handed side data, and one with it must still run, degraded and saying why,
+  when none is passed. The fit cache is keyed by the side inputs' content fingerprint.
+
 ```python
 @register_forecaster("level_adjusted", intraday_cutoff=True)
 def _level_adjusted(request: ForecastRequest, *, window_days: int = 28) -> list[DayForecast]: ...
@@ -435,6 +444,42 @@ def _level_adjusted(request: ForecastRequest, *, window_days: int = 28) -> list[
 @register_forecaster("my_model", fit=_fit_my_model)
 def _my_model(request: ForecastRequest, *, alpha: float = 0.5) -> list[DayForecast]: ...
 ```
+
+**Structured forecaster (`structured`, LF-1).** `forecast = heat pump + residual`, built from the
+[sub-load feature table](cli.md#build-features) (`features=<feature set id or unique prefix>`).
+AppDaemon's `climate_control` and `dhw_control` are price rules, so *when* the heat pump runs is
+replayed and only *how much* it draws is modelled. All inputs are as of the cutoff.
+
+- **Schedule mask.** An exact replay of `climate_control` for each target day: the hours priced below
+  two thirds of the trailing mean price (10 days of PVPC history until 2026-04-27, 7 days after),
+  or the cheapest `min_hours_per_day` hours when fewer qualify. The rule is versioned by effective
+  date against the homelab commits it mirrors (`CLIMATE_RULE_VERSIONS`, `DHW_RULE_VERSIONS`), so a
+  change of the AppDaemon rule is a new version, not a silent refit. The heat or cool mode is the one
+  with more measured energy in the last 48 h. The enable flag and `min_hours_per_day` are the last
+  known values. Prices are the published ones wherever they are public at the decision; the other
+  days use the `price_outlook` param (`persistence`) and are recorded as `estimated`. So the 14:00
+  event plans tomorrow on estimated prices and the 20:30 event on published ones.
+- **Energy per selected hour.** One ridge regression per mode, fitted once per monthly fold on the
+  replayed history before the fold (the seam's `fit` step): piecewise-linear in the as-of outdoor
+  temperature (persistence: the same local clock hour of the latest of the last three days it was
+  measured), the position in the block of selected hours, a start-up term and the number of selected
+  hours. Outside the mask the climate energy is a constant. The in-mask prediction is scaled by the
+  ratio of measured to predicted energy over the last `calibration_days` enabled days (clipped to
+  0.5-2), because the heat pump's behaviour drifts inside a month.
+- **Hot water.** The `dhw_control` replay places the forced hours (one per day from 2025-03-16, one
+  per 12-hour block from 2025-12-29); the energy is the trailing mean by hours since the last forced
+  hour and quarter of the hour over `window_days` days.
+- **Residual.** `main - heat pump` is forecast by the `residual_forecaster` param through the same
+  seam at the local-midnight cutoff, so nothing is counted twice.
+- **Fallbacks.** A disabled rule, an unknown mode or flag, unavailable or incomplete prices, missing
+  temperature or no fitted model make the climate part fall back to the LF-0 trailing mean of that
+  component; the hot-water part falls back the same way. The reason is recorded per target day and
+  counted per event kind in the rolling-horizon artifact (`forecast_metadata.forecaster_labels`).
+  Without side inputs the forecast is LF-0 of the main load.
+
+`tests/test_structured_forecast.py` replays the rules on hand-built days (the fallback branch, ties,
+23- and 25-hour days), pins every fallback reason, and perturbs the load, every measured side series,
+the unpublished prices and the fold's own month to show the forecast does not move.
 
 **Price-outlook seam (`--rolling-horizon-price-outlook`).** What a rolling-horizon event knows about
 the prices it plans over comes from a registered price outlook in `price_outlook.py`, through one
@@ -519,6 +564,20 @@ that period's P0 gap. The secondary policy is reported but not gated.
 - LF-0 against itself is exactly zero, point and interval.
 - When `--p0-summary` is given and `trailing_mean` and `perfect` are both candidates, the LF-0 cost,
   the `perfect` cost and their gap are compared for exact equality with the P0 run (gate G1).
+
+**Gate G4** (structured forecaster). `--gate G4 --gate-candidate LABEL --gate-reference LABEL`
+pre-registers the season definition and the rule before any run. Seasons are local calendar months
+of each period's days: heating is November to March, cooling June to September, April, May and
+October are transitional and appear only in the whole-period figures. A *season instance* is one
+period's days in one season (blocks of 7 consecutive days for the bootstrap; fewer than 14 days is
+not evaluated). The candidate passes if, for `rolling_horizon`, the 95 % interval of its paired saving
+against the reference lies entirely above zero in at least one heating **and** at least one cooling
+season instance. Whole-period figures, `day_ahead` and every `--compare CANDIDATE=REFERENCE` pair are
+reported, not gated. Candidates take an alias, `structured@lf1:features=...`, so the labels are
+short. A forecaster that declares a `diagnose` hook adds a component report to the summary: heat-pump
+WAPE (climate, hot water, total) against the LF-0 trailing mean of the same component, the mask
+hit-rate (measured climate kWh inside the replayed hours) by price provenance, and the counts of
+price provenance and fallbacks per decision kind.
 
 ## Price-outlook evaluation (`price-eval`)
 

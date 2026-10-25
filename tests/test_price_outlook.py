@@ -191,6 +191,16 @@ class TestSeam:
         assert r.diagnostics["source_day"] == "2025-06-16"
         assert r.diagnostics["slots_from_earlier_day"] == 0
 
+    def test_persistence_skips_a_price_the_source_day_lacks(self) -> None:
+        prices = self.prices.copy()
+        hole = self.boundary - 96 + 40  # one slot of the last published day is unknown
+        prices[hole] = np.nan
+        r = _call("persistence", prices, self.starts, self.local_days, self.decision, self.plan_end)
+        k = self.boundary - self.decision + 40
+        # Taken from the day before, which has the clock time, never a NaN estimate.
+        assert r.values[k] == prices[hole - 96]
+        assert r.diagnostics["slots_from_earlier_day"] == 1
+
     def test_malformed_answers_are_refused(self, monkeypatch) -> None:
         def short(request):
             return np.zeros(1), np.ones(1, dtype=bool), {}

@@ -259,7 +259,14 @@ It writes a private run to `<dataset>/forecast-eval/<name>-<UTC timestamp>/`:
   sanity checks and provenance (git commit and dirty flag, tariff and evaluation config hashes,
   dataset id, forecasters, every benchmark run id, runtime per candidate).
 
-The method (decision instants, metrics, block bootstrap, gate, folds) is described in
+`--gate G4` pre-registers the structured forecaster's gate (`--gate-candidate`, `--gate-reference`,
+default reference `trailing_mean`), and `--compare CANDIDATE=REFERENCE` (repeatable) adds paired
+comparisons that are reported but never gated. A candidate alias (`structured@lf1:features=<feature
+set id>,residual_forecaster=trailing_median`) names it in those options. The tariff and data
+directory come from `--config` and `--data-dir`; the feature set is read from
+`<data dir>/analysis/v1/features/`.
+
+The method (decision instants, metrics, block bootstrap, gates, folds) is described in
 [Benchmark reference § Forecast evaluation](benchmark.md#forecast-evaluation-forecast-eval).
 `benchmark --eval-end` is the flag the harness uses to cut a period out of a longer dataset.
 

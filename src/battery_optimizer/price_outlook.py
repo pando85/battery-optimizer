@@ -490,7 +490,8 @@ def _persistence(request: OutlookRequest) -> OutlookSlots:
         key = (local.hour, local.minute)
         for depth, (_label, mapping) in enumerate(maps):
             idx = mapping.get(key)
-            if idx is not None:
+            # A price the source day lacks (NaN) is skipped like a missing clock time.
+            if idx is not None and np.isfinite(request.published_prices[idx]):
                 values[k] = request.published_prices[idx]
                 estimated[k] = True
                 from_earlier += depth > 0
