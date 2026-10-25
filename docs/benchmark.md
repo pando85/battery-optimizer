@@ -395,7 +395,7 @@ at the event's local-day start, the same rules as before the seam. Registered fo
 | `ewma` | Same-slot exponentially weighted mean over days, weight `0.5^(age/half_life_days)` with age counted from the target day | `half_life_days` (7), `window_days` (56, the cap) |
 | `daytype` | Mean of the last `n_days` local days of the target's day type: weekday, Saturday, or Sunday-or-holiday. Spanish national holidays (plus an optional subdivision) come from the [`holidays`](https://pypi.org/project/holidays/) package. Days without usable data are skipped | `n_days` (6), `window_days` (84, the search limit), `subdivision` (none = national only) |
 | `level_adjusted` | The 28-day trailing-mean profile times `clip(observed last 24 h ÷ profile of those slots, lo, hi)`. **Declares `intraday_cutoff`**: at the 14:00 and 20:30 events the last 24 h include today's observed slots. One factor scales every target day; under 24 observed slots it stays 1.0 | `window_days` (28), `lo` (0.7), `hi` (1.4), `min_slots` (24) |
-| `structured` | **LF-1.** Heat pump plus residual, with the heat-pump schedule replayed from the prices (see below). **Declares `intraday_cutoff` and a `fit` step, and needs side inputs: offline only, refused by the service** | `features` (feature set id, required), `window_days` (28), `residual_forecaster` (`trailing_mean`), `price_outlook` (`persistence`), `calibration_days` (7) |
+| `structured` | **LF-1.** Heat pump plus residual, with the heat-pump schedule replayed from the prices (see below). **Declares `intraday_cutoff` and a `fit` step, and needs side inputs: offline only, refused by the service** | `features` (feature set id, required), `window_days` (28), `residual_forecaster` (`trailing_mean`), `price_outlook` (`persistence`), `calibration_days` (7), `disabled_fallback` (`lf0`), `disabled_history_days` (28), `disabled_lookback_days` (60), `climate_lf0_season` (none) |
 | `blend` | `w · trailing mean + (1 − w) ·` the same-season-last-year profile: the mean of the local days within `last_year_half_width_days` of the same date one year earlier. Trailing alone where fewer than `min_last_year_days` of those days have usable data | `w` (0.5), `window_days` (28), `last_year_half_width_days` (14), `min_last_year_days` (7) |
 
 The six statistical candidates (`trailing_median` to `blend`) read the
@@ -457,8 +457,10 @@ replayed and only *how much* it draws is modelled. All inputs are as of the cuto
   change of the AppDaemon rule is a new version, not a silent refit. The heat or cool mode is the one
   with more measured energy in the last 48 h. The enable flag and `min_hours_per_day` are the last
   known values. Prices are the published ones wherever they are public at the decision; the other
-  days use the `price_outlook` param (`persistence`) and are recorded as `estimated`. So the 14:00
-  event plans tomorrow on estimated prices and the 20:30 event on published ones.
+  days use the `price_outlook` param (`persistence`, or an OMIE estimator such as `omie_period`,
+  which reads the OMIE day-ahead series carried by the side inputs and cut at the first OMIE day not
+  usable at the cutoff) and are recorded as `estimated`. So the 14:00 event plans tomorrow on
+  estimated prices and the 20:30 event on published ones.
 - **Energy per selected hour.** One ridge regression per mode, fitted once per monthly fold on the
   replayed history before the fold (the seam's `fit` step): piecewise-linear in the as-of outdoor
   temperature (persistence: the same local clock hour of the latest of the last three days it was
@@ -476,6 +478,16 @@ replayed and only *how much* it draws is modelled. All inputs are as of the cuto
   component; the hot-water part falls back the same way. The reason is recorded per target day and
   counted per event kind in the rolling-horizon artifact (`forecast_metadata.forecaster_labels`).
   Without side inputs the forecast is LF-0 of the main load.
+- **Second-look options (all off by default, so the first P4 results reproduce).**
+  `disabled_fallback=disabled_history` forecasts the climate part of a day whose rule is disabled
+  as the slot-wise mean of the last `disabled_history_days` (28) complete days within
+  `disabled_lookback_days` (60) whose rule was disabled, and as zero when there is none, instead of
+  the trailing mean of every day (which still carries the enabled days' climate energy). The reason
+  stays `rule_disabled`, so the fallback counts do not change. `climate_lf0_season=heating` (months
+  Nov-Mar) or `cooling` (Jun-Sep) is the seasonal hybrid: on the days of that season the climate
+  part is the LF-0 trailing mean even when the rule is enabled (reason `season_hybrid`); a disabled
+  day takes the disabled fallback first, and the shoulder months Apr, May and Oct belong to neither
+  season, so the model runs there. The month is the local month of the target day.
 
 `tests/test_structured_forecast.py` replays the rules on hand-built days (the fallback branch, ties,
 23- and 25-hour days), pins every fallback reason, and perturbs the load, every measured side series,

@@ -264,7 +264,10 @@ default reference `trailing_mean`), and `--compare CANDIDATE=REFERENCE` (repeata
 comparisons that are reported but never gated. A candidate alias (`structured@lf1:features=<feature
 set id>,residual_forecaster=trailing_median`) names it in those options. The tariff and data
 directory come from `--config` and `--data-dir`; the feature set is read from
-`<data dir>/analysis/v1/features/`.
+`<data dir>/analysis/v1/features/`. `--label` and `--note` (repeatable) record free text in the
+pre-registration, for the role of a run (for example a second look at periods that were already
+seen) and for what its result may be used for. A structured candidate with an OMIE
+`price_outlook` also reads the OMIE day-ahead store of `--data-dir`.
 
 The method (decision instants, metrics, block bootstrap, gates, folds) is described in
 [Benchmark reference § Forecast evaluation](benchmark.md#forecast-evaluation-forecast-eval).
