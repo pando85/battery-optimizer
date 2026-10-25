@@ -76,6 +76,8 @@ def run_server(service: ShadowService, *, host: str, port: int) -> None:
 
     from .api import create_app
 
+    # httpx logs every request at INFO; the 60 s REST refresh would flood the log.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     app = create_app(service)
     server = uvicorn.Server(
         uvicorn.Config(
