@@ -1,6 +1,6 @@
 # ADR-0004: Production runtime and independent source repository for the battery optimizer
 
-- **Status:** Proposed (extraction step implemented 2026-10-25 — see [provenance](../provenance.md))
+- **Status:** Accepted (2026-10-25; repository split, production batch pipeline and **shadow-only** runtime; physical/live control remains gated)
 - **Date:** 2026-10-24
 - **Decision owners:** Homelab maintainers
 - **Extends:** [ADR-0001 — economic dispatch](0001-home-battery-economic-dispatch.md)
@@ -14,6 +14,10 @@
 The `scripts/energy-baseline/` Python package (now `src/battery_optimizer/` in this repository) can extract Prometheus/HA data, create reproducible offline datasets, compare policies and serialize typed dispatch intents. It has no live writer, runtime service or deployed safety guard. HA, AppDaemon, Prometheus, Grafana, Vault and ArgoCD already exist in the homelab.
 
 Application code, test suite and container artifacts need an independent release lifecycle; homelab-specific cluster configuration must remain GitOps-managed. We want minimal new operational dependencies.
+
+### Implementation note (2026-10-25; historical decisions below retained)
+
+The original wording below intentionally records the architecture **before** the application repo and runtime were created. Today, `pando85/battery-optimizer` owns the migrated Python package, CI and released wheel/sdist plus OCI images through **v0.2.1** ([provenance](../provenance.md)); the implementation is Python **3.14+**, not the original minimum 3.12+ proposal. A read-only resident shadow service with HA/Prometheus adapters, a status/metrics HTTP API and simulator SOC exists in the application; `pando85/homelab` GitOps configures that Deployment and a separate daily extraction CronJob, PVC, backup snapshots, monitoring and a dashboard ([runbook](https://github.com/pando85/homelab/blob/master/docs/deployment/battery-optimizer.md)). Its first manually triggered extraction succeeded, **not** proof of successive scheduled runs or tested restore. The Venus E V3 is **not connected to HA** and its SOC remains simulated; shadow-versus-native acceptance, Omnibattery command adapter, hardware fail-safe commissioning and live actuation are **unimplemented**. Acceptance of this ADR means acceptance of the software ownership/runtime pattern, **not authorization for Phase D**.
 
 ## Decision
 
