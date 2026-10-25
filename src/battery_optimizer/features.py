@@ -94,6 +94,9 @@ DEFAULT_LOOKBACK_SECONDS = 3600.0
 #: Coverage at or above this counts as a fully measured slot (float rounding slack only).
 FULL_COVERAGE = 1.0 - 1e-9
 
+#: A non-zero reading that repeats unchanged for this long is listed for review.
+CONSTANT_RUN_HOURS = 6.0
+
 KIND_POWER = "power"
 KIND_TEMPERATURE = "temperature"
 KIND_STATE = "state"
@@ -182,9 +185,7 @@ def feature_schema(signals: tuple[Signal, ...] = SIGNALS) -> pa.Schema:
 # ---------------------------------------------------------------------------
 
 
-def merge_samples(
-    t_us: np.ndarray, values: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, int, int]:
+def merge_samples(t_us: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray, int, int]:
     """Sort samples by time and collapse repeated timestamps (keep the first loaded).
 
     Several scrape eras and pods can export the same entity.  Their timestamps do not overlap
@@ -505,6 +506,36 @@ def _month_labels(micros: np.ndarray) -> np.ndarray:
     return np.datetime_as_string(micros.astype("datetime64[us]").astype("datetime64[M]"))
 
 
+def constant_runs(
+    t_us: np.ndarray, values: np.ndarray, *, min_hours: float, limit: int = 10
+) -> dict[str, Any]:
+    """Runs of one identical non-zero value that last at least *min_hours*.
+
+    A live power reading moves; a long constant run is a stuck sensor or a stale state that the
+    exporter kept repeating.  Heat-pump power is quantised (400 W can repeat for hours), so the
+    threshold is a screen for review, not a verdict: the longest runs are listed.
+    """
+    if values.size == 0:
+        return {"min_hours": min_hours, "count": 0, "longest": []}
+    starts = np.flatnonzero(np.concatenate(([True], values[1:] != values[:-1])))
+    ends = np.concatenate((starts[1:] - 1, [values.size - 1]))
+    hours = (t_us[ends] - t_us[starts]) / 3.6e9
+    keep = np.flatnonzero((values[starts] != 0) & (hours >= min_hours))
+    order = keep[np.argsort(-hours[keep], kind="stable")][:limit]
+    return {
+        "min_hours": min_hours,
+        "count": int(keep.size),
+        "longest": [
+            {
+                "start": iso_z(datetime.fromtimestamp(t_us[starts[k]] / 1e6, UTC)),
+                "hours": float(hours[k]),
+                "value": float(values[starts[k]]),
+            }
+            for k in order
+        ],
+    }
+
+
 def series_quality(
     raw: RawSeries,
     table: pa.Table,
@@ -540,6 +571,8 @@ def series_quality(
             "p99": float(np.percentile(dt, 99)),
             "max": float(dt.max()),
         }
+    if signal.kind in (KIND_POWER, KIND_TEMPERATURE):
+        out["constant_runs"] = constant_runs(t, raw.values, min_hours=CONSTANT_RUN_HOURS)
     out["gap_spans"] = int(gap_mask.sum())
     out["gap_seconds"] = float(dt[gap_mask].sum()) if dt.size else 0.0
 
@@ -752,7 +785,7 @@ def compute_feature_set_id(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _json_bytes(obj: Any) -> bytes:
+def json_bytes(obj: Any) -> bytes:
     def _clean(value: Any) -> Any:
         if isinstance(value, float) and not math.isfinite(value):
             return None
@@ -866,7 +899,7 @@ def build_features(
         "quality": quality,
     }
     write_part_atomic(directory / "parts" / part_name, payload)
-    write_part_atomic(directory / MANIFEST_NAME, _json_bytes(manifest))
+    write_part_atomic(directory / MANIFEST_NAME, json_bytes(manifest))
     log.info("wrote feature set %s (%d slots) to %s", feature_set_id, table.num_rows, directory)
 
     if dataset is not None:
@@ -876,7 +909,7 @@ def build_features(
         check = main_meter_check(table, loaded.table)
         check["dataset_id"] = loaded.dataset_id
         write_part_atomic(
-            directory / "quality" / f"main_meter-{loaded.dataset_id[:12]}.json", _json_bytes(check)
+            directory / "quality" / f"main_meter-{loaded.dataset_id[:12]}.json", json_bytes(check)
         )
     return directory
 
