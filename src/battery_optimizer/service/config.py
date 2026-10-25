@@ -142,6 +142,7 @@ class PlanningSettings:
     min_horizon_slots: int = 4
     max_horizon_slots: int = 192
     forecast_window_days: int = 28
+    load_forecaster: str = "trailing_mean"
     terminal_value: str | float = "trailing_mean"
     throughput_cost_eur_per_kwh: float = 0.0
     replan_soc_change_frac: float = 0.05
@@ -253,6 +254,29 @@ def _int(value: Any, name: str, minimum: int = 1) -> int:
     return value
 
 
+def _load_forecaster(value: Any) -> str:
+    """A registered, non-oracle load forecaster name (``perfect`` is offline only)."""
+    from battery_optimizer.load_forecast import forecaster_names, get_forecaster
+
+    allowed = forecaster_names(include_oracle=False)
+    if not isinstance(value, str):
+        raise ValueError(f"service config: planning.load_forecaster must be one of {allowed}")
+    try:
+        forecaster = get_forecaster(value)
+    except ValueError:
+        raise ValueError(
+            f"service config: planning.load_forecaster={value!r} is not registered; "
+            f"one of {allowed}"
+        ) from None
+    if forecaster.oracle:
+        raise ValueError(
+            f"service config: planning.load_forecaster={value!r} is an offline oracle (it "
+            "reads measurements from after the decision) and can never plan live; one of "
+            f"{allowed}"
+        )
+    return value
+
+
 def _read_token() -> Secret | None:
     token = get_env("BATTERY_OPTIMIZER_HA_TOKEN")
     if token:
@@ -349,6 +373,7 @@ def load_service_config(path: Path | None = None) -> ServiceConfig:
         if not math.isfinite(float(terminal_value)):
             raise ValueError("service config: terminal_value must be finite")
         terminal_value = float(terminal_value)
+    load_forecaster = _load_forecaster(pl_raw.get("load_forecaster", "trailing_mean"))
     interval_seconds = _int(pl_raw.get("interval_seconds", 900), "interval_seconds", 60)
     if 3600 % interval_seconds:
         raise ValueError("service config: interval_seconds must divide an hour")
@@ -362,6 +387,7 @@ def load_service_config(path: Path | None = None) -> ServiceConfig:
         min_horizon_slots=_int(pl_raw.get("min_horizon_slots", 4), "min_horizon_slots"),
         max_horizon_slots=_int(pl_raw.get("max_horizon_slots", 192), "max_horizon_slots"),
         forecast_window_days=_int(pl_raw.get("forecast_window_days", 28), "forecast_window_days"),
+        load_forecaster=load_forecaster,
         terminal_value=terminal_value,
         throughput_cost_eur_per_kwh=_positive(
             pl_raw.get("throughput_cost_eur_per_kwh", 0.0), "throughput_cost", allow_zero=True

@@ -137,6 +137,20 @@ def test_forecast_reproduces_flat_history_and_handles_fall_back_day():
     assert fc.meta["days"][0]["slots_pooled_fallback"] == 4
 
 
+def test_forecast_records_the_forecaster_and_refuses_the_oracle():
+    day = date(2026, 10, 20)
+    history = flat_history(day, load_kwh=0.2)
+    targets = local_day_slots(day, TZ)[:8]
+    fc = forecast_load(history, targets, tz=TZ, window_days=28)
+    assert fc.meta["load_forecaster"] == {
+        "name": "trailing_mean",
+        "params": {"window_days": 28},
+        "oracle": False,
+    }
+    with pytest.raises(ValueError, match="oracle"):
+        forecast_load(history, targets, tz=TZ, window_days=28, forecaster="perfect")
+
+
 def test_forecast_uses_nothing_from_the_decision_day():
     day = date(2026, 10, 20)
     history = flat_history(day)

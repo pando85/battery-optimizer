@@ -2,13 +2,13 @@
 
 - **Status (2026-10-25):** V0 implemented; enhancements proposed, not implemented.
 - **Domain responsibility:** forecast **gross household demand** in kWh per aligned 15-minute UTC slot, as information existed when a decision was made.
-- **Current code:** `src/battery_optimizer/service/history.py` (`LoadForecast`, `forecast_load`), `src/battery_optimizer/policies.py` (`forecast_load_trailing_slot_mean`), `src/battery_optimizer/rolling_horizon.py` (causal/frozen offline evaluation), `src/battery_optimizer/ha_states.py` (as-of appliance-state reader).
+- **Current code:** `src/battery_optimizer/load_forecast.py` (forecaster registry and `run_forecaster` seam: `trailing_mean` = LF-0, `perfect` = offline oracle), `src/battery_optimizer/service/history.py` (`LoadForecast`, `forecast_load`), `src/battery_optimizer/policies.py` (`forecast_load_trailing_slot_mean`), `src/battery_optimizer/rolling_horizon.py` (causal/frozen offline evaluation), `src/battery_optimizer/ha_states.py` (as-of appliance-state reader).
 - **Execution plan:** [Load Forecaster improvement plan](../load-forecaster-improvement-plan.md) (phases P0–P7 with gates).
 - **Architecture:** [four DECIDE components](../../architecture.md#planning-components); [ADR-0002](../../adr/0002-appliance-aware-load-forecasting.md); [implementation TODO-3.1–3.9](../home-battery-optimizer-implementation.md#6-phase-3--predict-demand-only-if-it-creates-savings).
 
 ## Contract and non-goals
 
-**Input:** immutable decision timestamp, slot horizon, historical measurements and their quality mask, known calendar/schedules, and only appliance attributes actually available at that timestamp. **Output:** aligned load forecast (and eventually uncertainty), forecast provenance, missing-data/coverage flags, and input-availability cutoff. Production currently uses `LoadForecast`; these are **logical obligations**, not a proposal to add a new Python interface today.
+**Input:** immutable decision timestamp, slot horizon, historical measurements and their quality mask, known calendar/schedules, and only appliance attributes actually available at that timestamp. **Output:** aligned load forecast (and eventually uncertainty), forecast provenance, missing-data/coverage flags, and input-availability cutoff. Production currently uses `LoadForecast`. The history-cutoff and provenance obligations are implemented by the seam in `load_forecast.py` (`run_forecaster`); the rest remain **logical obligations**.
 
 Do not conflate household gross demand with signed grid import after the battery starts operating: when charge/discharge energy is measured, reconstruct gross load with the correctly signed battery flows. Do not treat unknown samples as zero, leak tomorrow's observed appliance state into today's prediction, infer appliance consumption directly from aggregate power without evidence, or send commands to HVAC/appliances.
 

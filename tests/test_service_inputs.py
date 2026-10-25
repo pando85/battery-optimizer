@@ -224,3 +224,22 @@ def test_token_file(tmp_path, monkeypatch):
 def test_invalid_config_is_refused(tmp_path, override, message):
     with pytest.raises(ValueError, match=message):
         load_service_config(write_service_config(tmp_path, **override))
+
+
+def test_load_forecaster_defaults_to_lf0(tmp_path):
+    config = load_service_config(write_service_config(tmp_path))
+    assert config.planning.load_forecaster == "trailing_mean"
+    assert config.public_dict()["planning"]["load_forecaster"] == "trailing_mean"
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("perfect", "offline oracle"),
+        ("nope", "not registered"),
+        (3, "must be one of"),
+    ],
+)
+def test_load_forecaster_rejects_oracles_and_unknown_names(tmp_path, value, message):
+    with pytest.raises(ValueError, match=message):
+        load_service_config(write_service_config(tmp_path, **{"planning.load_forecaster": value}))
