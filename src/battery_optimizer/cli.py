@@ -384,6 +384,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="List all deduplicated states for --entity (requires --entity)",
     )
 
+    # -- serve (resident shadow service) ---------------------------------
+    p_serve = subs.add_parser(
+        "serve",
+        help="Run the resident SHADOW service (read-only HA/Prometheus, plans never sent)",
+    )
+    _add_common(p_serve)
+    p_serve.add_argument(
+        "--service-config",
+        default=None,
+        help="Service YAML (default: $BATTERY_OPTIMIZER_SERVICE_CONFIG or config/service.yaml)",
+    )
+    p_serve.add_argument("--host", default="0.0.0.0", help="Bind address (default 0.0.0.0)")
+    p_serve.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="HTTP port (default: $BATTERY_OPTIMIZER_PORT or 8080)",
+    )
+
+    # -- shadow-report -----------------------------------------------------
+    p_shadow = subs.add_parser(
+        "shadow-report",
+        help="Compare recorded shadow plans against the native battery behaviour",
+    )
+    _add_common(p_shadow)
+    p_shadow.add_argument(
+        "--service-config",
+        default=None,
+        help="Service YAML, for the timezone and slot length (default as for serve)",
+    )
+    p_shadow.add_argument(
+        "--since",
+        default=None,
+        help="Window start: ISO instant with offset, or a local date (default: 14 days ago)",
+    )
+    p_shadow.add_argument(
+        "--until",
+        default=None,
+        help="Window end (exclusive): ISO instant or local date (default: today's midnight)",
+    )
+    p_shadow.add_argument("--format", choices=("md", "json"), default="md")
+
     # -- mirror (deferred) ------------------------------------------------
     p_mirror = subs.add_parser("mirror", help="Mirror dataset to SQL (deferred in Phase 1)")
     _add_common(p_mirror)
@@ -1100,6 +1142,50 @@ def cmd_ha_states(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Run the resident shadow service until SIGTERM/SIGINT."""
+    from battery_optimizer.service.config import resolve_port
+    from battery_optimizer.service.serve import build_service, run_server
+
+    service, _config = build_service(
+        service_config=args.service_config,
+        tariff_config=args.config,
+        data_dir=args.data_dir,
+    )
+    run_server(service, host=args.host, port=resolve_port(args.port))
+    return 0
+
+
+def cmd_shadow_report(args: argparse.Namespace) -> int:
+    """Shadow-vs-native comparison from the recorded store."""
+    from battery_optimizer.config import load_config, resolve_config_path
+    from battery_optimizer.paths import resolve_data_dir
+    from battery_optimizer.service.config import load_service_config, resolve_service_config_path
+    from battery_optimizer.service.shadow_report import (
+        build_shadow_report,
+        parse_window,
+        render_markdown,
+    )
+
+    config = load_service_config(resolve_service_config_path(args.service_config))
+    tariff = load_config(resolve_config_path(args.config))
+    tz = config.tz
+    since, until = parse_window(args.since, args.until, tz, datetime.now(UTC))
+    report = build_shadow_report(
+        resolve_data_dir(args.data_dir),
+        since=since,
+        until=until,
+        tariff=tariff,
+        tz=tz,
+        interval_seconds=config.planning.interval_seconds,
+    )
+    if args.format == "json":
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(render_markdown(report))
+    return 0
+
+
 def cmd_mirror(args: argparse.Namespace) -> int:
     """Mirror dataset to SQL — deferred in Phase 1."""
     print(
@@ -1122,6 +1208,8 @@ _HANDLERS = {
     "report": cmd_report,
     "inspect-sql": cmd_inspect_sql,
     "ha-states": cmd_ha_states,
+    "serve": cmd_serve,
+    "shadow-report": cmd_shadow_report,
     "mirror": cmd_mirror,
 }
 
