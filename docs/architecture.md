@@ -92,6 +92,10 @@ These have no CLI surface (or `hack/` only), deliberately:
 - `economic_sensitivity.py` — pure rescoring / re-optimisation under user-supplied throughput-cost
   and terminal-value sweeps (see [Economic sensitivity](#economic-sensitivity-economic_sensitivitypy)). Experiment only, not part of the
   canonical benchmark pipeline.
+- `omie_prices.py` — read side of the OMIE day-ahead store (`extract --source omie`, see
+  [CLI](cli.md#extract---source-omie-omie-day-ahead-prices)): ES prices on the 15-minute UTC grid,
+  per-day `first_observed_at` and the as-of rule. A library function for the price estimator; it
+  never writes and is not a `build` input.
 - `replay_runtime.py` — replay-only asyncio dispatch runtime with a recording sink. No writer,
   no actuation, no HA adapter, no wall clock. See [Replay runtime](#replay-runtime-replay_runtimepy).
 

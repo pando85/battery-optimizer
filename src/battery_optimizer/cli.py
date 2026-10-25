@@ -143,14 +143,18 @@ def build_parser() -> argparse.ArgumentParser:
     subs = parser.add_subparsers(dest="command")
 
     # -- extract ----------------------------------------------------------
-    p_extract = subs.add_parser("extract", help="Ingest from Prometheus / HA history to Parquet")
+    p_extract = subs.add_parser(
+        "extract", help="Ingest from Prometheus / HA history / OMIE prices to Parquet"
+    )
     _add_common(p_extract)
     _add_time_args(p_extract)
     p_extract.add_argument(
         "--source",
         required=True,
-        choices=["prometheus", "ha-history", "all"],
-        help="Data source to extract from",
+        choices=["prometheus", "ha-history", "omie", "all"],
+        help="Data source to extract from.  'all' is prometheus + ha-history; omie (public "
+        "OMIE day-ahead prices) is always named explicitly and takes local delivery dates "
+        "(YYYY-MM-DD, both bounds inclusive) in --start/--end",
     )
     p_extract.add_argument(
         "--entities",
@@ -163,7 +167,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit 0 even when a run's manifest records coverage gaps (empty_chunk*, "
         "chunk_accounting_mismatch, no_rows_*/no_samples_extracted, no_series_chunks, "
-        "series_without_samples_chunks).  For interactive/backfill use.  By default such a run "
+        "series_without_samples_chunks, omie_missing/omie_parse_error/omie_fetch_failed).  "
+        "For interactive/backfill use.  By default such a run "
         "keeps its data and manifest but exits 3 (EXIT_COVERAGE_GAPS) with a summary on stderr; "
         "1 is a failed run, 2 a usage error",
     )
@@ -174,8 +179,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate.add_argument(
         "--source",
         default="all",
-        choices=["prometheus", "ha-history", "all"],
-        help="Source to validate (default: all)",
+        choices=["prometheus", "ha-history", "omie", "all"],
+        help="Source to validate (default: all = prometheus + ha-history; omie is explicit)",
     )
 
     # -- build ------------------------------------------------------------
@@ -685,14 +690,22 @@ def cmd_extract(args: argparse.Namespace) -> int:
         manifest_coverage_gaps,
     )
     from battery_optimizer.extract_ha import extract_ha_history
+    from battery_optimizer.extract_omie import extract_omie, resolve_omie_dates
     from battery_optimizer.extract_prom import extract_prometheus
     from battery_optimizer.paths import resolve_data_dir
 
     entities = parse_entities(args.entities)
     source: str = args.source
 
+    omie_dates = None
     try:
-        start_str, end_str = resolve_time_window(args.start, args.end, args.lookback_days)
+        if source == "omie":
+            if entities:
+                raise ValueError("--entities does not apply to --source omie")
+            omie_dates = resolve_omie_dates(args.start, args.end, args.lookback_days)
+            start_str, end_str = (d.isoformat() for d in omie_dates)
+        else:
+            start_str, end_str = resolve_time_window(args.start, args.end, args.lookback_days)
     except ValueError as exc:
         print(f"extract: {_redact_error(str(exc))}", file=sys.stderr)
         return 1
@@ -751,6 +764,24 @@ def cmd_extract(args: argparse.Namespace) -> int:
         else:
             _record_gaps("ha-history", manifest_path)
 
+    if source == "omie" and omie_dates is not None:
+        try:
+            manifest_path = extract_omie(
+                data_dir=str(data_dir),
+                config_path=args.config,
+                start=omie_dates[0],
+                end=omie_dates[1],
+            )
+            manifests.append(manifest_path)
+            log.info("extract: omie manifest=%s", manifest_path)
+        except Exception as exc:
+            msg = _redact_error(str(exc))
+            log.error("extract: omie failed: %s", msg)
+            print(f"extract: omie failed: {msg}", file=sys.stderr)
+            return 1
+        else:
+            _record_gaps("omie", manifest_path)
+
     print(f"extract: completed — {len(manifests)} manifest(s) written")
     for mp in manifests:
         print(f"  manifest: {mp}")
@@ -787,6 +818,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
         sources_to_validate.append("prometheus")
     if source_choice in ("ha-history", "all"):
         sources_to_validate.append("ha_history")
+    if source_choice == "omie":
+        sources_to_validate.append("omie")
 
     for src in sources_to_validate:
         result = _validate_source(data_dir, src)
@@ -820,11 +853,17 @@ def _validate_source(data_dir: Path, source: str) -> dict:
     import pyarrow.parquet as pq
 
     from battery_optimizer.paths import iter_parts, parts_dir
-    from battery_optimizer.schemas import RAW_ENUM_STATE, RAW_SAMPLE, validate_table
+    from battery_optimizer.schemas import (
+        RAW_ENUM_STATE,
+        RAW_OMIE_DAY_AHEAD,
+        RAW_SAMPLE,
+        validate_table,
+    )
 
     schema_map = {
         "prometheus": ("RAW_SAMPLE", RAW_SAMPLE),
         "ha_history": ("RAW_ENUM_STATE", RAW_ENUM_STATE),
+        "omie": ("RAW_OMIE_DAY_AHEAD", RAW_OMIE_DAY_AHEAD),
     }
     if source not in schema_map:
         return {
@@ -877,6 +916,11 @@ def _validate_source(data_dir: Path, source: str) -> dict:
         total_rows += n
         if n == 0:
             summary["violations"].append(f"{path.name}: zero rows")
+
+    if source == "omie":
+        from battery_optimizer.extract_omie import validate_omie_store
+
+        summary["violations"].extend(validate_omie_store(data_dir))
 
     summary["row_count"] = total_rows
     summary["ok"] = not summary["violations"]

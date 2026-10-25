@@ -127,6 +127,30 @@ RAW_ENUM_STATE = pa.schema(
     ]
 )
 
+# One OMIE day-ahead delivery day per part.  ``period`` is 1-based in local (Europe/Madrid) order
+# from local midnight; ``period_minutes`` is 60 (hourly files, until 2025-09-30) or 15 (from
+# 2025-10-01).  ``interval_start``/``interval_end`` are the UTC bounds of the period, so DST days
+# have 23/25 (hourly) or 92/100 (quarter-hourly) rows.  Prices are EUR/MWh.  ``observed_at`` is the
+# time the file was fetched (not necessarily its publication time) and ``source_sha256`` the
+# SHA-256 of the raw downloaded bytes.  ``source_file_version`` is the file suffix (``.1`` normally,
+# a later publication version on the days the earlier ones do not exist).  Deliberately independent
+# of the analysis schemas: no ``build`` input reads this source.
+RAW_OMIE_DAY_AHEAD = pa.schema(
+    [
+        pa.field("delivery_date", pa.date32(), nullable=False),
+        pa.field("period", pa.int16(), nullable=False),
+        pa.field("period_minutes", pa.int16(), nullable=False),
+        pa.field("interval_start", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("interval_end", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("price_es_eur_mwh", pa.float64(), nullable=False),
+        pa.field("price_pt_eur_mwh", pa.float64(), nullable=False),
+        pa.field("observed_at", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("source_sha256", pa.string(), nullable=False),
+        pa.field("source_file_version", pa.int16(), nullable=False),
+        pa.field("extraction_id", pa.string(), nullable=False),
+    ]
+)
+
 # ---------------------------------------------------------------------------
 # Analysis schema (15-min grid)
 # ---------------------------------------------------------------------------
@@ -182,6 +206,7 @@ BENCHMARK_RESULT = pa.schema(
 SCHEMAS: dict[str, pa.Schema] = {
     "RAW_SAMPLE": RAW_SAMPLE,
     "RAW_ENUM_STATE": RAW_ENUM_STATE,
+    "RAW_OMIE_DAY_AHEAD": RAW_OMIE_DAY_AHEAD,
     "ANALYSIS_INTERVAL": ANALYSIS_INTERVAL,
     "BENCHMARK_RESULT": BENCHMARK_RESULT,
 }
