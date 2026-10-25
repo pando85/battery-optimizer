@@ -74,7 +74,7 @@ import inspect
 import io
 import json
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -811,6 +811,32 @@ def parse_train_end(value: datetime | str | None) -> datetime:
     return moment
 
 
+def parse_eval_end(value: datetime | str | None) -> datetime | None:
+    """Normalise an optional evaluation end to an aware UTC datetime (``None`` passes)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().replace(" ", "T")
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            moment = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise BenchmarkInputError(f"eval_end is not an ISO 8601 timestamp: {value!r}") from exc
+    elif isinstance(value, datetime):
+        moment = value
+    else:
+        raise BenchmarkInputError(
+            f"eval_end must be a datetime or an ISO 8601 string, got {type(value).__name__}"
+        )
+    if moment.tzinfo is None:
+        raise BenchmarkInputError(
+            f"eval_end={value!r} is naive — the evaluation end is an absolute instant, so an "
+            "aware timestamp is required"
+        )
+    return moment.astimezone(UTC)
+
+
 def _iso(moment: datetime) -> str:
     return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
@@ -1108,6 +1134,7 @@ def prepare_day_ahead(
     time_limit_s: float,
     timezone: str,
     load_forecaster: str = DEFAULT_LOAD_FORECASTER,
+    load_forecaster_params: Mapping[str, Any] | None = None,
 ) -> tuple[list[Any], dict[str, Any]]:
     """Partition the evaluation window into local days and build its causal forecast.
 
@@ -1145,7 +1172,11 @@ def prepare_day_ahead(
 
     try:
         forecaster = get_forecaster(load_forecaster)
-        params = resolve_forecaster_params(load_forecaster, window_days=int(forecast_window_days))
+        params = resolve_forecaster_params(
+            load_forecaster,
+            window_days=int(forecast_window_days),
+            overrides=load_forecaster_params,
+        )
     except ValueError as exc:
         raise BenchmarkInputError(str(exc)) from exc
     full_days = core.contiguous_day_bounds(list(local_days))
@@ -1385,6 +1416,7 @@ def prepare_rolling_horizon(
     horizon_slots: int | None,
     load_forecast_mode: str = DEFAULT_ROLLING_HORIZON_LOAD_FORECAST_MODE,
     load_forecaster: str = DEFAULT_LOAD_FORECASTER,
+    load_forecaster_params: Mapping[str, Any] | None = None,
 ) -> tuple[RollingHorizonInputs, dict[str, Any]]:
     """Build the load forecast inputs and resolve the planning terminal value.
 
@@ -1442,11 +1474,15 @@ def prepare_rolling_horizon(
     try:
         forecaster = get_forecaster(load_forecaster)
         forecaster_params = resolve_forecaster_params(
-            load_forecaster, window_days=int(forecast_window_days)
+            load_forecaster,
+            window_days=int(forecast_window_days),
+            overrides=load_forecaster_params,
         )
     except ValueError as exc:
         raise BenchmarkInputError(str(exc)) from exc
-    if load_forecast_mode != "causal" and load_forecaster != DEFAULT_LOAD_FORECASTER:
+    if load_forecast_mode != "causal" and (
+        load_forecaster != DEFAULT_LOAD_FORECASTER or load_forecaster_params
+    ):
         raise BenchmarkInputError(
             f"load_forecaster={load_forecaster!r} needs rolling_horizon_load_forecast_mode="
             "'causal': the frozen profile is built once at the training cut and does not "
@@ -1474,7 +1510,11 @@ def prepare_rolling_horizon(
             "training_end_idx": int(eval_start_idx),
             "shared_function_with_day_ahead": True,
             "data_cutoff_rule": (
-                "each event's forecast uses only intervals strictly below the event's "
+                "intraday cutoff, declared by the forecaster: each event's forecast uses "
+                "only intervals strictly below the event's own first interval, so the "
+                "slots of the event's local day observed before 14:00 / 20:30 may enter"
+                if forecaster.intraday_cutoff
+                else "each event's forecast uses only intervals strictly below the event's "
                 "own local-day start (the conservative day-ahead basis).  No "
                 "whole-array per-target-day profile is fitted, so a solve at 20:30 on "
                 "day D whose horizon spans D+1 never reads day D's measured load into "
@@ -1523,6 +1563,7 @@ def prepare_rolling_horizon(
         load_forecast_mode=load_forecast_mode,
         forecast_window_days=forecast_window_days,
         load_forecaster=load_forecaster,
+        load_forecaster_params=dict(load_forecaster_params or {}),
     )
 
     cadence_text, horizon_text = _rh_cadence_text(
@@ -1901,6 +1942,7 @@ class RollingHorizonInputs:
     throughput_cost_eur_per_kwh: float = 0.0
     forecast_window_days: int = 28
     load_forecaster: str = DEFAULT_LOAD_FORECASTER
+    load_forecaster_params: dict[str, Any] = field(default_factory=dict)
 
 
 def _rh_cadence_text(
@@ -2075,6 +2117,7 @@ def _run_policies(
                     throughput_cost_eur_per_kwh=throughput_cost_eur_per_kwh,
                     forecast_window_days=rolling_horizon.forecast_window_days,
                     load_forecaster=rolling_horizon.load_forecaster,
+                    load_forecaster_params=rolling_horizon.load_forecaster_params or None,
                 )
                 # The returned schedule comes from simulate() with solver_status="not_applicable"
                 # (a traced plan).  But the rolling horizon IS a solver-based policy (many MILP
@@ -2388,6 +2431,7 @@ def _load_forecaster_record(
     window_days: int,
     selected: Sequence[str],
     rolling_horizon_load_forecast_mode: str,
+    overrides: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve the run's load forecaster and the lineage record that names it.
 
@@ -2398,7 +2442,7 @@ def _load_forecaster_record(
 
     try:
         forecaster = get_forecaster(name)
-        params = resolve_forecaster_params(name, window_days=int(window_days))
+        params = resolve_forecaster_params(name, window_days=int(window_days), overrides=overrides)
     except ValueError as exc:
         raise BenchmarkInputError(str(exc)) from exc
     used_by = []
@@ -2407,7 +2451,7 @@ def _load_forecaster_record(
     if POLICY_ROLLING_HORIZON in selected:
         if rolling_horizon_load_forecast_mode == "causal":
             used_by.append(POLICY_ROLLING_HORIZON)
-        elif name != DEFAULT_LOAD_FORECASTER:
+        elif name != DEFAULT_LOAD_FORECASTER or overrides:
             raise BenchmarkInputError(
                 f"load_forecaster={name!r} needs rolling_horizon_load_forecast_mode='causal': "
                 "the frozen profile is built once at the training cut and does not use the "
@@ -2996,6 +3040,8 @@ def benchmark_dataset(
     rolling_horizon_load_forecast_mode: str = DEFAULT_ROLLING_HORIZON_LOAD_FORECAST_MODE,
     throughput_cost_eur_per_kwh: float = 0.0,
     load_forecaster: str = DEFAULT_LOAD_FORECASTER,
+    load_forecaster_params: Mapping[str, Any] | None = None,
+    eval_end: datetime | str | None = None,
     data_dir: Path | str | None = None,
 ) -> Path:
     """Run the selected policies on a built dataset and write an immutable run.
@@ -3105,6 +3151,14 @@ def benchmark_dataset(
             nothing to the run identity; any other name adds the name and its params.
             ``"perfect"`` is the offline oracle (measured load as the forecast), for
             headroom measurement only.  Always recorded under ``lineage.load_forecaster``.
+        load_forecaster_params: overrides of *load_forecaster*'s params on top of its
+            defaults and ``day_ahead_forecast_window_days``.  Unknown keys are refused;
+            given, they enter the run identity with the forecaster name.
+        eval_end: optional exclusive end of the evaluation window.  The dataset is cut
+            there **before anything else runs**, so the run is the run on a dataset
+            that ends at *eval_end* (same rows, same partitions, same terminal values).
+            ``None`` (default) evaluates up to the end of the dataset and adds nothing
+            to the run identity.
         data_dir: data root, when the manifest lists parts relative to it.
 
     Returns:
@@ -3172,12 +3226,15 @@ def benchmark_dataset(
             replan_interval_slots=rolling_horizon_replan_interval_slots,
             horizon_slots=rolling_horizon_horizon_slots,
         )
+    forecaster_overrides = dict(load_forecaster_params or {})
     forecaster_record = _load_forecaster_record(
         load_forecaster,
         window_days=day_ahead_forecast_window_days,
         selected=selected,
         rolling_horizon_load_forecast_mode=rolling_horizon_load_forecast_mode,
+        overrides=forecaster_overrides,
     )
+    window_end = parse_eval_end(eval_end)
 
     dataset_dir = Path(dataset).expanduser()
     cfg_path = Path(config_path).expanduser()
@@ -3209,6 +3266,16 @@ def benchmark_dataset(
     core = core_or_raise()
 
     table = loaded.table
+    if window_end is not None:
+        if window_end <= cut:
+            raise BenchmarkInputError(
+                f"eval_end={_iso(window_end)} is not after train_end={_iso(cut)}: the "
+                "evaluation window would be empty"
+            )
+        # The grid is sorted and uniform (load_dataset checked), so a prefix is exactly
+        # the dataset a build ending at eval_end would have produced.
+        kept = sum(1 for s in table.column("interval_start").to_pylist() if s < window_end)
+        table = table.slice(0, kept)
     n = table.num_rows
     starts = table.column("interval_start").to_pylist()
     ends = table.column("interval_end").to_pylist()
@@ -3310,6 +3377,7 @@ def benchmark_dataset(
             time_limit_s=day_ahead_time_limit_s,
             timezone=config.tariff_periods.timezone,
             load_forecaster=load_forecaster,
+            load_forecaster_params=forecaster_overrides,
         )
         day_ahead = DayAheadInputs(
             days=da_days,
@@ -3373,6 +3441,7 @@ def benchmark_dataset(
             horizon_slots=rh_horizon_slots,
             load_forecast_mode=rolling_horizon_load_forecast_mode,
             load_forecaster=load_forecaster,
+            load_forecaster_params=forecaster_overrides,
         )
     records, solver_info, plans = _run_policies(
         core=core,
@@ -3512,9 +3581,12 @@ def benchmark_dataset(
     # The load forecaster enters the identity only when it is not LF-0, so every
     # pre-seam run identity is reproduced unchanged by the default (G1); a run on another
     # forecaster is a different measurement and must never share a run id with LF-0.
-    if load_forecaster != DEFAULT_LOAD_FORECASTER:
+    if load_forecaster != DEFAULT_LOAD_FORECASTER or forecaster_overrides:
         identity["load_forecaster"] = load_forecaster
         identity["load_forecaster_params"] = forecaster_record["params"]
+    # Likewise an explicit evaluation end: absent, the identity is the pre-flag one.
+    if window_end is not None:
+        identity["eval_end"] = _iso(window_end)
     run_id = _canonical_sha(identity)[:32]
 
     payload: dict[str, Any] = {

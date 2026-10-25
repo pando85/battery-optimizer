@@ -294,3 +294,182 @@ class TestSeamValidation:
             "spy_test", load_kwh=load, usable=usable, days=days, cutoff_idx=200, target_days=[3]
         )
         assert seen == {"len": 200, "writeable": False, "measured": None}
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward fit (monthly folds)
+# ---------------------------------------------------------------------------
+
+
+class TestFoldStart:
+    def test_fold_is_the_local_month_of_the_cutoff(self) -> None:
+        _load, _usable, days = _series()
+        november = next(j for j, (label, _lo, _hi) in enumerate(days) if label.month == 11)
+        # Mid-November cutoff: the fold starts on the first November day.
+        assert lf.fold_start_idx(days, days[november + 5][1] + 30) == (
+            days[november][1],
+            "2025-11",
+        )
+        # A cutoff exactly at the month boundary opens the new fold there.
+        assert lf.fold_start_idx(days, days[november][1]) == (days[november][1], "2025-11")
+        # October: the partition starts mid-month, so the fold starts at index 0.
+        assert lf.fold_start_idx(days, days[november][1] - 1) == (0, "2025-10")
+        # Past the partition: the last day's month.
+        assert lf.fold_start_idx(days, days[-1][2]) == (days[november][1], "2025-11")
+
+
+class TestFit:
+    """A synthetic trained forecaster: one fit per monthly fold, never on the fold."""
+
+    @pytest.fixture
+    def fitted(self, monkeypatch) -> list[tuple[int, str, int]]:
+        monkeypatch.setattr(lf, "_REGISTRY", dict(lf._REGISTRY))
+        monkeypatch.setattr(lf, "_FIT_CACHE", type(lf._FIT_CACHE)())
+        calls: list[tuple[int, str, int]] = []
+
+        def _fit(request: lf.FitRequest, *, scale: float = 1.0) -> float:
+            calls.append((request.fit_cutoff_idx, request.fold, request.history_load_kwh.size))
+            keep = request.history_usable
+            if not keep.any():
+                return 0.0
+            return float(request.history_load_kwh[keep].mean()) * scale
+
+        @lf.register_forecaster("mean_fit_test", fit=_fit)
+        def _forecast(request: lf.ForecastRequest, *, scale: float = 1.0) -> list[lf.DayForecast]:
+            """Flat fitted level."""
+            return [
+                (np.full(request.days[j][2] - request.days[j][1], request.fitted), {})
+                for j in request.target_days
+            ]
+
+        return calls
+
+    def test_one_fit_per_fold_on_data_before_the_fold(self, fitted) -> None:
+        load, usable, days = _series()
+        targets = range(20, len(days))
+        result = lf.forecast_each_day_at_its_start(
+            "mean_fit_test", load_kwh=load, usable=usable, days=days, target_days=targets
+        )
+        november = next(j for j, (label, _lo, _hi) in enumerate(days) if label.month == 11)
+        nov_start = days[november][1]
+        # Two folds (late October, November), each fitted exactly once on its own past.
+        assert fitted == [(0, "2025-10", 0), (nov_start, "2025-11", nov_start)]
+        expected_nov = float(load[:nov_start][usable[:nov_start]].mean())
+        assert np.all(result.values[nov_start:] == expected_nov)
+        provenance = lf.get_forecaster("mean_fit_test").provenance({"scale": 1.0})
+        assert provenance["fit"] == lf.FIT_FOLD_RULE
+
+    def test_the_fit_never_sees_its_own_fold(self, fitted) -> None:
+        load, usable, days = _series()
+        november = next(j for j, (label, _lo, _hi) in enumerate(days) if label.month == 11)
+        target = november + 6
+        base = lf.forecast_each_day_at_its_start(
+            "mean_fit_test", load_kwh=load, usable=usable, days=days, target_days=[target]
+        )
+        # Everything from the fold start on — the already-observed November days included —
+        # is replaced; the forecast for a mid-November day must not move.
+        bad_load, bad_mask = _absurd(load, usable, days[november][1])
+        moved = lf.forecast_each_day_at_its_start(
+            "mean_fit_test", load_kwh=bad_load, usable=bad_mask, days=days, target_days=[target]
+        )
+        assert np.array_equal(base.values, moved.values)
+        result = lf.run_forecaster(
+            "mean_fit_test",
+            load_kwh=load,
+            usable=usable,
+            days=days,
+            cutoff_idx=days[target][1],
+            target_days=[target],
+        )
+        assert result.provenance["fit_cutoff_idx"] == days[november][1]
+        assert result.provenance["fold"] == "2025-11"
+
+
+# ---------------------------------------------------------------------------
+# Rolling-horizon cutoff: the one each forecaster declares
+# ---------------------------------------------------------------------------
+
+
+def _afternoon_event(days, n: int, day: int = 30):
+    from battery_optimizer.rolling_horizon import compute_rolling_events
+
+    starts = [START + timedelta(minutes=15 * i) for i in range(n)]
+    local_days = [s.astimezone(MADRID).date() for s in starts]
+    events = compute_rolling_events(
+        starts, local_days, eval_start_idx=days[day][1], eval_end_idx=n, tz=MADRID
+    )
+    event = next(ev for ev in events if ev.kind == "afternoon")
+    return event, starts, local_days
+
+
+def _provider(name: str, load, usable, starts, local_days):
+    from battery_optimizer.rolling_horizon import CausalForecastProvider
+
+    return CausalForecastProvider(
+        load, local_days, usable, starts, window_days=28, tz=MADRID, load_forecaster=name
+    )
+
+
+def _assert_declared_cutoff_holds(name: str) -> tuple[np.ndarray, int, int]:
+    """Perturbing everything at or after the DECLARED cutoff leaves the event's plan intact."""
+    load, usable, days = _series()
+    event, starts, local_days = _afternoon_event(days, load.size)
+    day_start = next(lo for label, lo, _hi in days if label == event.local_day)
+    declared = event.start_idx if lf.get_forecaster(name).intraday_cutoff else day_start
+    base, meta = _provider(name, load, usable, starts, local_days).forecast_for_event(event)
+    assert meta["cutoff_idx"] == declared
+    assert meta["data_cutoff_before_local_day_start"] is (declared == day_start)
+    bad_load, bad_mask = _absurd(load, usable, declared)
+    moved, _ = _provider(name, bad_load, bad_mask, starts, local_days).forecast_for_event(event)
+    plan = slice(event.start_idx, event.plan_end_idx)
+    assert np.array_equal(base[plan], moved[plan])
+    return base[plan], day_start, event.start_idx
+
+
+class TestDeclaredCutoff:
+    @pytest.mark.parametrize("name", NON_ORACLE)
+    def test_every_registered_forecaster_respects_its_declared_cutoff(self, name: str) -> None:
+        _assert_declared_cutoff_holds(name)
+
+    def test_default_forecasters_keep_the_local_midnight_cutoff(self) -> None:
+        assert not any(lf.get_forecaster(n).intraday_cutoff for n in lf.forecaster_names())
+        load, usable, days = _series()
+        event, starts, local_days = _afternoon_event(days, load.size)
+        provider = _provider("trailing_mean", load, usable, starts, local_days)
+        base, meta = provider.forecast_for_event(event)
+        day_start = next(lo for label, lo, _hi in days if label == event.local_day)
+        # Today's observed slots (local midnight .. 14:00) cannot reach LF-0.
+        bad_load, bad_mask = _absurd(load, usable, day_start)
+        moved, _ = _provider(
+            "trailing_mean", bad_load, bad_mask, starts, local_days
+        ).forecast_for_event(event)
+        plan = slice(event.start_idx, event.plan_end_idx)
+        assert meta["cutoff_idx"] == day_start
+        assert np.array_equal(base[plan], moved[plan])
+
+    def test_an_intraday_forecaster_sees_today_up_to_the_event(self, monkeypatch) -> None:
+        monkeypatch.setattr(lf, "_REGISTRY", dict(lf._REGISTRY))
+        seen: list[int] = []
+
+        @lf.register_forecaster("level_test", intraday_cutoff=True)
+        def _level(request: lf.ForecastRequest) -> list[lf.DayForecast]:
+            """Last observed usable slot, held flat."""
+            seen.append(request.cutoff_idx)
+            keep = request.history_usable
+            last = float(request.history_load_kwh[keep][-1])
+            return [
+                (np.full(request.days[j][2] - request.days[j][1], last), {})
+                for j in request.target_days
+            ]
+
+        assert lf.get_forecaster("level_test").provenance({})["intraday_cutoff"] is True
+        plan, day_start, event_start = _assert_declared_cutoff_holds("level_test")
+        assert set(seen) == {event_start}
+        # Not vacuous: the slots of the event's own day before 14:00 do move it.
+        load, usable, days = _series()
+        event, starts, local_days = _afternoon_event(days, load.size)
+        load2 = load.copy()
+        load2[day_start:event_start] += 1.0
+        provider = _provider("level_test", load2, usable, starts, local_days)
+        moved, _ = provider.forecast_for_event(event)
+        assert not np.array_equal(plan, moved[event.start_idx : event.plan_end_idx])

@@ -90,6 +90,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
@@ -864,6 +865,15 @@ def build_frozen_load_profile(
 # ---------------------------------------------------------------------------
 
 
+#: Recorded per event for a forecaster registered with ``intraday_cutoff=True``.
+_INTRADAY_CUTOFF_RULE = (
+    "intraday cutoff (declared by the forecaster): the forecast for this event uses only "
+    "intervals at indices strictly below the event's own first interval, so the slots of "
+    "the event's local day observed before the event instant may enter; nothing at or "
+    "after the event instant does.  All target days of the horizon share that cutoff"
+)
+
+
 class CausalForecastProvider:
     """Per-event causal load forecast provider — no future leakage.
 
@@ -893,6 +903,7 @@ class CausalForecastProvider:
         interval_seconds: float = 900.0,
         tz: ZoneInfo | None = None,
         load_forecaster: str = DEFAULT_LOAD_FORECASTER,
+        load_forecaster_params: Mapping[str, Any] | None = None,
     ) -> None:
         """Initialize the provider with the full dataset.
 
@@ -907,6 +918,8 @@ class CausalForecastProvider:
             tz: Timezone for local-wall-clock conversion.
             load_forecaster: registered name in :mod:`battery_optimizer.load_forecast`;
                 the default is LF-0, the day-ahead rung's trailing slot mean.
+            load_forecaster_params: param overrides for *load_forecaster*, applied on
+                top of its defaults and ``window_days``.
         """
         self._load = np.asarray(load_kwh, dtype=float).reshape(-1)
         self._local_days = list(local_days)
@@ -917,7 +930,7 @@ class CausalForecastProvider:
         self._tz = tz if tz is not None else ZoneInfo("Europe/Madrid")
         self._forecaster = get_forecaster(load_forecaster)
         self._forecaster_params = resolve_forecaster_params(
-            load_forecaster, window_days=self._window_days
+            load_forecaster, window_days=self._window_days, overrides=load_forecaster_params
         )
         self._day_bounds = contiguous_day_bounds(self._local_days)
         # Cache: (cutoff_idx, window_days) -> (forecast, metadata)
@@ -964,9 +977,15 @@ class CausalForecastProvider:
             event.start_idx,  # fallback to event start if day not found
         )
 
+        # The information cutoff: the event's local-day start (the conservative default),
+        # or the event instant itself for a forecaster that declares intraday_cutoff, so
+        # it can use the slots of the event's own day observed before 14:00 / 20:30.
+        intraday = self._forecaster.intraday_cutoff
+        cutoff = int(event.start_idx) if intraday else event_local_day_start
+
         # Cache key: (cutoff_idx, window_days).  Two events on the same local day
         # produce byte-identical forecasts, so we cache to avoid redundant full-dataset fits.
-        cache_key = (event_local_day_start, self._window_days)
+        cache_key = (cutoff, self._window_days)
         if cache_key in self._cache:
             forecast, base_metadata = self._cache[cache_key]
             # Return a copy with event-specific fields updated
@@ -979,18 +998,29 @@ class CausalForecastProvider:
         # Truncate the usable mask to exclude all data at or after the local-day start
         # (kept for the support count and the training hash below).
         truncated_usable = self._usable.copy()
-        truncated_usable[event_local_day_start:] = False
+        truncated_usable[cutoff:] = False
 
         # Forecast every day through the seam, which hands a non-oracle forecaster only
         # the history strictly before the cutoff.  Every day, not just the horizon, so
         # the array stays full-length like the day-ahead vintage it is compared with.
+        # An intraday forecaster's cutoff changes per event, so it is asked only for the
+        # days its plan touches (the rest of the array stays zero and is never read).
+        targets = (
+            [
+                j
+                for j, (_label, lo, hi) in enumerate(self._day_bounds)
+                if hi > event.start_idx and lo < event.plan_end_idx
+            ]
+            if intraday
+            else range(len(self._day_bounds))
+        )
         result = run_forecaster(
             self._forecaster.name,
             load_kwh=self._load,
             usable=self._usable,
             days=self._day_bounds,
-            cutoff_idx=event_local_day_start,
-            target_days=range(len(self._day_bounds)),
+            cutoff_idx=cutoff,
+            target_days=targets,
             params=self._forecaster_params,
             allow_oracle=True,
         )
@@ -1020,15 +1050,15 @@ class CausalForecastProvider:
         # slots_per_day`` intervals (the frozen path uses the same approximation).
         slots_per_day = int(round(86400 / self._interval_seconds))
         window_intervals = self._window_days * slots_per_day
-        window_start = max(0, event_local_day_start - window_intervals)
-        training_usable_intervals = int(truncated_usable[window_start:event_local_day_start].sum())
+        window_start = max(0, cutoff - window_intervals)
+        training_usable_intervals = int(truncated_usable[window_start:cutoff].sum())
 
         # B3: Training-data content hash.  SHA-256 of load+usable bytes in the window,
         # so the hash IS sensitive to load values and usable-mask bytes.  This is
         # stronger than the frozen path, which hashes only timestamps.
         # We hash the window-scoped slice to match the effective support.
-        window_load = self._load[window_start:event_local_day_start]
-        window_usable = truncated_usable[window_start:event_local_day_start]
+        window_load = self._load[window_start:cutoff]
+        window_usable = truncated_usable[window_start:cutoff]
         training_hash = hashlib.sha256(window_load.tobytes() + window_usable.tobytes()).hexdigest()[
             :16
         ]
@@ -1053,13 +1083,13 @@ class CausalForecastProvider:
             "event_index": event.index,
             "event_local_day": str(event.local_day),
             "event_kind": event.kind,
-            "cutoff_idx": int(event_local_day_start),
+            "cutoff_idx": int(cutoff),
             "cutoff_time_utc": (
-                self._interval_starts_utc[event_local_day_start].isoformat()
-                if event_local_day_start < len(self._interval_starts_utc)
+                self._interval_starts_utc[cutoff].isoformat()
+                if cutoff < len(self._interval_starts_utc)
                 else None
             ),
-            "data_cutoff_before_local_day_start": True,
+            "data_cutoff_before_local_day_start": not intraday,
             "training_usable_intervals": training_usable_intervals,
             "training_usable_support": training_usable_intervals > 0,
             "training_hash": training_hash,
@@ -1072,7 +1102,9 @@ class CausalForecastProvider:
             "per_target_day_usable_history_days": per_target_day_usable_history_days,
             "shared_function_with_day_ahead": True,
             "data_cutoff_rule": (
-                "the forecast for this event uses only intervals at indices strictly "
+                _INTRADAY_CUTOFF_RULE
+                if intraday
+                else "the forecast for this event uses only intervals at indices strictly "
                 "below the event's local-day start — no observation from the event's own "
                 "local day or later enters.  For a multi-day horizon, all target days use "
                 "the same pre-day cutoff (the event's local-day start), not their own "
@@ -1482,6 +1514,7 @@ def run_rolling_horizon(
     throughput_cost_eur_per_kwh: float = 0.0,
     forecast_window_days: int = 28,
     load_forecaster: str = DEFAULT_LOAD_FORECASTER,
+    load_forecaster_params: Mapping[str, Any] | None = None,
 ) -> RollingResult:
     """Run the rolling horizon dispatcher.
 
@@ -1538,7 +1571,8 @@ def run_rolling_horizon(
     ``load_forecaster`` (default ``"trailing_mean"``, LF-0) names the registered
     forecaster (:mod:`battery_optimizer.load_forecast`) the causal mode runs through
     :class:`CausalForecastProvider`.  Frozen mode has no seam, so any other name is
-    refused there rather than silently ignored.
+    refused there rather than silently ignored, and so are ``load_forecaster_params``
+    (overrides of that forecaster's params).
 
     Cost is always computed against TRUE prices and actual grid import.
 
@@ -1566,9 +1600,8 @@ def run_rolling_horizon(
     if forecast_window_days < 1:
         raise ValueError(f"forecast_window_days must be >= 1, got {forecast_window_days}")
     get_forecaster(load_forecaster)  # unknown names fail before any work
-    if (
-        load_forecast_mode != LOAD_FORECAST_MODE_CAUSAL
-        and load_forecaster != DEFAULT_LOAD_FORECASTER
+    if load_forecast_mode != LOAD_FORECAST_MODE_CAUSAL and (
+        load_forecaster != DEFAULT_LOAD_FORECASTER or load_forecaster_params
     ):
         raise ValueError(
             f"load_forecaster={load_forecaster!r} needs load_forecast_mode='causal': the "
@@ -1596,6 +1629,7 @@ def run_rolling_horizon(
             interval_seconds=interval_seconds,
             tz=tz,
             load_forecaster=load_forecaster,
+            load_forecaster_params=load_forecaster_params,
         )
         forecast_metadata = {
             "method": causal_provider.method,
