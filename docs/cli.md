@@ -283,7 +283,11 @@ The evaluation harness of PO-A in the [price-outlook plan](planning/price-outloo
 Each `--outlook` (repeatable) is a registered price outlook; the default is `exact`,
 `published_only` and `persistence`, and the two references `exact` (upper bound) and
 `published_only` (the live service) are always included. `--period`, `--resamples` and `--seed`
-work as in `forecast-eval`. `--reference-summary` names a `forecast-eval` summary whose
+work as in `forecast-eval`. `--features <feature set id>` adds the replayed climate-mask overlap
+of each outlook's estimate, and `--label` records free text in the pre-registration. Passing an OMIE
+outlook (`omie_period`, `omie_period_month`) also evaluates gate GC against `persistence` and reads
+the OMIE day-ahead store of the data directory. `--reference-summary` names a `forecast-eval`
+summary whose
 `trailing_mean` benchmark runs are compared slot by slot with this run's `exact` rolling-horizon
 schedule, which shows that the default outlook reproduces the pre-seam result.
 

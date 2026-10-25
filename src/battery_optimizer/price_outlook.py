@@ -38,19 +38,23 @@ Adding an outlook is one decorated function::
 
 Keyword-only parameters with their defaults become the outlook's recorded ``params``.
 
-**Extension point for PO-C (OMIE estimators).**  An OMIE-based estimator needs a side
-series the dataset does not hold (OMIE day-ahead marginal prices) and an as-of rule of
-its own: OMIE D+1 values may be used from :data:`OMIE_NEXT_DAY_USABLE_FROM` local.  The
-intended shape is: add an optional, as-of-filtered side input to :class:`OutlookRequest`
-(the seam truncates it by the decision instant exactly as it truncates the published
-prices), and register the estimator with ``@register_price_outlook("omie_period",
-inputs_usable_from=OMIE_NEXT_DAY_USABLE_FROM)``.  The seam does not run an outlook
-whose declared inputs are not usable yet at the decision instant, so a 14:00 event can
-use OMIE and a 13:00 one falls back to ``published_only``.
+**OMIE estimators (PO-C).**  An OMIE-based estimator needs a side series the dataset does not
+hold (the OMIE day-ahead marginal price) and an as-of rule of its own: OMIE's price for the
+local day D+1 may be used from :data:`OMIE_NEXT_DAY_USABLE_FROM` local on day D.  The caller
+passes the whole-grid series as ``side=`` (:class:`OutlookSide`); the seam hands the outlook
+only the part usable at the decision instant (:func:`omie_end_idx`, the OMIE counterpart of
+:func:`published_end_idx`), exactly as it truncates the published PVPC, so a later OMIE day
+cannot reach it.  An outlook registered with ``needs_omie=True`` and
+``inputs_usable_from=OMIE_NEXT_DAY_USABLE_FROM`` is not run before that time of day (the
+event falls back to ``published_only`` and says why), and one that finds the OMIE series
+missing or incomplete for a target hour marks that slot ``unavailable`` and records the
+reason.  The estimators themselves live in :mod:`battery_optimizer.omie_outlook` and are
+registered when this module is imported (``omie_period``, ``omie_period_month``).
 """
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -69,10 +73,12 @@ __all__ = [
     "SLOT_UNAVAILABLE",
     "OutlookRequest",
     "OutlookResult",
+    "OutlookSide",
     "OutlookSlots",
     "PriceOutlook",
     "get_price_outlook",
     "last_published_day",
+    "omie_end_idx",
     "price_outlook_names",
     "published_end_idx",
     "register_price_outlook",
@@ -98,7 +104,8 @@ PVPC_NEXT_DAY_PUBLISHED_FROM = time(20, 15)
 
 #: Local wall-clock time on day D from which OMIE's day-ahead prices for D+1 may be used.
 #: OMIE publishes at about 13:00 local; 13:30 is a conservative margin until PO-B and the
-#: PO-E shadow measure the real fetch time.  Unused until PO-C registers an OMIE estimator.
+#: PO-E shadow measure the real fetch time.  ``omie_prices.AS_OF_LOCAL_TIME`` is the same rule
+#: on the read side (a test pins that the two agree).
 OMIE_NEXT_DAY_USABLE_FROM = time(13, 30)
 
 #: What an outlook returns for the unpublished slots it is asked about:
@@ -155,6 +162,57 @@ def published_end_idx(
     return int(days[-1][2])
 
 
+def omie_end_idx(
+    decision_utc: datetime,
+    days: Sequence[tuple[Any, int, int]],
+    tz: ZoneInfo,
+    *,
+    usable_from: time = OMIE_NEXT_DAY_USABLE_FROM,
+) -> int:
+    """First index whose OMIE price is not yet usable at *decision_utc*.
+
+    The OMIE counterpart of :func:`published_end_idx`: the price of local day D+1 counts as
+    usable from *usable_from* local on day D.
+    """
+    return published_end_idx(decision_utc, days, tz, published_from=usable_from)
+
+
+@dataclass(frozen=True)
+class OutlookSide:
+    """Side series an OMIE outlook reads, aligned to the whole index space.
+
+    ``omie_eur_per_kwh`` has one value per interval of the dataset (the ES day-ahead
+    marginal price of the 15-minute slot in EUR/kWh; ``NaN`` where nothing is stored).  The
+    caller builds it once (:func:`battery_optimizer.omie_outlook.load_omie_side`); the seam
+    cuts it at :func:`omie_end_idx` for every decision, so it never holds an as-of rule
+    itself.  ``source`` identifies where the values came from (no values).
+    """
+
+    omie_eur_per_kwh: np.ndarray
+    source: Mapping[str, Any] = field(default_factory=dict)
+    fingerprint: str = ""
+
+    def __post_init__(self) -> None:
+        values = np.array(self.omie_eur_per_kwh, dtype=float).reshape(-1)
+        values.setflags(write=False)
+        object.__setattr__(self, "omie_eur_per_kwh", values)
+        if not self.fingerprint:
+            digest = hashlib.sha256(np.ascontiguousarray(values).tobytes()).hexdigest()
+            object.__setattr__(self, "fingerprint", digest)
+
+    @property
+    def n(self) -> int:
+        return int(self.omie_eur_per_kwh.size)
+
+    def slice(self, stop: int) -> OutlookSide:
+        """The first *stop* intervals, for a dataset cut at an earlier instant."""
+        return OutlookSide(self.omie_eur_per_kwh[:stop], self.source)
+
+    def describe(self) -> dict[str, Any]:
+        """The identity record of this side input (no values)."""
+        return {**self.source, "fingerprint": self.fingerprint, "slots": self.n}
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -189,6 +247,14 @@ class OutlookRequest:
     """The whole realized (or synthetic-noise) series.  ``None`` unless the outlook is
     registered ``oracle=True``."""
 
+    omie_eur_per_kwh: np.ndarray | None = None
+    """OMIE ES prices (EUR/kWh) at indices ``[0, omie_end_idx)``, read-only, ``NaN`` where
+    nothing is stored.  ``None`` unless the outlook is registered ``needs_omie=True`` and the
+    caller passed a side input."""
+
+    omie_end_idx: int = 0
+    """First index whose OMIE price is not usable at the decision (:func:`omie_end_idx`)."""
+
     @property
     def decision_utc(self) -> datetime:
         return _as_utc(self.interval_starts_utc[self.decision_idx])
@@ -204,6 +270,7 @@ class PriceOutlook:
     oracle: bool
     description: str
     inputs_usable_from: time | None = None
+    needs_omie: bool = False
 
     def provenance(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """The record every artifact carries for the outlook it ran."""
@@ -220,6 +287,12 @@ class PriceOutlook:
         }
         if self.inputs_usable_from is not None:
             record["inputs_usable_from_local"] = f"{self.inputs_usable_from:%H:%M}"
+        if self.needs_omie:
+            record["omie_rule"] = (
+                f"OMIE for local day D+1 counts as usable from "
+                f"{OMIE_NEXT_DAY_USABLE_FROM:%H:%M} local on day D; before that the event "
+                "falls back to published_only"
+            )
         return record
 
 
@@ -260,6 +333,7 @@ def register_price_outlook(
     oracle: bool = False,
     description: str = "",
     inputs_usable_from: time | None = None,
+    needs_omie: bool = False,
 ) -> Callable[[Callable[..., OutlookSlots]], Callable[..., OutlookSlots]]:
     """Register ``fn(request, **params) -> OutlookSlots`` under *name*.
 
@@ -270,6 +344,8 @@ def register_price_outlook(
             exist on the decision day (OMIE: :data:`OMIE_NEXT_DAY_USABLE_FROM`).  Before it
             the seam does not call the outlook and marks every unpublished slot
             ``unavailable`` (the ``published_only`` fallback), recording why.
+        needs_omie: the outlook reads OMIE prices.  The seam then hands it the as-of OMIE
+            series of the ``side=`` input (``request.omie_eur_per_kwh``).
     """
 
     def decorate(fn: Callable[..., OutlookSlots]) -> Callable[..., OutlookSlots]:
@@ -289,6 +365,7 @@ def register_price_outlook(
             oracle=oracle,
             description=description or (inspect.getdoc(fn) or "").split("\n", 1)[0],
             inputs_usable_from=inputs_usable_from,
+            needs_omie=needs_omie,
         )
         return fn
 
@@ -344,6 +421,7 @@ def run_price_outlook(
     oracle_prices: np.ndarray | None = None,
     params: Mapping[str, Any] | None = None,
     allow_oracle: bool = False,
+    side: OutlookSide | None = None,
 ) -> OutlookResult:
     """The prices one plan ``[decision_idx, plan_end_idx)`` may use, slot by slot.
 
@@ -356,6 +434,8 @@ def run_price_outlook(
         oracle_prices: what an ``oracle=True`` outlook reads past the publication
             boundary; defaults to *prices*.
         allow_oracle: must be ``True`` to run an oracle outlook (offline only).
+        side: the OMIE series of a ``needs_omie`` outlook; only its part usable at the
+            decision instant reaches the outlook.  Ignored by every other outlook.
 
     Raises:
         ValueError: unknown outlook, an oracle without ``allow_oracle``, malformed inputs
@@ -400,6 +480,11 @@ def run_price_outlook(
         if outlook.oracle:
             source = realized if oracle_prices is None else oracle_prices
             oracle_series = _read_only_view(np.asarray(source, dtype=float).reshape(-1), None)
+        omie_view = None
+        omie_end = 0
+        if outlook.needs_omie and side is not None:
+            omie_end = min(omie_end_idx(decision_utc, days, tz), side.n)
+            omie_view = _read_only_view(side.omie_eur_per_kwh, omie_end)
         request = OutlookRequest(
             published_prices=_read_only_view(realized, known),
             published_end_idx=known,
@@ -409,6 +494,8 @@ def run_price_outlook(
             days=days,
             tz=tz,
             oracle_prices=oracle_series,
+            omie_eur_per_kwh=omie_view,
+            omie_end_idx=omie_end,
         )
         est_values, estimated, diagnostics = outlook.fn(request, **resolved)
         est_values = np.asarray(est_values, dtype=float).reshape(-1)
@@ -504,3 +591,8 @@ def _persistence(request: OutlookRequest) -> OutlookSlots:
             "slots_from_earlier_day": int(from_earlier),
         },
     )
+
+
+# The OMIE estimators register themselves on import (after the baseline outlooks above, so
+# the registry order is exact, published_only, persistence, then the estimators).
+from . import omie_outlook as _omie_outlook  # noqa: E402,F401

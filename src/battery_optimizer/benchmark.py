@@ -1447,6 +1447,7 @@ def prepare_rolling_horizon(
     load_forecaster_params: Mapping[str, Any] | None = None,
     price_outlook: str = DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK,
     load_forecaster_side: Any = None,
+    price_outlook_side: Any = None,
 ) -> tuple[RollingHorizonInputs, dict[str, Any]]:
     """Build the load forecast inputs and resolve the planning terminal value.
 
@@ -1597,6 +1598,7 @@ def prepare_rolling_horizon(
         load_forecaster_params=dict(load_forecaster_params or {}),
         price_outlook=price_outlook,
         load_forecaster_side=load_forecaster_side,
+        price_outlook_side=price_outlook_side,
     )
     from battery_optimizer.price_outlook import get_price_outlook
 
@@ -1676,7 +1678,14 @@ def prepare_rolling_horizon(
                 "telemetry, because such an event makes the run depend on machine speed"
             ),
         },
-        "price_outlook": outlook.provenance({}),
+        "price_outlook": {
+            **outlook.provenance({}),
+            **(
+                {"side_input": price_outlook_side.describe()}
+                if price_outlook_side is not None
+                else {}
+            ),
+        },
         "information_set": {
             "prices": (
                 "at 20:30 on D-1 the policy already sees day D's exact prices (published the "
@@ -1989,6 +1998,7 @@ class RollingHorizonInputs:
     load_forecaster_params: dict[str, Any] = field(default_factory=dict)
     price_outlook: str = DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK
     load_forecaster_side: Any = None
+    price_outlook_side: Any = None
 
 
 def _rh_cadence_text(
@@ -2166,6 +2176,7 @@ def _run_policies(
                     load_forecaster_params=rolling_horizon.load_forecaster_params or None,
                     price_outlook=rolling_horizon.price_outlook,
                     load_forecaster_side=rolling_horizon.load_forecaster_side,
+                    price_outlook_side=rolling_horizon.price_outlook_side,
                 )
                 # The returned schedule comes from simulate() with solver_status="not_applicable"
                 # (a traced plan).  But the rolling horizon IS a solver-based policy (many MILP
@@ -3356,6 +3367,24 @@ def benchmark_dataset(
     if load_side is not None:
         forecaster_record["side_inputs_source"] = load_side.describe()
 
+    # OMIE estimators (PO-C) read the OMIE day-ahead series on this table's grid; every other
+    # outlook gets ``None``.  The seam applies the as-of rule per decision.
+    outlook_side = None
+    if POLICY_ROLLING_HORIZON in selected:
+        from battery_optimizer.price_outlook import get_price_outlook
+
+        if get_price_outlook(rolling_horizon_price_outlook).needs_omie:
+            from battery_optimizer.omie_outlook import load_omie_side
+            from battery_optimizer.omie_prices import OmieReadError
+
+            try:
+                outlook_side = load_omie_side(starts, data_dir=data_dir)
+            except (OmieReadError, ValueError) as exc:
+                raise BenchmarkInputError(
+                    f"rolling_horizon_price_outlook={rolling_horizon_price_outlook!r} needs the "
+                    f"OMIE day-ahead store: {exc}"
+                ) from exc
+
     # ---- train / eval split -------------------------------------------------
     train_window_start = cut - timedelta(days=int(train_days))
     train_mask = np.array([s < cut and s >= train_window_start for s in starts])
@@ -3513,6 +3542,7 @@ def benchmark_dataset(
             load_forecaster_params=forecaster_overrides,
             price_outlook=rolling_horizon_price_outlook,
             load_forecaster_side=load_side,
+            price_outlook_side=outlook_side,
         )
     records, solver_info, plans = _run_policies(
         core=core,
@@ -3653,6 +3683,8 @@ def benchmark_dataset(
         # pre-seam rolling-horizon identity is reproduced unchanged by the default.
         if rolling_horizon_price_outlook != DEFAULT_ROLLING_HORIZON_PRICE_OUTLOOK:
             identity["rolling_horizon_price_outlook"] = rolling_horizon_price_outlook
+            if outlook_side is not None:
+                identity["rolling_horizon_price_outlook_side"] = outlook_side.describe()
     # The load forecaster enters the identity only when it is not LF-0, so every
     # pre-seam run identity is reproduced unchanged by the default (G1); a run on another
     # forecaster is a different measurement and must never share a run id with LF-0.
