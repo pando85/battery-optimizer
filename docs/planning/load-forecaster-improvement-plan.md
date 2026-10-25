@@ -311,7 +311,50 @@ Nov to Mar, cooling = Jun to Sep, one season instance per period.
   stays.
 - **Next:** restart PO-C and re-run P4 on an OMIE-based tomorrow estimate; or pre-register a
   season-conditional use (structured in cooling mode, LF-0 in heating mode); add climate signals
-  only if heating stays weak.
+  only if heating stays weak. The owner chose the first and a fix of the disabled-rule days, with
+  the hybrid reported as a candidate: see the second look below.
+
+**Second look (owner decision 2026-10-25).** G4 failed for two identified causes: the 14:00 schedule
+guess (tomorrow's PVPC is unpublished, so the replay ran on `persistence` prices and held only
+76-83 % of the climate energy) and the days on which the rule is disabled (the fallback was the
+LF-0 trailing mean of every day, which still carries the climate energy of the enabled days before
+it; in 2024 it forecast about 15 times the energy measured on the 99 disabled days that were
+checked). The owner chose to build PO-C (the OMIE estimator, see the
+[Price Outlook plan](price-outlook-improvement-plan.md)), fix the disabled-day fallback, and re-run
+P4 **once**. **2025 and 2026-01...09 were already seen in the first P4 run, so this is a second
+look, not independent evidence; a pass is provisional until it is confirmed on forward data in the
+forecast-only shadow (P7).** What was built (all off by default, so the first P4 results
+reproduce):
+
+| Change | Option of `structured` | Chosen on 2024 data only |
+|---|---|---|
+| The 14:00 schedule replay uses the PO-C estimate of tomorrow's prices | `price_outlook=omie_period` | the estimator's 28-day fit window |
+| A day whose rule is disabled takes the climate part from recent *disabled-state* days | `disabled_fallback=disabled_history` | 28 samples within 60 days, zero when there is none |
+| Seasonal hybrid: the climate part is the LF-0 trailing mean on the days of a season | `climate_lf0_season=heating` | none: the split is the G4 seasons |
+
+- **Disabled-day design (2024).** On the 99 disabled days of 2024 whose data was complete (the
+  rule is off for April-May and September-October), the slot-wise mean of the last K disabled days
+  within L days had a per-day absolute error of 0.18-0.28 kWh, against 2.06 kWh for the LF-0
+  trailing mean, whose forecast total was about 15 times the measured one. Longer histories
+  scored slightly better, because disabled-day energy in 2024 is close to zero. K = 28 with L = 90
+  was lowest and K = 28 with L = 60 within 3 % of it, so **K = 28, L = 60** was kept (the shorter
+  look-back wins ties; the rule was stated after looking at the 2024 table). A plain "zero when
+  disabled" had a lower 2024 error still (0.13 kWh per day), because 2024 disabled days drew almost
+  nothing, but it was not adopted: the disabled-state history also follows manual cooling, which
+  2024 hardly shows. No row of 2025 or 2026 was read to choose any of this.
+- **Hybrid split, fixed before the run.** Heating = Nov-Mar: the climate part is LF-0 even when the
+  rule is enabled. Cooling = Jun-Sep: structured. **Shoulder months (Apr, May, Oct) run the
+  structured model** (they are mostly rule-disabled days, handled by the fallback). A disabled day in
+  any season takes the disabled fallback first. Only the climate part changes: hot water and the
+  residual are the same as in the primary candidate.
+- **Pre-registered candidates** (`forecast-eval`, written to `preregistration.json` before any run,
+  with the second-look label and the provisional-pass note): primary = structured + `omie_period` +
+  `disabled_history`; secondary = the hybrid and the `trailing_median` residual variant (both on the
+  primary); reference = LF-0. Gate G4 is unchanged: the 95 % weekly-block-bootstrap interval of the
+  paired `rolling_horizon` saving against LF-0 must lie entirely above zero in at least one heating
+  and at least one cooling season instance (seed 20261025, 10,000 resamples). Beside them, as
+  non-gating diagnostics, the first P4 candidate (a regression check that it still reproduces),
+  OMIE only, disabled fix only (attribution), and LF-0 `trailing_median`.
 
 ### P5 — Appliance-aware signals (LF-2, collect now, evaluate later)
 

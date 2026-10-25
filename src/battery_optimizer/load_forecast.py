@@ -84,7 +84,7 @@ from .policies import (
     FORECAST_METHOD,
     trailing_slot_mean_for_day,
 )
-from .price_outlook import PVPC_NEXT_DAY_PUBLISHED_FROM, published_end_idx
+from .price_outlook import PVPC_NEXT_DAY_PUBLISHED_FROM, omie_end_idx, published_end_idx
 
 __all__ = [
     "DEFAULT_LOAD_FORECASTER",
@@ -139,6 +139,9 @@ class SideInputs:
 
     ``prices`` (EUR/kWh) and every entry of ``series`` have one value per interval of the
     local-day partition, ``NaN`` where unknown; ``interval_starts_utc`` is the grid.  The
+    optional ``omie_eur_per_kwh`` is the OMIE day-ahead series on the same grid for a
+    forecaster whose price outlook is an OMIE estimator (PO-C); its view is cut at the first
+    OMIE day not usable at the decision (:func:`battery_optimizer.price_outlook.omie_end_idx`).  The
     object is immutable (arrays are read-only) and carries a :attr:`fingerprint` of its
     content, which keys the fit cache.  Forecasters never receive it: they get a
     :class:`SideView` cut by :meth:`view`.
@@ -152,6 +155,7 @@ class SideInputs:
         prices: np.ndarray | Sequence[float],
         series: Mapping[str, np.ndarray | Sequence[float]],
         source: Mapping[str, Any] | None = None,
+        omie_eur_per_kwh: np.ndarray | Sequence[float] | None = None,
     ) -> None:
         starts = tuple(
             s if s.tzinfo is not None else s.replace(tzinfo=UTC) for s in interval_starts_utc
@@ -161,6 +165,7 @@ class SideInputs:
         self.interval_starts_utc = starts
         self.prices = self._frozen(prices, "prices")
         self.series = {name: self._frozen(values, name) for name, values in series.items()}
+        self.omie = None if omie_eur_per_kwh is None else self._frozen(omie_eur_per_kwh, "omie")
         self.source = dict(source or {})
         local = [s.astimezone(tz) for s in starts]
         self.local_hour = np.array([t.hour for t in local], dtype=np.int16)
@@ -191,6 +196,9 @@ class SideInputs:
         for name in sorted(self.series):
             digest.update(name.encode())
             digest.update(np.ascontiguousarray(self.series[name]).tobytes())
+        if self.omie is not None:
+            digest.update(b"omie")
+            digest.update(np.ascontiguousarray(self.omie).tobytes())
         digest.update(repr((self.n, starts[0] if starts else None, str(tz))).encode())
         self.fingerprint = digest.hexdigest()
 
@@ -211,6 +219,7 @@ class SideInputs:
             prices=self.prices[:stop],
             series={k: v[:stop] for k, v in self.series.items()},
             source=self.source,
+            omie_eur_per_kwh=None if self.omie is None else self.omie[:stop],
         )
 
     def view(
@@ -233,6 +242,11 @@ class SideInputs:
         else:
             end = int(published_end)
         end = min(max(end, 0), self.n)
+        omie_stop = 0
+        if self.omie is not None:
+            probe_omie = self.interval_starts_utc[min(cut, self.n - 1)] if self.n else None
+            omie_stop = omie_end_idx(probe_omie, days, self.tz) if probe_omie is not None else 0
+            omie_stop = min(max(omie_stop, 0), self.n)
 
         def _ro(values: np.ndarray, stop: int) -> np.ndarray:
             v = values[:stop].view()
@@ -259,6 +273,7 @@ class SideInputs:
             series={name: _ro(values, cut) for name, values in self.series.items()},
             published_prices=_ro(self.prices, end),
             source=self.source,
+            omie_eur_per_kwh=None if self.omie is None else _ro(self.omie, omie_stop),
         )
 
     def describe(self) -> dict[str, Any]:
@@ -307,6 +322,10 @@ class SideView:
     """Prices at indices ``[0, published_end_idx)``, read-only, ``NaN`` unknown."""
 
     source: Mapping[str, Any] = field(default_factory=dict)
+
+    omie_eur_per_kwh: np.ndarray | None = None
+    """OMIE ES prices (EUR/kWh) at the indices usable at the decision, read-only, ``NaN``
+    where nothing is stored; ``None`` when the side inputs carry no OMIE series."""
 
 
 @dataclass(frozen=True)

@@ -237,6 +237,7 @@ class World:
             prices=override.pop("prices", self.prices),
             series=series,
             source={"kind": "test"},
+            omie_eur_per_kwh=override.pop("omie", None),
         )
 
 

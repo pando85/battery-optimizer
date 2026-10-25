@@ -114,6 +114,20 @@ def _add_forecast_eval_parser(subs: Any) -> None:
         metavar="CANDIDATE=REFERENCE",
         help="Secondary, non-gating paired comparison by candidate label (repeatable)",
     )
+    p.add_argument(
+        "--label",
+        default=None,
+        help="Free text recorded in the pre-registration: the role of the run (for example a "
+        "second look at periods that were already seen)",
+    )
+    p.add_argument(
+        "--note",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="Free text recorded in the pre-registration (repeatable): what a result may and "
+        "may not be used for",
+    )
     p.add_argument("--resamples", type=int, default=None, help="Bootstrap resamples (10000)")
     p.add_argument("--seed", type=int, default=None, help="Bootstrap seed (20261025)")
 
@@ -1112,6 +1126,8 @@ def cmd_forecast_eval(args: argparse.Namespace) -> int:
         gate_candidate=args.gate_candidate,
         gate_reference=args.gate_reference,
         compare=[tuple(item.split("=", 1)) for item in args.compare],
+        label=args.label,
+        notes=args.note,
     )
     summary = json.loads((run_dir / forecast_eval.SUMMARY_JSON_NAME).read_text())
     print(f"forecast-eval: run directory: {run_dir}")

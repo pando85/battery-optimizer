@@ -834,6 +834,8 @@ def run_forecast_eval(
     gate_candidate: str | None = None,
     gate_reference: str | None = None,
     compare: Sequence[tuple[str, str]] = (),
+    label: str | None = None,
+    notes: Sequence[str] = (),
 ) -> Path:
     """Pre-register, run and summarise one forecast evaluation; return its directory.
 
@@ -858,6 +860,9 @@ def run_forecast_eval(
             per season instance.
         compare: ``(candidate label, reference label)`` pairs reported like G4 but never
             gated (secondary comparisons).
+        label / notes: free text recorded in the pre-registration, for the role of the run
+            (for example a second look at periods that were already seen) and what a result
+            may and may not be used for.  Both absent leaves the pre-registration unchanged.
     """
     if gate not in ("G2", "G4"):
         raise ValueError(f"gate must be 'G2' or 'G4', got {gate!r}")
@@ -971,13 +976,20 @@ def run_forecast_eval(
             "temperature": "persistence: the same local clock hour of the most recent of the "
             "last three days it was measured by the decision cutoff (usually yesterday)",
             "price_outlook_for_unpublished_days": "the candidate's price_outlook param "
-            "(persistence), flagged estimated; published prices are used wherever they are "
-            "public at the decision (D+1 from 20:15 local)",
+            "(default persistence; omie_period reads the OMIE day-ahead price usable from 13:30 "
+            "local), flagged estimated; published prices are used wherever they are public at "
+            "the decision (D+1 from 20:15 local)",
+            "second_look_params": "disabled_fallback (lf0 | disabled_history: the climate part "
+            "of a day whose rule is disabled), climate_lf0_season (the climate part is LF-0 on "
+            "the days of that season even when the rule is enabled); both default to the first "
+            "P4 behaviour",
             "diagnostics": "per policy and decision kind: component WAPE of the heat pump "
             "(climate, hot water, total) against the LF-0 trailing mean of the same component, "
             "mask hit-rate (observed climate kWh inside the replayed hours) by price "
             "provenance, and counts of price provenance and climate / hot-water fallbacks",
         }
+    if label or notes:
+        config_block["run_label"] = {"label": label, "notes": list(notes)}
     if gate == "G4":
         config_block["gate_g4"] = _g4_definition(gate_cand_label, gate_ref_label, compare, periods)
     elif compare:
