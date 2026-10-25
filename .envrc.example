@@ -1,7 +1,17 @@
 # Copy to .envrc (gitignored) and run `direnv allow`. Never put real secrets in this example file.
 
+# uv: pin a known-good version when the system uv is older than the one uv.lock needs.
+# export UV="uvx uv@0.13.5"
+
 # Private dataset store: must stay OUTSIDE the repository (the tool refuses paths inside a git tree).
-export BATTERY_OPTIMIZER_DATA_DIR="$HOME/data/energy-baseline"
+# New analysis runs on a local copy of the deployed store, refreshed with `just pull-store`
+# (see docs/configuration.md). The original ~/data/energy-baseline store is frozen: point at it
+# only to reproduce the offline evaluation runs recorded in it, and never pull into it.
+export BATTERY_OPTIMIZER_DATA_DIR="$HOME/data/battery-optimizer-cluster"
+# export BATTERY_OPTIMIZER_DATA_DIR="$HOME/data/energy-baseline"
+
+# kubectl context of the cluster that runs the service (read by `just pull-store`).
+# export KUBE_CONTEXT="my-cluster"
 
 # Optional: tariff configuration (defaults to config/tariff.yaml).
 # export BATTERY_OPTIMIZER_CONFIG="$PWD/config/tariff.yaml"
