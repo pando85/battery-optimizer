@@ -2082,6 +2082,51 @@ def dead_price_rows(start: datetime, count: int, *, value: float) -> list[dict[s
 
 
 class TestLoadRawInputs:
+    def test_feature_only_extraction_does_not_change_the_lineage(self, data_dir: Path) -> None:
+        rows = counter_rows(_T0, 5, times=aligned_times(_T0, 5, 300.0))
+        write_raw_part(data_dir, rows)
+        kwargs: dict[str, Any] = {
+            "entities": [GRID],
+            "window_start": _T0,
+            "window_end": _T0 + timedelta(hours=1),
+            "lookback": timedelta(minutes=5),
+        }
+        before = load_raw_inputs(data_dir, **kwargs)
+
+        servers = "sensor.shellypmmini_servers_power"
+        feature_rows = [
+            raw_row(servers, "power_w", "W", _T0 + timedelta(seconds=60 * i), 250.0)
+            for i in range(5)
+        ]
+        _publish_prom_part(
+            data_dir,
+            to_raw_table(feature_rows),
+            "features-a.parquet",
+            entities=[servers],
+            chunk=(_T0, _T0 + timedelta(hours=1)),
+        )
+        after = load_raw_inputs(data_dir, **kwargs)
+
+        assert after.lineage == before.lineage
+        assert after.part_hashes == before.part_hashes
+        assert servers not in after.declared_entities
+        assert servers not in after.observed_entities
+
+    def test_mixed_extraction_with_a_feature_entity_still_counts(self, data_dir: Path) -> None:
+        servers = "sensor.shellypmmini_servers_power"
+        rows = counter_rows(_T0, 5, times=aligned_times(_T0, 5, 300.0))
+        rows += [raw_row(servers, "power_w", "W", _T0, 250.0)]
+        write_raw_part(data_dir, rows)
+        inputs = load_raw_inputs(
+            data_dir,
+            entities=[GRID],
+            window_start=_T0,
+            window_end=_T0 + timedelta(hours=1),
+            lookback=timedelta(minutes=5),
+        )
+        assert len(inputs.lineage) == 1
+        assert servers in inputs.declared_entities
+
     def test_no_parts_fails_loudly(self, data_dir: Path) -> None:
         with pytest.raises(BuildError, match="no raw parts"):
             load_raw_inputs(

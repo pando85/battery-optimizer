@@ -334,6 +334,7 @@ from battery_optimizer.config import (
 )
 from battery_optimizer.extract_prom import (
     DEAD_DUPLICATE_ENTITY_IDS,
+    FEATURE_ENTITY_IDS,
     from_micros,
     iso_z,
     parse_utc,
@@ -2397,6 +2398,13 @@ def load_raw_inputs(
     lineage_seen: set[tuple[str, str]] = set()
 
     for record in manifests:
+        declared = [n for n in record.get("entities") or [] if isinstance(n, str)]
+        if declared and all(n in FEATURE_ENTITY_IDS for n in declared):
+            # A feature-only extraction (sub-loads, temperature, controls) feeds the
+            # separate feature table, never the canonical build.  Counting its parts in
+            # the lineage would change the ``dataset_id`` of an unchanged gross-load
+            # series every time such an extraction runs.
+            continue
         m_start = _parse_window_bound(record.get("source_window_start"))
         m_end = _parse_window_bound(record.get("source_window_end"))
         for name in record.get("entities") or []:
