@@ -52,6 +52,7 @@ outside the forecasters (:func:`battery_optimizer.policies.score_day_forecast`).
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import inspect
 import json
@@ -59,6 +60,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -577,6 +579,465 @@ def _perfect(request: ForecastRequest) -> list[DayForecast]:
                     "slots_zero_no_history": 0,
                     "fallback": "none",
                     "forecast_fallback_rule": PERFECT_UNUSABLE_RULE,
+                },
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# P2: cheap statistical candidates (same history, same slot positions as LF-0)
+# ---------------------------------------------------------------------------
+#
+# Every candidate below reads the same thing LF-0 reads: the usable load of the
+# local days before the target day, aligned by **slot position inside the local-day
+# partition** (``days[p]``), never by an offset into a sliced array — a 92- or
+# 100-interval DST day therefore stays one local day, exactly as in
+# :func:`battery_optimizer.policies.trailing_slot_mean_for_day`.  An interval that is
+# not usable is *unknown* (NaN in the matrices below): it never contributes and is
+# never counted as zero.  A slot no day in the window knows falls back to the pooled
+# mean of the window, and a window with no usable interval at all yields 0.0 kWh,
+# flagged ``zero_no_history`` in the per-day record — the same contract as LF-0, so
+# the rolling-horizon support diagnostics read every candidate the same way.
+
+_CANDIDATE_FALLBACK_RULE = (
+    "per slot k of the target local day: the statistic over the usable load at position k "
+    "of the candidate's history days (only days that have position k and are usable there); "
+    "if none does (a 25-hour fall-back day against shorter history days), the pooled mean "
+    "of every usable interval of those days — a flat profile; if they hold no usable "
+    "interval at all, 0.0 kWh, flagged zero_no_history. Unusable intervals are unknown, "
+    "never zero"
+)
+
+
+def _history_day_count(request: ForecastRequest) -> int:
+    """How many leading local days start before the cutoff (the only ones with data)."""
+    return bisect.bisect_left(request.days, request.cutoff_idx, key=lambda d: d[1])
+
+
+def _history_rows(request: ForecastRequest, day_indices: Sequence[int], m: int) -> np.ndarray:
+    """Matrix ``(len(day_indices), m)`` of the usable load of those local days, by slot position.
+
+    Unknown entries (unusable intervals, positions the day does not have, days past
+    the cutoff) are NaN.  Only ``history_load_kwh`` / ``history_usable`` are read.
+    """
+    load = request.history_load_kwh
+    keep = request.history_usable
+    seen = load.size
+    rows = np.full((len(day_indices), m), np.nan, dtype=float)
+    for r, p in enumerate(day_indices):
+        _label, p_start, p_stop = request.days[p]
+        if p_start >= seen:
+            continue
+        p_stop = min(int(p_stop), seen)
+        usable = keep[p_start:p_stop]
+        if not usable.any():
+            continue
+        values = load[p_start:p_stop]
+        if not np.isfinite(values[usable]).all():
+            bad = p_start + int(np.flatnonzero(usable & ~np.isfinite(values))[0])
+            raise ValueError(f"load_kwh contains a non-finite value at index {bad}")
+        shared = min(m, p_stop - p_start)
+        take = usable[:shared]
+        rows[r, :shared][take] = values[:shared][take]
+    return rows
+
+
+def _weighted_mean(rows: np.ndarray, weights: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+    """Per-slot (weighted) mean of the known entries, and the per-slot sample counts."""
+    known = np.isfinite(rows)
+    w = known.astype(float) if weights is None else known * weights[:, None]
+    total = w.sum(axis=0)
+    safe = np.where(total > 0, total, 1.0)
+    return (np.where(known, rows, 0.0) * w).sum(axis=0) / safe, known.sum(axis=0)
+
+
+def _median_of_columns(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-slot median of the known entries (unknown sorts last), and the sample counts."""
+    ordered = np.sort(rows, axis=0)
+    counts = np.isfinite(rows).sum(axis=0)
+    if rows.shape[0] == 0:
+        return np.zeros(rows.shape[1]), counts
+    low = np.take_along_axis(ordered, np.maximum((counts - 1) // 2, 0)[None, :], axis=0)[0]
+    high = np.take_along_axis(ordered, (counts // 2).clip(max=rows.shape[0] - 1)[None, :], axis=0)[
+        0
+    ]
+    return np.where(counts > 0, (low + high) / 2.0, 0.0), counts
+
+
+def _trimmed_mean_of_columns(rows: np.ndarray, trim: float) -> tuple[np.ndarray, np.ndarray]:
+    """Mean of each slot's known values after dropping ``floor(trim * n)`` at each end."""
+    ordered = np.sort(rows, axis=0)
+    counts = np.isfinite(rows).sum(axis=0)
+    if rows.shape[0] == 0:
+        return np.zeros(rows.shape[1]), counts
+    cut = np.floor(trim * counts + 1e-9).astype(int)
+    rank = np.arange(rows.shape[0])[:, None]
+    inside = (rank >= cut[None, :]) & (rank < (counts - cut)[None, :])
+    kept = inside.sum(axis=0)
+    total = np.where(inside, ordered, 0.0).sum(axis=0)
+    return np.where(kept > 0, total / np.maximum(kept, 1), 0.0), counts
+
+
+def _complete_day(
+    label: Any,
+    m: int,
+    profile: np.ndarray,
+    counts: np.ndarray,
+    rows: np.ndarray,
+    weights: np.ndarray | None,
+    *,
+    requested: int,
+    extra: Mapping[str, Any] | None = None,
+) -> DayForecast:
+    """Fill slots without a sample from the pooled mean and build the per-day record."""
+    known = np.isfinite(rows)
+    pooled_count = int(known.sum())
+    if pooled_count:
+        w = known.astype(float) if weights is None else known * weights[:, None]
+        pooled_mean = float((np.where(known, rows, 0.0) * w).sum() / w.sum())
+    else:
+        pooled_mean = 0.0
+    used = counts > 0
+    values = np.where(used, profile, pooled_mean)
+    pooled_slots = int((~used).sum()) if pooled_count else 0
+    empty_slots = int((~used).sum()) if not pooled_count else 0
+    fallback = "none"
+    if pooled_slots:
+        fallback = "pooled_window_mean"
+    if empty_slots:
+        fallback = "zero_no_history"
+    record: dict[str, Any] = {
+        "local_day": str(label),
+        "intervals": int(m),
+        "window_days_requested": int(requested),
+        "window_days_available": int(rows.shape[0]),
+        "window_days_with_usable_data": int(known.any(axis=1).sum()),
+        "slots_using_history": int(used.sum()),
+        "slots_pooled_fallback": pooled_slots,
+        "slots_zero_no_history": empty_slots,
+        "samples_min": int(counts[used].min()) if used.any() else 0,
+        "samples_max": int(counts[used].max()) if used.any() else 0,
+        "fallback": fallback,
+        "forecast_fallback_rule": _CANDIDATE_FALLBACK_RULE,
+    }
+    if extra:
+        record.update(extra)
+    return values, record
+
+
+def _window_days_before(request: ForecastRequest, j: int, window: int, history: int) -> range:
+    """Day indices ``[j - window, j)`` that start before the cutoff."""
+    return range(max(0, j - window), min(j, history))
+
+
+def _require_finite_history(request: ForecastRequest) -> None:
+    """Refuse a non-finite usable value, as ``trailing_mean`` does (kernel-based candidates)."""
+    load = request.history_load_kwh
+    keep = request.history_usable
+    if not np.isfinite(load[keep]).all():
+        bad = int(np.flatnonzero(keep & ~np.isfinite(load))[0])
+        raise ValueError(f"load_kwh contains a non-finite value at index {bad}")
+
+
+def _check_window(window_days: int) -> int:
+    if int(window_days) < 1:
+        raise ValueError(f"window_days must be >= 1, got {window_days}")
+    return int(window_days)
+
+
+@register_forecaster("trailing_median", fallback_rule=_CANDIDATE_FALLBACK_RULE)
+def _trailing_median(request: ForecastRequest, *, window_days: int = 28) -> list[DayForecast]:
+    """Same-slot-position median over the previous window_days local days (robust to spikes)."""
+    window = _check_window(window_days)
+    history = _history_day_count(request)
+    out: list[DayForecast] = []
+    for j in request.target_days:
+        label, start, stop = request.days[j]
+        rows = _history_rows(
+            request, _window_days_before(request, j, window, history), stop - start
+        )
+        profile, counts = _median_of_columns(rows)
+        out.append(
+            _complete_day(label, stop - start, profile, counts, rows, None, requested=window)
+        )
+    return out
+
+
+@register_forecaster("trailing_trimmed_mean", fallback_rule=_CANDIDATE_FALLBACK_RULE)
+def _trailing_trimmed_mean(
+    request: ForecastRequest, *, window_days: int = 28, trim: float = 0.1
+) -> list[DayForecast]:
+    """Same-slot-position trimmed mean (trim fraction dropped at each end) over window_days."""
+    window = _check_window(window_days)
+    if not 0.0 <= float(trim) < 0.5:
+        raise ValueError(f"trim must be in [0, 0.5), got {trim}")
+    history = _history_day_count(request)
+    out: list[DayForecast] = []
+    for j in request.target_days:
+        label, start, stop = request.days[j]
+        rows = _history_rows(
+            request, _window_days_before(request, j, window, history), stop - start
+        )
+        profile, counts = _trimmed_mean_of_columns(rows, float(trim))
+        out.append(
+            _complete_day(
+                label,
+                stop - start,
+                profile,
+                counts,
+                rows,
+                None,
+                requested=window,
+                extra={"trim": float(trim)},
+            )
+        )
+    return out
+
+
+@register_forecaster("ewma", fallback_rule=_CANDIDATE_FALLBACK_RULE)
+def _ewma(
+    request: ForecastRequest, *, half_life_days: float = 7.0, window_days: int = 56
+) -> list[DayForecast]:
+    """Exponentially weighted mean over days per slot position (half-life, capped window)."""
+    window = _check_window(window_days)
+    if not float(half_life_days) > 0.0:
+        raise ValueError(f"half_life_days must be > 0, got {half_life_days}")
+    history = _history_day_count(request)
+    out: list[DayForecast] = []
+    for j in request.target_days:
+        label, start, stop = request.days[j]
+        prior = _window_days_before(request, j, window, history)
+        rows = _history_rows(request, prior, stop - start)
+        age = np.array([j - p for p in prior], dtype=float)
+        weights = 0.5 ** (age / float(half_life_days))
+        profile, counts = _weighted_mean(rows, weights)
+        out.append(
+            _complete_day(
+                label,
+                stop - start,
+                profile,
+                counts,
+                rows,
+                weights,
+                requested=window,
+                extra={"half_life_days": float(half_life_days)},
+            )
+        )
+    return out
+
+
+#: The three day-type profiles of ``daytype``.
+DAYTYPE_WEEKDAY = "weekday"
+DAYTYPE_SATURDAY = "saturday"
+DAYTYPE_SUNDAY_HOLIDAY = "sunday_holiday"
+
+
+@lru_cache(maxsize=8)
+def _holiday_calendar(subdivision: str | None) -> Any:
+    import holidays  # noqa: PLC0415 - kept lazy: the package is large and only daytype needs it
+
+    try:
+        return holidays.country_holidays("ES", subdiv=subdivision)
+    except NotImplementedError as exc:
+        raise ValueError(f"unknown Spanish holiday subdivision {subdivision!r}") from exc
+
+
+@lru_cache(maxsize=4096)
+def _daytype_of_ordinal(ordinal: int, subdivision: str | None) -> str:
+    day = date.fromordinal(ordinal)
+    if day.weekday() == 6 or day in _holiday_calendar(subdivision):
+        return DAYTYPE_SUNDAY_HOLIDAY
+    return DAYTYPE_SATURDAY if day.weekday() == 5 else DAYTYPE_WEEKDAY
+
+
+def daytype_of(day: date, subdivision: str | None = None) -> str:
+    """``weekday`` / ``saturday`` / ``sunday_holiday`` of a local date.
+
+    Spain's national holidays, plus the optional subdivision's, count as Sundays.
+    """
+    return _daytype_of_ordinal(day.toordinal(), subdivision)
+
+
+@register_forecaster("daytype", fallback_rule=_CANDIDATE_FALLBACK_RULE)
+def _daytype(
+    request: ForecastRequest,
+    *,
+    n_days: int = 6,
+    window_days: int = 84,
+    subdivision: str | None = None,
+) -> list[DayForecast]:
+    """Mean profile of the last n_days local days of the target's day type.
+
+    Day types are weekday, Saturday and Sunday-or-holiday (Spanish holidays from the
+    ``holidays`` package, national plus the optional subdivision); the search goes back
+    at most window_days.  A day with no usable interval does not count towards n_days.
+    """
+    window = _check_window(window_days)
+    if int(n_days) < 1:
+        raise ValueError(f"n_days must be >= 1, got {n_days}")
+    _holiday_calendar(subdivision)  # refuses an unknown subdivision up front
+    history = _history_day_count(request)
+    out: list[DayForecast] = []
+    for j in request.target_days:
+        label, start, stop = request.days[j]
+        kind = daytype_of(_label_date(label), subdivision)
+        matching: list[int] = []
+        for p in reversed(_window_days_before(request, j, window, history)):
+            if len(matching) >= int(n_days):
+                break
+            _p_label, p_start, p_stop = request.days[p]
+            if (
+                daytype_of(_label_date(_p_label), subdivision) == kind
+                and request.history_usable[p_start:p_stop].any()
+            ):
+                matching.append(p)
+        matching.reverse()
+        rows = _history_rows(request, matching, stop - start)
+        profile, counts = _weighted_mean(rows, None)
+        out.append(
+            _complete_day(
+                label,
+                stop - start,
+                profile,
+                counts,
+                rows,
+                None,
+                requested=int(n_days),
+                extra={"daytype": kind, "daytype_days_found": len(matching)},
+            )
+        )
+    return out
+
+
+def _slots_per_day(request: ForecastRequest) -> int:
+    lengths = [hi - lo for _label, lo, hi in request.days]
+    return max(set(lengths), key=lengths.count)
+
+
+@register_forecaster("level_adjusted", intraday_cutoff=True, fallback_rule=FORECAST_FALLBACK_RULE)
+def _level_adjusted(
+    request: ForecastRequest,
+    *,
+    window_days: int = 28,
+    lo: float = 0.7,
+    hi: float = 1.4,
+    min_slots: int = 24,
+) -> list[DayForecast]:
+    """Trailing-mean profile scaled by clip(observed last 24 h / profile of those slots, lo, hi).
+
+    Declares ``intraday_cutoff``: at a 14:00 / 20:30 event the last 24 h include today's
+    observed slots.  The same factor scales every target day.  Fewer than ``min_slots``
+    usable observed slots, or a non-positive profile sum, leave the factor at 1.0.
+    """
+    window = _check_window(window_days)
+    if not 0.0 < float(lo) <= float(hi):
+        raise ValueError(f"need 0 < lo <= hi, got lo={lo}, hi={hi}")
+    _require_finite_history(request)
+    load = request.history_load_kwh
+    keep = request.history_usable
+    cutoff = request.cutoff_idx
+    first = max(0, cutoff - _slots_per_day(request))
+    observed = 0.0
+    expected = 0.0
+    slots = 0
+    history = _history_day_count(request)
+    for p in range(
+        max(0, bisect.bisect_right(request.days, first, key=lambda d: d[1]) - 1), history
+    ):
+        _label, p_start, p_stop = request.days[p]
+        lo_i, hi_i = max(p_start, first), min(p_stop, cutoff)
+        usable = keep[lo_i:hi_i]
+        if not usable.any():
+            continue
+        profile, _record = trailing_slot_mean_for_day(load, keep, request.days, p, window)
+        positions = np.flatnonzero(usable)
+        values = load[lo_i:hi_i][positions]
+        observed += float(values.sum())
+        expected += float(profile[lo_i - p_start + positions].sum())
+        slots += int(positions.size)
+    raw = observed / expected if slots >= int(min_slots) and expected > 0.0 else None
+    factor = 1.0 if raw is None else float(np.clip(raw, float(lo), float(hi)))
+    extra = {
+        "level_factor": factor,
+        "level_factor_raw": raw,
+        "level_slots_observed": slots,
+        "level_clipped": raw is not None and factor != raw,
+    }
+    out: list[DayForecast] = []
+    for j in request.target_days:
+        values, record = trailing_slot_mean_for_day(load, keep, request.days, j, window)
+        out.append((values * factor, {**record, **extra}))
+    return out
+
+
+def _one_year_earlier(day: date) -> date:
+    try:
+        return day.replace(year=day.year - 1)
+    except ValueError:  # 29 February
+        return day.replace(year=day.year - 1, day=28)
+
+
+@register_forecaster("blend", fallback_rule=_CANDIDATE_FALLBACK_RULE)
+def _blend(
+    request: ForecastRequest,
+    *,
+    w: float = 0.5,
+    window_days: int = 28,
+    last_year_half_width_days: int = 14,
+    min_last_year_days: int = 7,
+) -> list[DayForecast]:
+    """w * trailing mean + (1 - w) * same-season-last-year profile.
+
+    The last-year profile is the mean of the local days within last_year_half_width_days
+    of the same date one year earlier.  Trailing alone is used where that window holds
+    fewer than min_last_year_days days with usable data.
+    """
+    window = _check_window(window_days)
+    if not 0.0 <= float(w) <= 1.0:
+        raise ValueError(f"w must be in [0, 1], got {w}")
+    half = int(last_year_half_width_days)
+    if half < 0:
+        raise ValueError(f"last_year_half_width_days must be >= 0, got {half}")
+    _require_finite_history(request)
+    history = _history_day_count(request)
+    ordinals = np.fromiter(
+        (_label_date(label).toordinal() for label, _lo, _hi in request.days),
+        dtype=np.int64,
+        count=len(request.days),
+    )
+    load = request.history_load_kwh
+    keep = request.history_usable
+    out: list[DayForecast] = []
+    for j in request.target_days:
+        label, start, stop = request.days[j]
+        recent, record = trailing_slot_mean_for_day(load, keep, request.days, j, window)
+        centre = _one_year_earlier(_label_date(label)).toordinal()
+        a = int(np.searchsorted(ordinals, centre - half, side="left"))
+        b = min(int(np.searchsorted(ordinals, centre + half, side="right")), history)
+        rows = _history_rows(request, range(a, max(a, b)), stop - start)
+        ly_profile, ly_counts = _weighted_mean(rows, None)
+        ly_days = int(np.isfinite(rows).any(axis=1).sum()) if rows.size else 0
+        usable_ly = ly_days >= max(1, int(min_last_year_days))
+        no_recent = int(record["window_days_with_usable_data"]) == 0
+        if not usable_ly:
+            values = recent
+            source = "trailing_only"
+        elif no_recent:
+            values = np.where(ly_counts > 0, ly_profile, recent)
+            source = "last_year_only"
+        else:
+            values = np.where(ly_counts > 0, w * recent + (1.0 - w) * ly_profile, recent)
+            source = "blend"
+        out.append(
+            (
+                values,
+                {
+                    **record,
+                    "blend_weight_recent": float(w),
+                    "blend_source": source,
+                    "last_year_days_with_usable_data": ly_days,
+                    "last_year_slots_blended": int((ly_counts > 0).sum()) if usable_ly else 0,
                 },
             )
         )

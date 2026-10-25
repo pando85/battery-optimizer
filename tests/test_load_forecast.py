@@ -432,7 +432,8 @@ class TestDeclaredCutoff:
         _assert_declared_cutoff_holds(name)
 
     def test_default_forecasters_keep_the_local_midnight_cutoff(self) -> None:
-        assert not any(lf.get_forecaster(n).intraday_cutoff for n in lf.forecaster_names())
+        declared = [n for n in lf.forecaster_names() if lf.get_forecaster(n).intraday_cutoff]
+        assert declared == ["level_adjusted"]
         load, usable, days = _series()
         event, starts, local_days = _afternoon_event(days, load.size)
         provider = _provider("trailing_mean", load, usable, starts, local_days)
