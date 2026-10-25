@@ -50,7 +50,9 @@ just release           # cut a release (see the release skill)
   purpose.
 - Shadow phase: the project reads and benchmarks only. Do not add write credentials, service calls to
   Home Assistant, or any actuation of the battery or other devices. Home Assistant tokens must be
-  read-only.
+  read-only. The single exception is the non-mutating `weather.get_forecasts` query (with
+  `return_response`) of the passive forecast archive, allowed only by the narrow check in
+  `service/ha_guard.py`; do not widen it.
 - The container image holds no data and no git; `BATTERY_OPTIMIZER_GIT_SHA` is the build-time commit
   identity.
 

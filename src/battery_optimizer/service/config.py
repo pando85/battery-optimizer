@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -25,13 +26,16 @@ __all__ = [
     "BATTERY_ROLES",
     "ENTITY_ROLES",
     "SOC_SOURCES",
+    "ArchiveSettings",
     "EntityMap",
     "HomeAssistantSettings",
     "ObservationSettings",
     "PlanningSettings",
     "PrometheusSettings",
+    "PvpcSnapshotSettings",
     "Secret",
     "ServiceConfig",
+    "WeatherForecastSettings",
     "load_service_config",
     "resolve_service_config_path",
 ]
@@ -157,6 +161,35 @@ class ObservationSettings:
 
 
 @dataclass(frozen=True)
+class PvpcSnapshotSettings:
+    """Append a record for every state change of the price entity (PO-B)."""
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class WeatherForecastSettings:
+    """Periodic ``weather.get_forecasts`` archive (Load Forecaster P4).
+
+    Fetches run at ``offset_minutes`` past every ``interval_minutes`` of the UTC day.
+    """
+
+    enabled: bool = False
+    entity_id: str = "weather.forecast_home"
+    type: str = "hourly"
+    interval_minutes: int = 60
+    offset_minutes: int = 5
+
+
+@dataclass(frozen=True)
+class ArchiveSettings:
+    """Passive, append-only data collection; never part of the planning inputs."""
+
+    pvpc_snapshots: PvpcSnapshotSettings = field(default_factory=PvpcSnapshotSettings)
+    weather_forecast: WeatherForecastSettings = field(default_factory=WeatherForecastSettings)
+
+
+@dataclass(frozen=True)
 class ServiceConfig:
     """Fully resolved service configuration."""
 
@@ -166,6 +199,7 @@ class ServiceConfig:
     planning: PlanningSettings
     observation: ObservationSettings
     freshness_s: Mapping[str, float]
+    archive: ArchiveSettings = field(default_factory=ArchiveSettings)
     timezone: str = "Europe/Madrid"
     mode: str = "shadow"
     source_path: str | None = None
@@ -200,6 +234,7 @@ class ServiceConfig:
             "prometheus": asdict(self.prometheus),
             "planning": asdict(self.planning),
             "observation": asdict(self.observation),
+            "archive": asdict(self.archive),
             "freshness_s": dict(self.freshness_s),
             "source_path": self.source_path,
         }
@@ -210,6 +245,7 @@ class ServiceConfig:
         public["home_assistant"].pop("url", None)
         public["prometheus"].pop("url", None)
         public.pop("source_path", None)
+        public.pop("archive", None)  # passive collection never changes a plan
         text = json.dumps(public, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(text.encode()).hexdigest()
 
@@ -275,6 +311,74 @@ def _load_forecaster(value: Any) -> str:
             f"{allowed}"
         )
     return value
+
+
+_WEATHER_ENTITY = re.compile(r"^weather\.[a-z0-9_]+$")
+
+
+def _bool(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"service config: {name} must be true or false, got {value!r}")
+    return value
+
+
+def _keys(raw: Mapping[str, Any], name: str, allowed: tuple[str, ...]) -> None:
+    unknown = sorted(str(k) for k in raw if k not in allowed)
+    if unknown:
+        raise ValueError(f"service config: unknown {name} keys {unknown}")
+
+
+def _parse_archive(raw: Mapping[str, Any]) -> ArchiveSettings:
+    from .ha_guard import ALLOWED_WEATHER_FORECAST_TYPES
+
+    _keys(raw, "archive", ("pvpc_snapshots", "weather_forecast"))
+    pvpc_raw = _section(raw, "pvpc_snapshots")
+    _keys(pvpc_raw, "archive.pvpc_snapshots", ("enabled",))
+    weather_raw = _section(raw, "weather_forecast")
+    _keys(
+        weather_raw,
+        "archive.weather_forecast",
+        ("enabled", "entity_id", "type", "interval_minutes", "offset_minutes"),
+    )
+    entity_id = weather_raw.get("entity_id", "weather.forecast_home")
+    if not isinstance(entity_id, str) or not _WEATHER_ENTITY.match(entity_id):
+        raise ValueError(
+            f"service config: archive.weather_forecast.entity_id must be a weather.* entity, "
+            f"got {entity_id!r}"
+        )
+    forecast_type = weather_raw.get("type", "hourly")
+    if forecast_type not in ALLOWED_WEATHER_FORECAST_TYPES:
+        raise ValueError(
+            f"service config: archive.weather_forecast.type must be one of "
+            f"{sorted(ALLOWED_WEATHER_FORECAST_TYPES)}"
+        )
+    interval = _int(
+        weather_raw.get("interval_minutes", 60), "archive.weather_forecast.interval_minutes"
+    )
+    if 1440 % interval:
+        raise ValueError(
+            "service config: archive.weather_forecast.interval_minutes must divide 1440 "
+            "(a UTC day) so fetches stay on a fixed grid"
+        )
+    offset = _int(
+        weather_raw.get("offset_minutes", 5), "archive.weather_forecast.offset_minutes", 0
+    )
+    if offset >= interval:
+        raise ValueError(
+            "service config: archive.weather_forecast.offset_minutes must be below interval_minutes"
+        )
+    return ArchiveSettings(
+        pvpc_snapshots=PvpcSnapshotSettings(
+            enabled=_bool(pvpc_raw.get("enabled", False), "archive.pvpc_snapshots.enabled")
+        ),
+        weather_forecast=WeatherForecastSettings(
+            enabled=_bool(weather_raw.get("enabled", False), "archive.weather_forecast.enabled"),
+            entity_id=entity_id,
+            type=forecast_type,
+            interval_minutes=interval,
+            offset_minutes=offset,
+        ),
+    )
 
 
 def _read_token() -> Secret | None:
@@ -424,6 +528,7 @@ def load_service_config(path: Path | None = None) -> ServiceConfig:
         slot_close_grace_s=_positive(obs_raw.get("slot_close_grace_s", 20), "slot_close_grace_s"),
         counter_max_age_s=_positive(obs_raw.get("counter_max_age_s", 300), "counter_max_age_s"),
     )
+    archive = _parse_archive(_section(raw, "archive"))
     fresh_raw = _section(raw, "freshness_s")
     freshness = {str(k): _positive(v, f"freshness_s.{k}") for k, v in fresh_raw.items()}
     return ServiceConfig(
@@ -432,6 +537,7 @@ def load_service_config(path: Path | None = None) -> ServiceConfig:
         prometheus=prom,
         planning=planning,
         observation=observation,
+        archive=archive,
         freshness_s=freshness,
         timezone=timezone,
         mode=mode,

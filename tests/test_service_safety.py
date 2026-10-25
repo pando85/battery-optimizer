@@ -18,6 +18,7 @@ from battery_optimizer.service.ha_guard import (
     check_rest_request,
     check_ws_frame,
     check_ws_message,
+    weather_forecast_request,
 )
 
 SERVICE_DIR = Path(__file__).resolve().parents[1] / "src" / "battery_optimizer" / "service"
@@ -123,6 +124,8 @@ def test_guarded_connection_blocks_service_call_before_the_socket():
         ("GET", "/api/services"),
         ("GET", "/api/template"),
         ("GET", "/api/states/../services"),
+        ("POST", "/api/services/weather/get_forecasts"),
+        ("POST", "/api/services/weather/get_forecasts?return_response"),
     ],
 )
 def test_rest_guard_refuses(method, path):
@@ -177,3 +180,157 @@ def test_service_package_has_no_actuation_or_modbus_code():
         text = path.read_text()
         if path.name != "ha_guard.py":
             assert "call_service" not in text, path.name
+
+
+# ---------------------------------------------------------------------------
+# The single exception: weather.get_forecasts with a response (a query)
+# ---------------------------------------------------------------------------
+
+
+def weather_call(**overrides):
+    message = {
+        "id": 7,
+        "type": "call_service",
+        "domain": "weather",
+        "service": "get_forecasts",
+        "service_data": {"type": "hourly"},
+        "target": {"entity_id": "weather.forecast_home"},
+        "return_response": True,
+    }
+    for key, value in overrides.items():
+        if value is _MISSING:
+            message.pop(key, None)
+        else:
+            message[key] = value
+    return message
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        weather_call(),
+        weather_call(id=_MISSING),
+        weather_call(service_data={"type": "daily"}),
+        weather_call(service_data={"type": "twice_daily"}),
+        weather_call(target={"entity_id": ["weather.a", "weather.b_2"]}),
+        weather_call(target=_MISSING, service_data={"type": "hourly", "entity_id": "weather.x"}),
+        weather_call(
+            target={"entity_id": "weather.a"},
+            service_data={"type": "hourly", "entity_id": ["weather.b"]},
+        ),
+    ],
+)
+def test_only_the_weather_forecast_query_is_allowed(message):
+    check_ws_message(message)
+    check_ws_frame(json.dumps(message))
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # another service, in the weather domain or not
+        weather_call(domain="switch", service="turn_on"),
+        weather_call(domain="number", service="set_value"),
+        weather_call(service="get_forecast"),
+        weather_call(service="refresh"),
+        weather_call(domain="Weather"),
+        weather_call(domain=_MISSING),
+        weather_call(service=_MISSING),
+        # the response must be requested (and requested as a real boolean)
+        weather_call(return_response=_MISSING),
+        weather_call(return_response=False),
+        weather_call(return_response="true"),
+        weather_call(return_response=1),
+        # no field beyond the allowed set
+        weather_call(extra=1),
+        weather_call(data={"entity_id": "switch.x"}),
+        weather_call(context={"id": "x"}),
+        weather_call(entity_id="weather.forecast_home"),
+        # target / service_data name weather entities only, and nothing else
+        weather_call(target={"entity_id": "switch.heater"}),
+        weather_call(target={"entity_id": ["weather.a", "switch.heater"]}),
+        weather_call(target={"entity_id": "sensor.weather_station"}),
+        weather_call(target={"entity_id": "weather.a,switch.b"}),
+        weather_call(target={"entity_id": "weather.*"}),
+        weather_call(target={"entity_id": "all"}),
+        weather_call(target={"entity_id": []}),
+        weather_call(target={"entity_id": ["weather.a"] * 9}),
+        weather_call(target={"entity_id": 3}),
+        weather_call(target={"area_id": "kitchen"}),
+        weather_call(target={"entity_id": "weather.a", "device_id": "abc"}),
+        weather_call(target={"entity_id": "weather.a", "label_id": "x"}),
+        weather_call(target=_MISSING),
+        weather_call(target={}),
+        weather_call(target=["weather.a"]),
+        weather_call(service_data={"type": "hourly", "entity_id": "switch.x"}),
+        weather_call(service_data={"type": "hourly", "brightness": 255}),
+        weather_call(service_data={"type": "minutely"}),
+        weather_call(service_data={}),
+        weather_call(service_data=_MISSING),
+        weather_call(service_data="hourly"),
+        # protocol hygiene
+        weather_call(id="7"),
+        weather_call(id=True),
+        weather_call(id=1.5),
+    ],
+)
+def test_every_other_service_call_is_still_refused(message):
+    with pytest.raises(ForbiddenHACallError):
+        check_ws_message(message)
+    with pytest.raises(ForbiddenHACallError):
+        check_ws_frame(json.dumps(message))
+
+
+def test_a_bad_call_service_hidden_in_a_coalesced_frame_is_refused():
+    frame = json.dumps([weather_call(), weather_call(domain="switch", service="turn_off")])
+    with pytest.raises(ForbiddenHACallError):
+        check_ws_frame(frame)
+
+
+def test_the_allowlist_of_message_types_does_not_grow():
+    # call_service is never a plain allowlisted type: it is judged by its own checker.
+    assert "call_service" not in ALLOWED_WS_TYPES
+
+
+def test_weather_forecast_request_builds_the_exact_frame_and_validates_it():
+    frame = weather_forecast_request(5, "weather.forecast_home", "hourly")
+    assert frame == weather_call(id=5)
+    with pytest.raises(ForbiddenHACallError):
+        weather_forecast_request(5, "switch.heater", "hourly")
+    with pytest.raises(ForbiddenHACallError):
+        weather_forecast_request(5, "weather.forecast_home", "minutely")
+
+
+def test_guarded_connection_passes_only_the_weather_query():
+    class Recorder:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, text):
+            self.sent.append(json.loads(text))
+
+        async def recv(self):
+            return ""
+
+        async def close(self):
+            pass
+
+    inner = Recorder()
+    conn = GuardedConnection(inner)
+
+    async def go():
+        await conn.send(json.dumps(weather_call()))
+        with pytest.raises(ForbiddenHACallError):
+            await conn.send(json.dumps(weather_call(return_response=_MISSING)))
+        with pytest.raises(ForbiddenHACallError):
+            await conn.send(
+                json.dumps(
+                    {"id": 8, "type": "call_service", "domain": "switch", "service": "turn_on"}
+                )
+            )
+
+    asyncio.run(go())
+    assert inner.sent == [weather_call()]

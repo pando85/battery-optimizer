@@ -5,12 +5,17 @@ Layout (partitioned by **UTC** day, so a DST day is never split or doubled)::
     service/v1/plans/date=YYYY-MM-DD/<plan_id>.json    one immutable file per plan
     service/v1/slots/date=YYYY-MM-DD/slots.jsonl       one row per closed slot
     service/v1/events/date=YYYY-MM-DD/events.jsonl     solve / readiness / connection events
+    service/v1/pvpc_snapshots/date=YYYY-MM-DD/pvpc_snapshots.jsonl
+                                                       one row per PVPC sensor state change
+    service/v1/weather_forecasts/date=YYYY-MM-DD/weather_forecasts.jsonl
+                                                       one row per HA weather forecast fetch
     service/v1/state/virtual_battery.json              the virtual battery's SOC (mutable)
 
 Plans are written with :func:`battery_optimizer.paths.write_part_atomic` (temp
 file, fsync, no-clobber hard link) — the store convention of the offline pipeline.
-Slot and event rows are appended as one ``O_APPEND`` write of one complete line,
-then fsynced; readers skip a torn last line rather than trusting it.  Files are
+Slot, event and archive rows (PVPC snapshots, weather forecasts) are appended as one
+``O_APPEND`` write of one complete line, then fsynced; readers skip a torn last line
+rather than trusting it.  Files are
 0600 and directories 0700.  Nothing here ever rewrites or deletes a record.
 """
 
@@ -76,6 +81,12 @@ class ShadowSink:
     def append_event(self, at: datetime, record: dict[str, Any]) -> Path:
         return self._append("events", at, record)
 
+    def append_pvpc_snapshot(self, at: datetime, record: dict[str, Any]) -> Path:
+        return self._append("pvpc_snapshots", at, record)
+
+    def append_weather_forecast(self, at: datetime, record: dict[str, Any]) -> Path:
+        return self._append("weather_forecasts", at, record)
+
     # -- mutable state -------------------------------------------------------------
 
     def _state_path(self) -> Path:
@@ -107,7 +118,8 @@ class ShadowSink:
 def iter_records(
     data_dir: Path, kind: str, since: datetime, until: datetime
 ) -> Iterator[dict[str, Any]]:
-    """Records of *kind* (``slots``/``events``/``plans``) from the UTC-day partitions
+    """Records of *kind* (``slots``/``events``/``plans``/``pvpc_snapshots``/
+    ``weather_forecasts``) from the UTC-day partitions
     overlapping ``[since, until)``; torn or corrupt lines are skipped."""
     root = data_dir / _ROOT / kind
     day = since.astimezone(UTC).date() - timedelta(days=1)

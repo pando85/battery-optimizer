@@ -127,7 +127,8 @@ Demo: `python -m battery_optimizer.hack.replay_runtime_demo`. See module docstri
 ## Shadow service (`service/`)
 
 **Status: Phase C (PROD-C1 to C3) built — shadow only, no actuation path.** `battery-optimizer serve`
-subscribes to Home Assistant (read-only allowlist, reconnect and full resync), reads load history from
+subscribes to Home Assistant (read-only allowlist, reconnect and full resync; passive PVPC-snapshot and
+weather-forecast archives, see [service.md](service.md#passive-archives)), reads load history from
 Prometheus, solves the offline MPC kernel every 15 minutes in a bounded worker, records time-bounded
 shadow intents and exposes `/health/live`, `/health/ready`, `/status`, `/plan` and `/metrics`.
 `battery-optimizer shadow-report` compares the recorded plans with the native battery behaviour.

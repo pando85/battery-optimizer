@@ -7,9 +7,11 @@ PROD-C1 to C3). It is a single resident process that reads Home Assistant and Pr
 same MPC kernel as the offline benchmarks every 15 minutes, records the resulting **shadow** plans,
 and compares them with what the native battery controller actually did.
 
-**There is no actuation path.** The Home Assistant adapters cannot call a service or write a state
-(see [Safety](#safety)), there is no Modbus code, and plans are stored as intents that are never sent
-anywhere. Live actuation is Phase D and is neither built nor authorized.
+**There is no actuation path.** The Home Assistant adapters cannot write a state or call an actuating
+service (see [Safety](#safety)), there is no Modbus code, and plans are stored as intents that are never
+sent anywhere. The one service call they can make is the non-mutating `weather.get_forecasts` query used by
+the [weather-forecast archive](#passive-archives). Live actuation is Phase D and is neither built nor
+authorized.
 
 ## Architecture
 
@@ -41,7 +43,7 @@ anywhere. Live actuation is Phase D and is neither built nor authorized.
 | Module (`battery_optimizer.service`) | Role |
 |---|---|
 | `config` | `config/service.yaml` + environment; only `mode: shadow` is accepted |
-| `ha_guard` | Read-only allowlist for every WebSocket frame and REST request |
+| `ha_guard` | Read-only allowlist for every WebSocket frame and REST request (plus the one `weather.get_forecasts` exception) |
 | `ha_client` | WebSocket session (auth, subscribe, resync, heartbeat, reconnect) and GET-only REST |
 | `entity_store` | Latest state per entity, ordered by HA source time, freshness from `last_reported` |
 | `pvpc` | Publication-aware price curve from `sensor.esios_pvpc` attributes |
@@ -50,6 +52,7 @@ anywhere. Live actuation is Phase D and is neither built nor authorized.
 | `observer` | Per-slot measurements (counter energy, power averages, SOC edges) |
 | `virtual_battery` | Open-loop replay of decisions against measured load |
 | `runtime` | Scheduling, readiness, bounded executor, slot cycle, metrics snapshot |
+| `archive` | Record builders and the fetch schedule of the passive [archives](#passive-archives) |
 | `sink` | Append-only store under the data directory |
 | `shadow_report` | Shadow-vs-native comparison (`shadow-report`) |
 | `api`, `serve`, `metrics` | HTTP surface, uvicorn wiring, Prometheus metrics |
@@ -150,6 +153,9 @@ Omnibattery entities exist, map `battery_soc` plus either `battery_power` (signe
 control surface (`number.*_pd_target_grid_power`, `switch.*_battery_allow_charge/discharge`, system
 caps — where `0` means *unlimited*) to `observed`, and switch to `soc_source: entity`.
 
+The optional `archive:` section switches the two [passive archives](#passive-archives) on; without it
+both are off, so a deployed config must carry it.
+
 The variables the service reads (the complete table for every command is in
 [Configuration](configuration.md#environment-variables)):
 
@@ -216,11 +222,17 @@ ID, price, timestamp or household reading is a label.
 | `shadow_comparable_slots_total`, `shadow_soc_violations_total`, `shadow_clipped_energy_kwh_total` | counter | — |
 | `virtual_battery_soc_ratio`, `observer_late_samples` | gauge | — |
 | `sink_write_errors_total` | counter | — |
+| `pvpc_snapshots_total` | counter | `result` (`written`, `failed`) |
+| `weather_forecast_fetches_total` | counter | `result` (`ok` = fetched and written, `failed`) |
+| `archive_last_success_timestamp_seconds` | gauge (absent until the first success) | `archive` (`pvpc_snapshots`, `weather_forecast`) |
 
 Suggested alerts (homelab): `ready == 0` for 30 m; `ha_connected == 0` for 10 m;
 `input_stale{role="grid_power"} == 1` for 15 m; `plan_age_seconds > 1800`;
 `increase(solves_total{result=~"error|timeout"}[1h]) > 0`; `increase(sink_write_errors_total[1h]) > 0`;
-`history_age_seconds > 93600`.
+`history_age_seconds > 93600`; archives:
+`time() - archive_last_success_timestamp_seconds{archive="weather_forecast"} > 10800` or
+`increase(weather_forecast_fetches_total{result="failed"}[3h]) > 2`. A PVPC snapshot only exists when the sensor
+changes, so alert on `increase(pvpc_snapshots_total{result="failed"}[1h]) > 0` rather than on staleness.
 
 ## Store
 
@@ -233,9 +245,72 @@ files `0600`, directories `0700`:
 | `slots/date=YYYY-MM-DD/slots.jsonl` | One row per closed slot: decision, measurements, price, virtual-battery step, costs |
 | `events/date=YYYY-MM-DD/events.jsonl` | Start/stop, HA sync/disconnect, solve skipped/error/timeout/discarded, history refresh, price publication |
 | `state/virtual_battery.json` | Virtual SOC (restored after a restart if younger than 6 h) |
+| `pvpc_snapshots/date=YYYY-MM-DD/pvpc_snapshots.jsonl` | One row per PVPC sensor state change (see [Passive archives](#passive-archives)) |
+| `weather_forecasts/date=YYYY-MM-DD/weather_forecasts.jsonl` | One row per fetched HA weather forecast (see [Passive archives](#passive-archives)) |
 
 JSONL rows are appended with a single `O_APPEND` write plus `fsync`; readers skip a torn last line.
 The store is private household data: it never leaves the PVC and is never committed.
+
+## Passive archives
+
+Two append-only private archives collect data for later offline work (Price Outlook PO-B and Load
+Forecaster P4). They are written through the same sink as slots and events (one `O_APPEND` write of one
+complete JSON line, `fsync`, files `0600`, directories `0700`, UTC-day partitions, `schema_version: 1`),
+are **never read by the planner**, and can never change readiness: a failed collection or write is logged,
+counted and dropped. **There is no retention yet:** the files grow until pruned by hand (roughly a few MB
+per day: one PVPC snapshot of a few kB per sensor change and one forecast of tens of kB per hour).
+
+```yaml
+archive:                      # section absent => both archives off (the code default)
+  pvpc_snapshots:
+    enabled: true             # committed config/service.yaml: true
+  weather_forecast:
+    enabled: true             # committed config/service.yaml: true
+    entity_id: weather.forecast_home   # a weather.* entity
+    type: hourly              # hourly | daily | twice_daily
+    interval_minutes: 60      # must divide 1440
+    offset_minutes: 5         # fetch at HH:05 UTC; 0 <= offset < interval
+```
+
+Unknown keys under `archive` are refused at startup. The archive settings are not part of the planning
+`config_hash`.
+
+**PVPC publication snapshots** (`pvpc_snapshots/.../pvpc_snapshots.jsonl`). One row for every accepted state
+change of the `price` entity (`sensor.esios_pvpc`), and one for the first state the process sees after a
+start (`trigger: "initial"`, later ones `"change"`). The 60 s REST refresh of an unchanged state is not a
+change and writes nothing. Rows are written even when the state is `unavailable` or cannot be parsed into a
+curve.
+
+| Field | Content |
+|---|---|
+| `kind`, `schema_version`, `code_version`, `entity_id`, `trigger` | `pvpc_snapshot`, `1`, build identity, the price entity, `initial` / `change` |
+| `observed_at` | Service clock when the change was applied (UTC ISO) |
+| `last_changed`, `last_updated`, `last_reported` | Home Assistant's own timestamps (UTC ISO) |
+| `state` | The state string |
+| `attributes` | The raw attribute dict, verbatim (`price_HHh`, `price_next_day_HHh`, ...) |
+| `next_day_present` | `true` when any `price_next_day_*` attribute exists |
+| `reference_day` | Local date (`timezone`) of `last_updated`: the day the `price_HHh` keys refer to |
+
+`observed_at - last_updated` is the delivery delay; the first row with `next_day_present: true` per
+`reference_day` is the observed publication time.
+
+**Weather-forecast archive** (`weather_forecasts/.../weather_forecasts.jsonl`). Every `interval_minutes`
+(on a UTC grid at `offset_minutes` past; not at startup) the service calls `weather.get_forecasts` for
+`entity_id` with `return_response` over the existing WebSocket session and appends one row. A fetch needs a
+synced HA session; without one it fails and is retried.
+
+| Field | Content |
+|---|---|
+| `kind`, `schema_version`, `code_version` | `weather_forecast`, `1`, build identity |
+| `requested_at`, `received_at` | Service clock when the call was sent and answered (UTC ISO); the row is partitioned by `requested_at` |
+| `entity_id`, `type` | As configured |
+| `forecast` | HA's raw list for the entity (`response[entity_id].forecast`), entries untouched (`datetime`, `condition`, `temperature`, ... as the integration provides them) |
+
+An empty or missing forecast list is a failure and is not written.
+
+**Permission.** The only service call the service can make is `weather.get_forecasts`, and only in the form
+the guard accepts (see [Safety](#safety)). The Home Assistant user behind the token must be allowed to call
+that service (a normal non-admin user is); the token stays read-only in every other respect.
 
 ## Failure modes
 
@@ -250,6 +325,7 @@ The store is private household data: it never leaves the PVC and is never commit
 | Prometheus down at the daily refresh | `history_refresh_total{result="error"}` | Retried every 10 min; yesterday's history is not reused for today |
 | Solver error or timeout | `solves_total{result}` | Reported; a timed-out thread keeps the worker (`busy`) |
 | Store write fails | `sink_write_errors_total` | Logged; service continues |
+| Archive write fails, or a forecast fetch fails (no session, call refused, timeout, empty or malformed response) | `pvpc_snapshots_total{result="failed"}`, `weather_forecast_fetches_total{result="failed"}` | Logged and counted; the record is dropped; a failed fetch is retried after 30 s, 60 s, ... capped at 10 min (never past the next grid instant); readiness, solves and slot closes are untouched |
 | Restart | `build_info`, events | No plan is resumed; decisions start after the first fresh solve |
 
 ## Shadow-vs-native comparison
@@ -295,6 +371,15 @@ coverage on the `native_battery` basis.
   `ForbiddenHACallError` before reaching the socket.
 * REST: `GET` only, on `/api/`, `/api/config`, `/api/states`, `/api/states/<entity_id>`, enforced by
   an `httpx` request hook.
+* The single exception to "no service call" is **`weather.get_forecasts` with `return_response: true`**,
+  accepted only as the exact frame `{"id": <int>, "type": "call_service", "domain": "weather", "service":
+  "get_forecasts", "return_response": true, "service_data": {"type": "hourly" | "daily" | "twice_daily"},
+  "target": {"entity_id": "weather.<name>" | [...]}}`. Another domain or service, a missing or non-`true`
+  `return_response`, any additional field (in the frame, `service_data` or `target`, so no area, device or
+  label targets), a non-`weather.` entity or a non-integer `id` raises `ForbiddenHACallError` before the frame
+  reaches the socket. It is non-mutating: the service only returns the forecast the weather entity already
+  holds, it changes no state and operates no device. The only caller is the passive forecast archive, which
+  builds the frame with `ha_guard.weather_forecast_request`. REST `POST` stays forbidden.
 * The HTTP API has no writable route. Tests assert all of the above and statically keep Modbus/MQTT/
   HA libraries and HTTP write calls out of the package.
 * Use a **non-admin, read-only** HA user's token; the service never needs more.

@@ -26,10 +26,18 @@ For every slot boundary ``B`` (UTC grid, ``interval_seconds``):
 Significant state changes (SOC moved, next-day prices published, a completed
 resync) request an extra solve after a debounce, rate-limited.
 
+Passive archives
+----------------
+Two optional append-only archives ride on the same sink (:mod:`.archive`): a snapshot
+of every price-entity state change and a periodic ``weather.get_forecasts`` fetch.
+They are collected on the event loop but never read by the planner; a failure is
+counted and logged and never touches readiness, a solve or a slot close.
+
 Safety
 ------
 There is no actuation path: the HA adapters are read-only by construction
-(:mod:`.ha_guard`), and intents are records, not commands.  On start, after every
+(:mod:`.ha_guard`; its single exception is the ``weather.get_forecasts`` query for
+the archive), and intents are records, not commands.  On start, after every
 reconnect and whenever an input is stale, no decision is taken until a fresh,
 complete snapshot exists; a persisted plan is never resumed.
 """
@@ -50,10 +58,16 @@ from typing import Any
 
 from battery_optimizer.config import TariffConfig
 
+from .archive import (
+    next_fetch_time,
+    pvpc_snapshot_record,
+    retry_delay_s,
+    weather_forecast_record,
+)
 from .clock import Clock
 from .config import ServiceConfig
 from .entity_store import EntityState, EntityStore, UpdateResult
-from .ha_client import HARestClient, HAWebSocketClient, WSTransport
+from .ha_client import HACommandError, HARestClient, HAWebSocketClient, WSTransport
 from .history import ForecastUnavailableError, LoadHistory, forecast_load
 from .metrics import ServiceMetrics
 from .observer import SlotMeasurements, SlotObserver, normalise_value
@@ -188,6 +202,10 @@ class ShadowService:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started_at = clock.now()
 
+        self._pvpc_snapshot_seen = False
+        self.archive_last_success: dict[str, datetime] = {}
+        self.weather_error: str | None = None
+
         self._slot_open: dict[datetime, _SlotOpen] = {}
         self._opened_slot: datetime | None = None
         self._closed_slot: datetime | None = None
@@ -207,6 +225,10 @@ class ShadowService:
             self._tasks.append(asyncio.create_task(self._poll_loop(), name="ha-rest-poll"))
         self._tasks.append(asyncio.create_task(self._history_loop(), name="history"))
         self._tasks.append(asyncio.create_task(self._scheduler_loop(), name="scheduler"))
+        if self.ha is not None and self.config.archive.weather_forecast.enabled:
+            self._tasks.append(
+                asyncio.create_task(self._weather_archive_loop(), name="weather-archive")
+            )
 
     async def stop(self) -> None:
         self._generation += 1  # fence any in-flight solve
@@ -250,6 +272,12 @@ class ShadowService:
 
     def _on_state(self, state: EntityState, result: UpdateResult) -> None:
         role = self.config.entities.role_of(state.entity_id)
+        if (
+            role == "price"
+            and result is UpdateResult.ACCEPTED
+            and self.config.archive.pvpc_snapshots.enabled
+        ):
+            self._archive_pvpc_snapshot(state)
         if role == "price":
             had_tomorrow = bool(self.price_curve and self.price_curve.tomorrow_published)
             try:
@@ -270,6 +298,115 @@ class ShadowService:
             if value is not None and last is not None:
                 if abs(value - last) >= self.config.planning.replan_soc_change_frac:
                     self._request_replan("soc_change")
+
+    # ------------------------------------------------------------------ passive archives
+
+    def _archive_pvpc_snapshot(self, state: EntityState) -> None:
+        """Queue one snapshot of a price state change; never raises into planning.
+
+        ``ACCEPTED`` only: a ``REFRESHED`` observation is the same state re-confirmed
+        (the 60 s REST poll), not a change.  The first state this process sees is the
+        startup record (``trigger: initial``).
+        """
+        trigger = "change" if self._pvpc_snapshot_seen else "initial"
+        self._pvpc_snapshot_seen = True
+        try:
+            observed_at = self.clock.now()
+            record = pvpc_snapshot_record(
+                state,
+                observed_at=observed_at,
+                tz=self._tz,
+                trigger=trigger,
+                code_version=self.code_version,
+            )
+            self._spawn(self._write_pvpc_snapshot(observed_at, record))
+        except Exception:  # noqa: BLE001 - collection must never reach planning
+            self.metrics.pvpc_snapshots.labels(result="failed").inc()
+            log.exception("PVPC snapshot could not be built")
+
+    async def _write_pvpc_snapshot(self, at: datetime, record: dict[str, Any]) -> None:
+        ok = await self._archive_write("pvpc_snapshots", self.sink.append_pvpc_snapshot, at, record)
+        self.metrics.pvpc_snapshots.labels(result="written" if ok else "failed").inc()
+
+    async def _archive_write(
+        self, archive: str, fn: Callable[..., Any], at: datetime, record: dict[str, Any]
+    ) -> bool:
+        """Append one archive record on the store thread; ``False`` (logged) on any failure."""
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(self._io, fn, at, record)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - OSError, bad JSON value, executor shut down
+            log.error("archive %s write failed: %s: %s", archive, type(exc).__name__, exc)
+            return False
+        now = self.clock.now()
+        self.archive_last_success[archive] = now
+        self.metrics.archive_last_success.labels(archive=archive).set(now.timestamp())
+        return True
+
+    async def archive_weather_forecast(self) -> bool:
+        """Fetch and append one forecast; ``False`` (counted, logged) on any failure."""
+        cfg = self.config.archive.weather_forecast
+        requested_at = self.clock.now()
+        try:
+            if self.ha is None:
+                raise HACommandError("weather_forecast", "Home Assistant is not configured")
+            forecast = await self.ha.get_weather_forecast(cfg.entity_id, cfg.type)
+            if not forecast:
+                raise HACommandError("weather_forecast", f"empty forecast for {cfg.entity_id}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - reported, backed off, never fatal
+            self.weather_error = f"{type(exc).__name__}: {exc}"[:500]
+            self.metrics.weather_forecast_fetches.labels(result="failed").inc()
+            log.warning("weather forecast fetch failed: %s", self.weather_error)
+            return False
+        record = weather_forecast_record(
+            requested_at=requested_at,
+            received_at=self.clock.now(),
+            entity_id=cfg.entity_id,
+            forecast_type=cfg.type,
+            forecast=forecast,
+            code_version=self.code_version,
+        )
+        ok = await self._archive_write(
+            "weather_forecast", self.sink.append_weather_forecast, requested_at, record
+        )
+        self.metrics.weather_forecast_fetches.labels(result="ok" if ok else "failed").inc()
+        self.weather_error = None if ok else "store write failed"
+        return ok
+
+    async def _weather_archive_loop(self) -> None:
+        """Fetch on the UTC grid (``offset_minutes`` past every ``interval_minutes``);
+        after a failure retry with capped backoff, never past the next grid instant."""
+        cfg = self.config.archive.weather_forecast
+        due = next_fetch_time(self.clock.now(), cfg.interval_minutes, cfg.offset_minutes)
+        retry_at: datetime | None = None
+        failures = 0
+        while True:
+            target = due if retry_at is None else min(due, retry_at)
+            await self.clock.sleep(max(0.0, (target - self.clock.now()).total_seconds()))
+            if target == due:  # the grid instant is being served (or overdue)
+                due = next_fetch_time(
+                    max(due, self.clock.now() - timedelta(seconds=1)),
+                    cfg.interval_minutes,
+                    cfg.offset_minutes,
+                )
+            try:
+                ok = await self.archive_weather_forecast()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - the loop must survive one bad fetch
+                log.exception("weather archive iteration failed")
+                self.metrics.weather_forecast_fetches.labels(result="failed").inc()
+                ok = False
+            now = self.clock.now()
+            if ok:
+                failures, retry_at = 0, None
+            else:
+                failures += 1
+                retry_at = now + timedelta(seconds=retry_delay_s(failures))
 
     def _request_replan(self, reason: str) -> None:
         if self._loop is None or (self._replan_task and not self._replan_task.done()):
@@ -1051,8 +1188,24 @@ class ShadowService:
             },
             "virtual_battery": {"soc_frac": self.virtual_soc, "origin": self.virtual_soc_origin},
             "store": {"root": str(self.sink.root), "write_errors": self.sink.write_errors},
+            "archives": {
+                "pvpc_snapshots": {
+                    "enabled": self.config.archive.pvpc_snapshots.enabled,
+                    "last_success_at": self._archive_success_at("pvpc_snapshots"),
+                },
+                "weather_forecast": {
+                    "enabled": self.config.archive.weather_forecast.enabled,
+                    "entity_id": self.config.archive.weather_forecast.entity_id,
+                    "last_success_at": self._archive_success_at("weather_forecast"),
+                    "last_error": self.weather_error,
+                },
+            },
             "config_hash": self.config.config_hash(),
         }
+
+    def _archive_success_at(self, archive: str) -> str | None:
+        at = self.archive_last_success.get(archive)
+        return at.isoformat() if at else None
 
     def plan_view(self) -> dict[str, Any]:
         now = self.clock.now()
