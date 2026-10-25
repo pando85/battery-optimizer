@@ -82,6 +82,7 @@ __all__ = [
     "infer_mode",
     "replay_climate_rule",
     "replay_dhw_rule",
+    "replay_mask_for_day",
 ]
 
 # ---------------------------------------------------------------------------
@@ -503,6 +504,39 @@ def _climate_schedule_for_day(
     if schedule is None:
         return None, "prices_incomplete", version.label
     return schedule, "", version.label
+
+
+def replay_mask_for_day(
+    view: SideView,
+    days: Sequence[tuple[Any, int, int]],
+    day_prices: np.ndarray,
+    j: int,
+    cut: int,
+) -> tuple[np.ndarray | None, str]:
+    """The ``bool[24]`` hours ``climate_control`` selects for local day *j* on *day_prices*.
+
+    *day_prices* is a working price array (one value per interval, ``NaN`` unknown, at least
+    up to the end of day *j*): the published prices plus whatever estimate the caller wants
+    to test.  The enable flag and ``min_hours_per_day`` are read as of *cut*, like the
+    forecaster does.  Returns ``(None, reason)`` when the rule has no schedule for the day
+    (disabled, flags unknown, prices incomplete, ...).  Evaluation diagnostics only.
+    """
+    _label, lo, _hi = days[j]
+    enable_flag = _asof_flag(view.series["climate_enable"], lo, cut)
+    hours_flag = _asof_flag(view.series["climate_min_hours"], lo, cut)
+    if not np.isfinite(enable_flag):
+        return None, "enable_unknown"
+    if enable_flag != 1.0:
+        return None, "rule_disabled"
+    if not np.isfinite(hours_flag):
+        return None, "min_hours_unknown"
+    prices = _PriceHours(view, days, np.asarray(day_prices, dtype=float))
+    schedule, reason, _version = _climate_schedule_for_day(
+        j=j, view=view, days=days, prices=prices, min_hours=hours_flag
+    )
+    if schedule is None:
+        return None, reason
+    return schedule.selected, ""
 
 
 def _fit(request: FitRequest, **_params: Any) -> dict[str, Any]:
