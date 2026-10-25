@@ -182,4 +182,6 @@ jobs:
           body: ${{ steps.changelog_reader.outputs.changes }}
           prerelease: ${{ steps.changelog_reader.outputs.status == 'prereleased' }}
           draft: ${{ steps.changelog_reader.outputs.status == 'unreleased' }}
-          files: dist/*
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
