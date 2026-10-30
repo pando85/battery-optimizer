@@ -102,7 +102,7 @@ These have no CLI surface (or `hack/` only), deliberately:
   never writes and is not a `build` input.
 - `replay_runtime.py` — replay-only asyncio dispatch runtime with a recording sink. No writer,
   no actuation, no HA adapter, no wall clock. See [Replay runtime](#replay-runtime-replay_runtimepy).
-- `climate/` — offline data layer of the climate optimizer (C2). See
+- `climate/` — offline data layer and heat-pump electricity model of the climate optimizer (C2). See
   [Climate subpackage](#climate-subpackage-climate).
 
 ## Dispatch intent contract (`dispatch.py`)
@@ -171,6 +171,36 @@ canonical dataset, and never writes into either.
 uv run python hack/climate_audit.py --feature-set <climate feature set id> \
     --dataset <data_dir>/analysis/v1/<dataset_id>
 ```
+
+**C2 PR 2: heat-pump electricity (`cop.py`).** Fits electricity, not COP, on hourly heat-mode hours
+without hot water: `E_el = Q (a + b (T_flow - T_out) + c max(0, knee - T_out)) + d starts + e hours_on`
+by WLS weighted by `Q`, with the measured flow temperature and `t_out_debiased` (hours without it are
+dropped). `starts` is the compressor-starts counter delta; `hours_on` counts the 15-minute slots with a
+compressor frequency above zero, so it is a quarter-hour upper bound of the true on-time. Hours below
+`cop.min_q_kwh` or with an implied COP outside `cop.cop_range` are excluded, and the exclusion counts
+are reported. The baseline is a COP table in `cop.table_bin_k` bins of `T_out` (a bin needs 10 training
+hours, a sparser one reads the nearest bin). Fold 1 fits S1 and tests S2, fold 2 fits S1+S2 and tests
+S3 (fit months for fitting, gate months for scoring), given the measured `Q`; a validation day needs 6
+eligible hours. Daily electricity MAPE and season error are checked against `cop.daily_mape` and
+`cop.season_error`. The model with the lower held-out daily MAPE is selected and the record says which
+(`selected`: `regression` or `table`); passing the limits is reported separately. The report adds the
+`d` and `e` terms with plausible physical ranges (a flag, not a gate), the implied COP curve, the
+residuals by `T_out` bin and the DHW COP (information only).
+
+For the simulator, `predict_electricity(model, q, t_flow, t_out, starts, hours_on)` evaluates the
+selected model (the table reads only `q` and `t_out`) and `CopModel` is the versioned, hashable
+parameter record (`model_id` is the SHA-256 of its canonical JSON, with the feature-set id and config
+hash). The flow target is a per-season constant, not a heating curve, which is harmless because the
+model reads the measured flow.
+
+```bash
+uv run python hack/climate_cop.py --feature-set <climate feature set id> \
+    --dataset <data_dir>/analysis/v1/<dataset_id>
+```
+
+`hack/climate_cop.py` writes `cop.json` and `cop.md` into
+`<data_dir>/analysis/v1/climate-cop/<feature set>-<config>[-name]/`; they hold private figures and
+stay in the data dir.
 
 ## Shadow service (`service/`)
 
