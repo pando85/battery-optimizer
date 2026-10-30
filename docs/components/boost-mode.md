@@ -5,7 +5,9 @@
 In very cheap hours, heat the slab and the hot-water tank beyond the comfort need (a thermal soak), as the
 only price-reactive behaviour left on the heat-pump side. Rare in winter, frequent in April to October on
 weekends around midday. Decided in [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md); **owner: the homelab repository**
-(AppDaemon), with the battery side read-only. Not built.
+(AppDaemon), with the battery side read-only. Not built. Phase 2 of the
+[comfort controller design](../planning/comfort-controller-design.md#8-boost-phase-2-after-normal-mode-works):
+built only after normal mode works, and after the house battery is working.
 
 ## Interfaces
 
@@ -65,7 +67,9 @@ at exactly 0 (2024-04) and 18 h below 0 (2026-09). Reproduce: `uv run python hac
 
 - The import-limit basis turns out to be an instantaneous trip rather than a 15-minute average.
 - The Omnibattery SOC entity, its grid-target semantics or its native price features change.
-- The legacy cheapest-hours rule or the `dhw_control` forcing still runs (a second price reactor).
+- The legacy cheapest-hours rule still runs, or a reactor beyond the three by design (battery optimiser,
+  DHW scheduler, boost) appears. The DHW scheduler stays price-optimised (amended 2026-10-31), so it often
+  shares the cheapest hours with boost and the battery charge.
 - The heater facts above change (a firmware or model difference from the assumed-equivalent manual, a
   power-limit input fitted, "Force Heater" or the tank heater setting changed), or the hot-water target or
   the soak duration changes; the boost price basis
@@ -82,10 +86,10 @@ after; then rerun [battery-load-forecast](battery-load-forecast.md) with boost d
 
 ## Status
 
-**planned** (2026-10-30): no rule, threshold, interlock or code. Blocked on the import-limit basis and the
-retirement of the legacy rule.
+**planned** (2026-10-31): no rule, threshold, interlock or code. Blocked on normal mode working, the
+import-limit basis and the retirement of the legacy rule.
 
-**Open adjustment to ADR-0006 decision 3** (not yet made; the ADR text is unchanged): the "55 to 60 degC"
-DHW step conflicts with the heater facts above and should become "at or below about 50 degC, heat pump only"
-unless the owner accepts the heater with a hard interlock (no heater while the battery charges or any other
-large load runs). The booster power is no longer unverified: 3.00 kW, from the service manual.
+**ADR-0006 decision 3 amended 2026-10-31** ([amendment](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md#amendment-2026-10-31)):
+the DHW step is at most about 50 degC, heat pump only, so the 3.00 kW heater never starts. The 5.0 kW
+import limit is hard (the meter cuts supply), so the battery grid-target cap below the limit is mandatory
+before go-live.

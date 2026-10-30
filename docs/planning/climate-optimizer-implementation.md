@@ -2,7 +2,7 @@
 
 - **Status:** C2 completed **UNDETERMINED / no-go** (2026-10-30); [diagnostic-first recovery (R0–R5)](climate-c2-recovery.md) proposed. The original C2 gate remains frozen. No new climate actuation is authorized.
 - **Date:** 2026-10-30
-- **Architecture decision:** [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md) (decoupled comfort control and battery arbitrage; supersedes decisions 1 and 2 of [ADR-0005](../adr/0005-shared-energy-planning-climate.md)). **Read [the decoupled objective](#decoupled-objective-and-obsolete-items-adr-0006) first: the price-driven objective, shared planner and cost-MPC rows below are obsolete or parked.**
+- **Architecture decision:** [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md) (decoupled comfort control and battery arbitrage; supersedes decisions 1 and 2 of [ADR-0005](../adr/0005-shared-energy-planning-climate.md); amended 2026-10-31, see [comfort-controller-design](comfort-controller-design.md)). **Read [the decoupled objective](#decoupled-objective-and-obsolete-items-adr-0006) first: the price-driven objective, shared planner and cost-MPC rows below are obsolete or parked.**
 - **Repository ownership:** `pando85/battery-optimizer` for models, planning, history and evaluations; [`pando85/homelab`](https://github.com/pando85/homelab) for AppDaemon controls, HA entities, GitOps, manifests and deployment
 - **Related:** [ADR-0001](../adr/0001-home-battery-economic-dispatch.md), [ADR-0004](../adr/0004-battery-optimizer-production-architecture.md), [battery runtime](../service.md), [component architecture](../architecture.md), [load forecaster](components/load-forecaster.md)
 
@@ -480,7 +480,9 @@ s.t. hall/kitchen >= 23.5 °C from 12:00 on weekdays and from 09:00 at weekends 
      compressor, DHW, hygiene and manufacturer constraints unchanged
 ~~~
 
-Price enters only through **boost** (at most 0.04 €/kWh for 3 h or more, tunable): battery first, then a heat soak (room ceiling about 25.5 °C, water about 30 to 32 °C), then DHW to 55 to 60 °C. Boost sits after normal mode and battery arbitrage. All parameters are Home Assistant helpers.
+Price enters through **boost** (at most 0.04 €/kWh for 3 h or more, tunable): battery first, then a heat soak (room ceiling about 25.5 °C, water about 30 to 32 °C), then DHW. Boost sits after normal mode and battery arbitrage. All parameters are Home Assistant helpers.
+
+**Amended 2026-10-31** ([ADR-0006 amendment](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md#amendment-2026-10-31), [design](comfort-controller-design.md)): DHW stays price-optimised (cheapest 2 h window ranked by price / COP) and DHW, boost included, stays at most 50 °C, so the 3 kW heater never starts; there are three price reactors (battery optimiser, DHW scheduler, boost).
 
 **Obsolete or parked by ADR-0006:**
 
@@ -491,7 +493,7 @@ Price enters only through **boost** (at most 0.04 €/kWh for 3 h or more, tunab
 | C6 demand forecast exchange | Reduced to the optional `sensor.hp_planned_energy` entity (specified in the ADR, built only if the HP forecast share is material) |
 | C7 joint MPC | Dropped |
 | Cheapest-hours preheat arm of the C7-F trial | Dropped (boost is rare in winter) |
-| Legacy cheapest-hours rule and DHW price forcing | Retired when the comfort schedule goes live |
+| Legacy cheapest-hours rule | Retired when the comfort schedule goes live (DHW price scheduling stays, amended 2026-10-31) |
 | C2-R G-R3 "report cost and electricity" | Electricity at comfort becomes the primary metric, cost secondary |
 
 **Ordered work list** (smallest change that works; "needs tests" marks behavioural code changes):
@@ -500,9 +502,16 @@ Price enters only through **boost** (at most 0.04 €/kWh for 3 h or more, tunab
 
 1. ADR-0006 and the plan updates (this change).
 2. Record the HP switch date(s) and the trial block calendar in `docs/planning/`, not `config/tariff.yaml`. Exclude the first 28 days after the switch and alternating-arm weeks from gate-C and forecast evaluations.
-3. Homelab, before boost goes live: retire the legacy cheapest-hours rule and DHW forcing (one DHW writer); check whether 55 to 60 °C engages the tank booster heater and its power; AppDaemon must not start the booster while another large load runs.
+3. Homelab: retire the legacy cheapest-hours space-heating rule when the comfort controller goes live. **DHW keeps price scheduling** (one DHW writer, cheapest 2 h window by price / COP). The heater question is answered: the booster is the 3 kW heater, so the tank target is capped at 50 °C and AppDaemon never starts the heater.
 4. Verify the import-limit basis (instantaneous overload trip against 15-minute average) with the contract or distributor.
-5. Homelab: comfort schedule, optimum start and the helpers, with the C7-F F2 trial (arms proposed, to be preregistered in F2a).
+5. Homelab: comfort controller (comfort schedule, optimum start, software water-temperature curve, DHW rule, helpers) as specified in [comfort-controller-design](comfort-controller-design.md). **Merged and tested only once the house battery is working.** Evaluated as the before/after comparison of C7-F F2, with the criteria preregistered before go-live.
+
+*Track B: shadow thermal-model MPC (this repository, read-only; [design section 13](comfort-controller-design.md#13-track-b-shadow-thermal-model-mpc))*
+
+- **B0:** diagnostics, [C2 recovery](climate-c2-recovery.md) R0 to R2 and the warm-up rates (in progress; feeds the optimum-start table).
+- **B1:** offline MPC replay (minimum kWh subject to the comfort schedule, price-blind).
+- **B2:** shadow runner in the service (plan and prediction metrics only; no writes, no new credentials).
+- **B3:** preregistered comparison with the controller after winter.
 
 *Before battery go-live (gates C and D)*
 

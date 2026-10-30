@@ -1,4 +1,4 @@
-# Heat-pump controller (legacy cheapest hours now, comfort schedule next)
+# Heat-pump controller (legacy cheapest hours now, comfort controller next)
 
 ## Purpose and owner
 
@@ -7,6 +7,10 @@ Decides when the Panasonic Aquarea heats rooms and makes hot water. **Owner: the
 only observes it and replays it. Water-temperature control, its modes and the commands the unit accepts
 are documented in the homelab repository at `docs/user-guide/heat-pump-water-temperature.md`. This
 repository never writes to it (shadow phase, [AGENTS.md](../../AGENTS.md)).
+The successor is specified in [comfort-controller-design](../planning/comfort-controller-design.md)
+(agreed 2026-10-31, not built; merged only once the house battery works): AppDaemon decides heating on/off
+from room temperatures, writes the water temperature from a software curve in direct mode and keeps DHW
+price-optimised with the tank target at most 50 degC (never the 3 kW heater).
 
 ## Interfaces
 
@@ -102,12 +106,12 @@ Not fitted: the rules and `min_hours` were chosen by the owner. What exists is t
 
 - Any change of rule version, `min_hours`, enable flag, water target, curve or setpoint (log it first).
   A changed hour selection also needs a matching `structured_forecast.py` replay update.
-- The comfort schedule goes live, the legacy rule or the `dhw_control` forcing is retired, or boost
-  starts: the load shape changes for every consumer listed above.
+- The comfort controller goes live, the legacy rule is retired, the DHW rule changes (cheapest 2 h by
+  price / COP, at most 50 degC) or boost starts: the load shape changes for every consumer listed above.
 - The heater facts change (tank target above about 51 degC, sterilization or "Force Heater" enabled, a
   power-limit input fitted, a model difference from the manual).
-- Two price-reactive writers run at once (legacy rule plus boost plus a battery with native price
-  features).
+- A fourth price reactor appears: there are three by design (battery optimiser, DHW scheduler, boost);
+  the legacy rule or a battery with native price features would be extra.
 
 ## Recalibrate by
 
@@ -119,5 +123,6 @@ the scheduled time, and kWh per heating degree-day and Kh below 22 degC are no w
 
 ## Status
 
-**valid (legacy rule), being replaced** (2026-10-30). Space heating is off for the season; the comfort
-schedule is planned ([regime log](regime-log.md#planned-not-yet-real-dates-to-be-filled-in)).
+**valid (legacy rule), being replaced** (2026-10-30; successor designed 2026-10-31, **planned**, merge
+gated on the battery working). Space heating is off for the season; the comfort controller is planned
+([regime log](regime-log.md#planned-not-yet-real-dates-to-be-filled-in)).

@@ -2,7 +2,7 @@
 
 - **Status:** Proposed extension; design and data collection only. No authority to change heat-pump settings. Reconciled 2026-10-30 with the C2 outcome (UNDETERMINED, no-go) and the C1a/C2 data findings; the identification, modeling and simulated-gate stages were replaced by a joint field trial agreed in principle with the owner (arms and preregistration still to be agreed)
 - **Date:** 2026-10-30
-- **Decision context:** [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md) (2026-10-30) changed the F2 arms: A legacy cheapest-hours, B comfort schedule + efficiency-first (proposed, to be preregistered in F2a); the preheat/boost arm is dropped.
+- **Decision context:** [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md) (2026-10-30) changed the F2 arms: A legacy cheapest-hours, B comfort schedule + efficiency-first (proposed, to be preregistered in F2a); the preheat/boost arm is dropped. **Amended 2026-10-31:** with no runtime strategy switch the arms cannot alternate, so F2 becomes a before/after comparison plus the shadow MPC, preregistered before go-live (see [section 4](#4-joint-field-trial) and [comfort-controller-design](comfort-controller-design.md)).
 - **Parent plan:** [Climate optimizer implementation](climate-optimizer-implementation.md) (C0–C7), [C2 recovery plan](climate-c2-recovery.md) (R0–R5), [ADR-0005](../adr/0005-shared-energy-planning-climate.md)
 - **Repositories:** `pando85/home-energy-optimizer` (datasets, preregistration, trial analysis); `pando85/homelab` (HA/AppDaemon helper semantics, guarded physical command writer)
 - **Scope:** Space heating and supply/flow temperature only. No DHW temperature, cooling, battery dispatch or joint MPC changes.
@@ -60,6 +60,8 @@ Carry provenance, quality flags, instrument calibration/resolution and decision-
 
 ## 4. Joint field trial
 
+> **Amended 2026-10-31.** The block design below assumed a runtime arm switch. The agreed controller has none (rollback is `git revert` in homelab), so **F2 is now a before/after comparison**: past winters plus this winter until go-live (legacy, arm A) against the new comfort controller (arm B, with the AppDaemon software water-temperature curve instead of the native curve), normalised for outdoor temperature (heating degree-days or band matching). The **shadow thermal-model MPC** (track B, read-only) is the second reference. Metrics: Kh below each minimum per room, share of time below, heat-pump kWh per HDD (heat-pump meter or HeishaMon, not the whole-house meter once the battery runs), starts per day, DHW cost share. **Preregister the criteria before go-live.** This is weaker evidence than a randomised trial, and the randomised blocks, washout and order text below apply only if an arm switch is ever added.
+
 A model-free comparison on the real house. It varies the two levers that interact, permitted heating hours and water temperature, because varying one at a time would miss the interaction (flow temperature changed valve behaviour and COP in the history).
 
 **Arms.** Two, proposed after [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md) and **to be preregistered in F2a** (not yet agreed in detail):
@@ -102,7 +104,7 @@ A future permission-mode actuation (C5, if its prerequisites are ever met) would
 |---|---|---|
 | **F0** | Homelab field audit, measurement source and control semantics | Device mode, zone and actual vs requested targets documented, including the open questions above; no unsafe commands |
 | **F1** | Historical coverage and trial-metric baselines | Correct UTC/units, meter reconciliation flags, independent days and exposure gaps |
-| **F2a** | Trial design and preregistration | Owner-agreed arms, block order, metrics, thresholds, abort conditions; committed before the first block |
+| **F2a** | Before/after design and preregistration | Owner-agreed arms, normalisation, metrics, thresholds, abort conditions; committed before go-live (amended 2026-10-31; was: before the first block) |
 | **F2b** | Homelab settings change (manual procedure or calendar) | Agreed separately; reversible; reported-state check; manual override and rollback |
 | **F2c** | Trial analysis and verdict | Per-arm GO / NO-GO / UNDETERMINED against baseline; retained raw evidence |
 
