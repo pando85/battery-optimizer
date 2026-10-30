@@ -107,6 +107,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from battery_optimizer._env import get_env
+from battery_optimizer.battery_telemetry import (
+    BATTERY_ENERGY_METRIC,
+    BATTERY_ENERGY_UNIT,
+    load_battery_telemetry,
+)
 from battery_optimizer.config import resolve_config_path
 from battery_optimizer.manifest import new_manifest, write_manifest
 from battery_optimizer.paths import (
@@ -463,10 +468,32 @@ def resolve_base_url(base_url: str | None = None) -> str:
     return url
 
 
-def resolve_entity_specs(entities: Iterable[str] | None) -> tuple[EntitySpec, ...]:
+def battery_counter_specs(battery_entities: Iterable[str] | None = None) -> dict[str, EntitySpec]:
+    """The configured battery AC energy counters as extraction specs, keyed by entity id.
+
+    The entity ids are configuration (``entities.battery_charge_energy`` and
+    ``entities.battery_discharge_energy`` of ``config/service.yaml``), not code: they are
+    unknown until installation, so they cannot sit in :data:`ENTITY_SPECS`.  They are
+    deliberately **not** feature entities (not in :data:`FEATURE_ENTITY_IDS`): the canonical
+    build reads them, so a manifest that names them enters the canonical lineage.  Their
+    metric and unit are those of the live service history (``hass_sensor_energy_kwh``, kWh).
+    *battery_entities* overrides the configuration (tests).
+    """
+    if battery_entities is None:
+        battery_entities = load_battery_telemetry().entities
+    return {
+        entity: EntitySpec(entity, BATTERY_ENERGY_METRIC, BATTERY_ENERGY_UNIT)
+        for entity in battery_entities
+    }
+
+
+def resolve_entity_specs(
+    entities: Iterable[str] | None, *, battery_entities: Iterable[str] | None = None
+) -> tuple[EntitySpec, ...]:
     """Resolve requested entity IDs (or the defaults) into :class:`EntitySpec`.
 
-    Accepts bare entity IDs, which must exist in :data:`ENTITY_SPECS`, or an
+    Accepts bare entity IDs, which must exist in :data:`ENTITY_SPECS` or be one of the
+    configured battery counters (:func:`battery_counter_specs`), or an
     explicit ``entity:metric:unit`` triple for entities not yet registered —
     never a guessed metric.  Order is preserved and duplicates collapse.
 
@@ -490,6 +517,8 @@ def resolve_entity_specs(entities: Iterable[str] | None) -> tuple[EntitySpec, ..
             spec = EntitySpec(entity_id, metric, unit)
         elif raw in ENTITY_SPECS:
             spec = ENTITY_SPECS[raw]
+        elif raw in (battery := battery_counter_specs(battery_entities)):
+            spec = battery[raw]
         else:
             raise ValueError(
                 f"no metric/unit mapping for entity {raw!r}: either add it to "

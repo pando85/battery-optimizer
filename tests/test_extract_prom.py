@@ -74,6 +74,14 @@ _QUERY_RE = re.compile(
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_battery_service_config(tmp_path_factory: pytest.TempPathFactory, monkeypatch) -> None:
+    """Keep these tests independent of the repository's ``config/service.yaml``."""
+    empty = tmp_path_factory.mktemp("service-config") / "service.yaml"
+    empty.write_text("{}\n")
+    monkeypatch.setenv("BATTERY_OPTIMIZER_SERVICE_CONFIG", str(empty))
+
+
 class FakePrometheus:
     """Serves raw samples from memory with true Prometheus range-vector semantics."""
 
@@ -1542,6 +1550,76 @@ class TestEntityRegistry:
     def test_dots_in_entity_ids_need_no_escaping(self) -> None:
         query = build_range_query(ENTITY_SPECS["sensor.esios_pvpc"], 86401)
         assert query == 'hass_sensor_unit_u0x20ac_per_kwh{entity="sensor.esios_pvpc"}[86401s]'
+
+
+class TestBatteryCounterRegistry:
+    """The battery AC counters are configuration; the real ids are unknown until installation."""
+
+    CHARGE = "sensor.test_battery_charge_energy"  # a test id, not an OmniBattery fact
+    DISCHARGE = "sensor.test_battery_discharge_energy"
+
+    def test_configured_counters_resolve_as_bare_ids_with_the_service_metric(self) -> None:
+        specs = resolve_entity_specs(
+            [self.CHARGE, self.DISCHARGE], battery_entities=[self.CHARGE, self.DISCHARGE]
+        )
+        assert specs == (
+            EntitySpec(self.CHARGE, "hass_sensor_energy_kwh", "kWh"),
+            EntitySpec(self.DISCHARGE, "hass_sensor_energy_kwh", "kWh"),
+        )
+
+    def test_an_unconfigured_id_is_still_refused(self) -> None:
+        with pytest.raises(ValueError, match="no metric/unit mapping"):
+            resolve_entity_specs([self.CHARGE], battery_entities=[])
+
+    def test_counters_are_read_from_the_service_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        service = tmp_path / "service.yaml"
+        service.write_text(
+            f"entities:\n  battery_charge_energy: {self.CHARGE}\n"
+            f"  battery_discharge_energy: {self.DISCHARGE}\n"
+        )
+        monkeypatch.setenv("BATTERY_OPTIMIZER_SERVICE_CONFIG", str(service))
+        assert [s.entity_id for s in resolve_entity_specs([self.DISCHARGE])] == [self.DISCHARGE]
+
+    def test_they_are_canonical_not_feature_entities(self) -> None:
+        # a manifest naming only feature entities is skipped by the canonical build, which
+        # must read these counters; they are therefore never registered as feature entities
+        assert self.CHARGE not in FEATURE_ENTITY_IDS
+        assert self.CHARGE not in ENTITY_SPECS
+
+    def test_they_cannot_share_an_extraction_with_the_climate_group(self) -> None:
+        specs = resolve_entity_specs(
+            [self.CHARGE, "climate.thermostat_bedroom"], battery_entities=[self.CHARGE]
+        )
+        with pytest.raises(ValueError, match="climate entities must not include any other"):
+            extract_prom.refuse_mixed_lineage(specs)
+
+    def test_extracting_a_configured_counter_queries_the_real_entity(
+        self, tmp_path: Path, config: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        service = tmp_path / "service.yaml"
+        service.write_text(
+            f"entities:\n  battery_charge_energy: {self.CHARGE}\n"
+            f"  battery_discharge_energy: {self.DISCHARGE}\n"
+        )
+        monkeypatch.setenv("BATTERY_OPTIMIZER_SERVICE_CONFIG", str(service))
+        labels = labels_for(
+            self.CHARGE,
+            metric="hass_sensor_energy_kwh",
+            instance="10.42.0.9:8123",
+            job="home-assistant",
+        )
+        fake = FakePrometheus([(labels, [(_BASE + 1, 1.0), (_BASE + 61, 1.1)])])
+        path = run_extract(tmp_path, fake.client, config, entities=[self.CHARGE])
+        assert manifest_of(path).entities == [self.CHARGE]
+        assert all(
+            request.url.params["query"].startswith(
+                f'hass_sensor_energy_kwh{{entity="{self.CHARGE}"}}['
+            )
+            for request in fake.requests
+        )
+        assert set(read_rows(tmp_path / "data").column("entity").to_pylist()) == {self.CHARGE}
 
 
 class TestBaseUrl:

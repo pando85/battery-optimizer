@@ -181,6 +181,21 @@ telemetry cannot prove a battery does not exist. The assumption is pinned in the
 When `--no-assume-no-battery` is set, the build requires registered battery telemetry to
 reconstruct gross load; without it the build refuses.
 
+**Battery commissioning:** `battery.commissioned_at` and the two AC energy counters
+(`entities.battery_charge_energy`, `entities.battery_discharge_energy`) live in
+`config/service.yaml` (override with `BATTERY_OPTIMIZER_SERVICE_CONFIG`; deliberately not in
+`tariff.yaml`, whose hash is part of every dataset id). A window that ends at or before that instant
+(or with none recorded) is built exactly as before. A window that reaches it reads the counters, and
+every interval ending after that instant (one that merely touches it counts) gets
+`gross_kwh = raw_grid_kwh + charge - discharge` with `battery_absent=false`; `--assume-no-battery`
+never covers those intervals. An interval whose counter is unknown has `gross_kwh` null and
+`energy_quality` `battery_counters_missing` (or `battery_gross_negative` when the meters disagree). If
+the counters are not configured, or have fewer than two samples in the archive, the build exits 1
+instead of publishing. With no `commissioned_at` recorded, the build also exits 1 when a raw manifest
+declares an entity named like a battery (`battery`, `charging_energy`, `discharging_energy`).
+Extract the counters with `extract --source prometheus --entities <charge>,<discharge>`, in a run of
+their own.
+
 **Immutable store:** the canonical data directory is write-once, content-addressed. Re-running
 `build` for a window that already exists is idempotent when the bytes match. When they do not —
 `refusing to overwrite .../build_manifest.json with different content (existing=…, new=…)` —
