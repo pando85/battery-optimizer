@@ -420,6 +420,14 @@ Agreed with the owner, all written into `config/climate.yaml` and committed befo
   unchanged; the COP limits now sit in the acceptance table. No further iteration follows: a
   failure is UNDETERMINED.
 
+**Outcome (2026-10-30, one run at the predeclaration commit): UNDETERMINED**, so C2 counts as no-go
+and the iteration budget is spent. Neither model passed every criterion. Both failed the 6 h
+Q-driven RMSE, the u-driven daily-energy MAPE and season bias, the `min_hours` 10 regime bias and the
+COP season error. A also failed the 12 h RMSE, the 24 h bias, the 15 h regime bias and the whole
+legacy replay. B passed the legacy replay (electricity, cost and Kh) but failed the parameter
+criteria: its S2 slab capacity sits on its lower bound and most weekly refits hit a bound. The
+figures stay in the private model directory.
+
 #### Code layout and PR order
 
 - **Package:** new `src/battery_optimizer/climate/` with `data.py`, `cop.py`, `thermal.py`, `plant.py`, `policies.py` and `gate.py`; data audit in `hack/climate_audit.py`.
