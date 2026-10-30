@@ -298,7 +298,8 @@ Channel 1 is then **net** grid exchange: charging would be stored as household l
 discharge would hide inside it.  A window that reaches the commissioning instant therefore
 reads the battery AC charge and discharge energy counters (``entities.battery_charge_energy``
 and ``entities.battery_discharge_energy``, the names the live service already uses) and every
-interval at or after that instant gets ``gross = raw_grid + charge - discharge``
+interval ending after that instant (so one that merely touches it, when the instant is not on
+the 15-minute grid, counts too) gets ``gross = raw_grid + charge - discharge``
 (:func:`reconstruct_gross_load`, the arithmetic of ``service/history.py``) with
 ``battery_absent=False``.  The no-battery assumption never covers such an interval: when a
 counter is unknown the interval is null with ``energy_quality="battery_counters_missing"``
@@ -329,6 +330,7 @@ import io
 import json
 import logging
 import math
+import re
 import statistics
 from bisect import bisect_left
 from collections import Counter, defaultdict
@@ -613,6 +615,9 @@ class ConflictingSampleError(BuildError):
 
 class GridSeriesMissingError(BuildError):
     """No usable whole-home counter samples exist for the requested window."""
+
+
+_BATTERY_LOOKING_ENTITY = re.compile(r"battery|charging_energy|discharging_energy", re.IGNORECASE)
 
 
 class BatteryCountersMissingError(BuildError):
@@ -2722,10 +2727,10 @@ def build_interval_table(
     ``battery_absent`` (the output column) records that no battery is dispatching in
     the interval, so gross load equals the raw feed reading.  Without *battery* that is
     every interval (absence detected as a fact or explicitly assumed, see
-    :func:`build_dataset`).  With *battery*, every interval at or after
-    ``battery.commissioned_at`` is ``battery_absent=False`` and its gross load is
-    :func:`reconstruct_gross_load`, or null with an explicit ``energy_quality`` reason;
-    earlier intervals are unchanged.
+    :func:`build_dataset`).  With *battery*, every interval ending after
+    ``battery.commissioned_at`` (one that merely touches it included) is
+    ``battery_absent=False`` and its gross load is :func:`reconstruct_gross_load`, or null
+    with an explicit ``energy_quality`` reason; earlier intervals are unchanged.
 
     Raises:
         BuildError: ``timezone`` is unknown.
@@ -2770,7 +2775,9 @@ def build_interval_table(
         local_day = local.date()
         if local_day not in dst_cache:
             dst_cache[local_day] = dst_transition_for(local_day, timezone)
-        battery_runs = battery is not None and i0 >= battery.commissioned_at
+        # An interval that merely touches the battery period (a commissioning instant that is
+        # not on the grid) already contains battery energy, so it needs the counters too.
+        battery_runs = battery is not None and i1 > battery.commissioned_at
         if battery is not None and battery_runs:
             gross, energy_quality, allocation_quality = reconstruct_gross_load(
                 energy, battery.charge[k], battery.discharge[k]
@@ -3024,9 +3031,10 @@ def _battery_reconstruction_manifest(
 ) -> dict[str, object]:
     """What the post-commissioning intervals of this build rest on, and which are unusable."""
     starts = table.column("interval_start").to_pylist()
+    ends = table.column("interval_end").to_pylist()
     gross = table.column("gross_kwh").to_pylist()
     quality = table.column("energy_quality").to_pylist()
-    after = [i for i, start in enumerate(starts) if start >= battery.commissioned_at]
+    after = [i for i, end in enumerate(ends) if end > battery.commissioned_at]
     reconstructed = [i for i in after if gross[i] is not None]
     unusable = [i for i in after if gross[i] is None]
     reasons = Counter(quality[i] for i in unusable)
@@ -3035,7 +3043,7 @@ def _battery_reconstruction_manifest(
         "commissioned_at": iso_z(battery.commissioned_at),
         "charge_entity": telemetry.charge_entity,
         "discharge_entity": telemetry.discharge_entity,
-        "intervals_at_or_after_commissioning": len(after),
+        "intervals_touching_battery_period": len(after),
         "reconstructed_intervals": len(reconstructed),
         "unusable_intervals": len(unusable),
         "unusable_by_energy_quality": dict(sorted(reasons.items())),
@@ -3108,7 +3116,7 @@ def build_dataset(
             A window that ends at or before ``commissioned_at`` (or with none recorded)
             ignores it: the dataset, its id and its manifest are what they were before
             the battery code existed.  A window that reaches ``commissioned_at`` reads
-            the counters, and every interval from that instant on gets
+            the counters, and every interval ending after that instant gets
             ``gross = raw_grid + charge - discharge`` or is null with an explicit
             ``energy_quality`` reason; if the counters are not configured or not in the
             archive at all, the build is refused.
@@ -3197,6 +3205,21 @@ def build_dataset(
         battery_detection = BATTERY_PRESENT
     else:
         battery_detected = detect_battery_active(seen_entities)
+        if battery_cfg.commissioned_at is None:
+            # Last line of defence for a forgotten install-day config: no date and no
+            # counter ids, but a raw manifest already declares something that looks like
+            # a battery entity anywhere in the archive.
+            suspects = sorted(
+                e for e in inputs.declared_entities if _BATTERY_LOOKING_ENTITY.search(e)
+            )
+            if suspects:
+                raise BuildError(
+                    f"a raw manifest declares battery-looking entities ({', '.join(suspects)}) "
+                    "but battery.commissioned_at is not recorded in config/service.yaml: "
+                    "channel 1 may already be net grid. Set battery.commissioned_at and the "
+                    "two entities.battery_*_energy ids (or rename/remove the entity if it is "
+                    "not the house battery)."
+                )
         if battery_detected is True or (
             battery_cfg.commissioned_at is None and set(battery_cfg.entities) & set(seen_entities)
         ):

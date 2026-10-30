@@ -1936,7 +1936,7 @@ class TestGrossLoadSeam:
             ),
         ]
         write_raw_part(data_dir, rows)
-        with pytest.raises(BuildError, match="commissioning instant"):
+        with pytest.raises(BuildError, match="battery.commissioned_at"):
             build(data_dir, cfg, _T0, _T0 + timedelta(hours=1), lookback=timedelta(minutes=5))
 
 
@@ -1944,8 +1944,11 @@ class TestGrossLoadSeam:
 # 8b. Gross load once the battery runs (ADR-0006 risk 2)
 # ===========================================================================
 
-CHARGE = "sensor.test_battery_charge_energy"  # a test id, not an OmniBattery fact
-DISCHARGE = "sensor.test_battery_discharge_energy"
+# Test ids, not OmniBattery facts.  Deliberately not battery-looking, so the "forgotten
+# install-day config" guard (which refuses such names with no date) stays out of the way of the
+# tests that exercise the configured path; that guard has its own test.
+CHARGE = "sensor.test_ac_in_energy"
+DISCHARGE = "sensor.test_ac_out_energy"
 
 #: Per 5-minute sample: grid net import, battery AC charge, battery AC discharge (kWh).
 GRID_STEP, CHARGE_STEP, DISCHARGE_STEP = 0.10, 0.04, 0.01
@@ -1973,13 +1976,15 @@ def battery_archive(
     end: datetime,
     *,
     charge_until: datetime | None = None,
+    charge_skip: int = 0,
     counters: bool = True,
     discharge_step: float = DISCHARGE_STEP,
     discharge_rollback_at: int | None = None,
 ) -> None:
     """Grid, price and (optionally) battery counters, one aligned sample every 5 minutes.
 
-    ``charge_until`` stops the charge counter early to model a partial counter;
+    ``charge_until`` stops the charge counter early and ``charge_skip`` starts it late, to
+    model a partial counter;
     ``discharge_rollback_at`` makes the discharge counter slip back 0.03 kWh at that sample.
     """
     count = int((end - start).total_seconds() // 300) + 1
@@ -1999,7 +2004,7 @@ def battery_archive(
         charge_n = count
         if charge_until is not None:
             charge_n = int((charge_until - start).total_seconds() // 300) + 1
-        rows += counter(CHARGE, CHARGE_STEP, charge_n)
+        rows += counter(CHARGE, CHARGE_STEP, charge_n)[charge_skip:]
         rows += counter(DISCHARGE, discharge_step, count, discharge_rollback_at)
     write_raw_part(data_dir, rows)
 
@@ -2056,7 +2061,7 @@ class TestBatteryGrossLoad:
             else:
                 assert row["gross_kwh"] > row["raw_grid_kwh"]
                 assert row["battery_absent"] is False
-        assert manifest["battery_reconstruction"]["intervals_at_or_after_commissioning"] == 4
+        assert manifest["battery_reconstruction"]["intervals_touching_battery_period"] == 4
 
     @pytest.mark.parametrize(
         ("day", "intervals", "transition", "offset"),
@@ -2121,6 +2126,48 @@ class TestBatteryGrossLoad:
             assert min(starts) == commissioned
             counts.append(len(starts))
         assert counts[0] - counts[1] == 4  # one hour = four intervals
+
+    def test_an_interval_straddling_a_non_aligned_commissioning_needs_the_counters(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        """10:07 is inside the 10:00-10:15 interval: it is not a no-battery interval."""
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=2)
+        commissioned = _T0 + timedelta(minutes=7)
+        battery_archive(data_dir, _T0, end)
+        table, manifest = build_rows(
+            data_dir,
+            cfg,
+            _T0,
+            end,
+            lookback=timedelta(minutes=5),
+            battery=battery_telemetry(commissioned),
+        )
+        out = rows_as_dicts(table)
+        assert out[0]["interval_start"] == _T0 < commissioned < out[0]["interval_end"]
+        assert out[0]["battery_absent"] is False
+        assert out[0]["gross_kwh"] == pytest.approx(3 * (GRID_STEP + CHARGE_STEP - DISCHARGE_STEP))
+        assert manifest["battery_reconstruction"]["intervals_touching_battery_period"] == 8
+
+    def test_a_straddling_interval_without_counters_is_unusable_not_assumed_absent(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=1)
+        # the charge counter only starts at 20 minutes: interval 0 has no charge reading
+        battery_archive(data_dir, _T0, end, charge_skip=4)
+        table, _ = build_rows(
+            data_dir,
+            cfg,
+            _T0,
+            end,
+            lookback=timedelta(minutes=5),
+            battery=battery_telemetry(_T0 + timedelta(minutes=7)),
+        )
+        first = rows_as_dicts(table)[0]
+        assert first["gross_kwh"] is None
+        assert first["energy_quality"] == build_mod.ENERGY_BATTERY_COUNTERS_MISSING
+        assert first["battery_absent"] is False
 
     def test_partial_counter_makes_the_intervals_unusable_with_a_reason(
         self, tmp_path: Path, data_dir: Path
@@ -2294,6 +2341,38 @@ class TestBatteryGrossLoad:
                 lookback=timedelta(minutes=5),
                 battery=battery_telemetry(None),
             )
+
+    def test_a_battery_looking_entity_in_the_archive_with_no_date_is_refused(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        """Forgotten install-day config: no date, no ids, but the archive names a battery."""
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=1)
+        battery_archive(data_dir, _T0, end, counters=False)
+        entity = "sensor.omnibattery_total_charging_energy"
+        rows = [
+            raw_row(entity, "energy_kwh", "kWh", _T0, 1.0),
+            raw_row(entity, "energy_kwh", "kWh", _T0 + timedelta(minutes=5), 1.1),
+        ]
+        write_raw_part(data_dir, rows, "samples-other.parquet")
+        with pytest.raises(BuildError, match="battery-looking entities"):
+            build(
+                data_dir,
+                cfg,
+                _T0,
+                end,
+                lookback=timedelta(minutes=5),
+                battery=BatteryTelemetry(),
+            )
+        # with the date recorded, a window before it is built as before
+        build(
+            data_dir,
+            cfg,
+            _T0,
+            end,
+            lookback=timedelta(minutes=5),
+            battery=BatteryTelemetry(commissioned_at=end + timedelta(days=1)),
+        )
 
     def test_the_default_configuration_is_read_from_the_service_config(
         self, tmp_path: Path, data_dir: Path, monkeypatch: pytest.MonkeyPatch

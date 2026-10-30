@@ -34,21 +34,21 @@ and the data volume are deployed from the homelab repository.
   not configured or absent from the archive refuse the build. Any counter decrease nulls its interval
   (stricter than the `counter_rates` rollback rule).
 - HA recorder history cannot be re-extracted; string states are not exported ([known issues](../known-issues.md)).
-- Heat-pump electricity: the branch meter (channel 2) reads about 1.28 times the HeishaMon counters and
-  also feeds appliances ([climate plan](../planning/climate-optimizer-implementation.md)).
+- Heat-pump electricity: the branch meter (channel 2) reads about 1.28 times the HeishaMon counters and also feeds appliances ([climate plan](../planning/climate-optimizer-implementation.md)).
 
 ## Invalidated when
 
 - **A battery runs while `battery.commissioned_at` and the counter ids are unset** (channel 1 is net grid
-  stored as gross), or the counters are not AC-side kWh or not metric `hass_sensor_energy_kwh`.
+  stored as gross; `build` refuses a battery-looking entity in the archive then), or the counters are
+  not AC-side kWh or not metric `hass_sensor_energy_kwh`.
 - The meter, its CT orientation or the channel mapping changes; an HA entity is renamed.
-- `config/tariff.yaml` changes in any field: every `dataset_id` is re-minted and the old one superseded.
+- `config/tariff.yaml` changes in any field: every `dataset_id` is re-minted, the old one superseded.
 - A new heat-pump signal enters the feature set (new id), or the exporter changes what it retains.
 
 ## Recalibrate by
 
-1. Install day: set both `entities.battery_*_energy` ids and `battery.commissioned_at` (ISO with offset)
-   in `config/service.yaml`; date the regime-log row.
+1. Install day, in one commit: set both `entities.battery_*_energy` ids and `battery.commissioned_at`
+   (ISO with offset) in `config/service.yaml`; date the regime-log row.
 2. `extract --entities <charge>,<discharge>` (alone), `validate`, `build` ([CLI](../cli.md#build)), then
    `build-features --signal-set climate`.
 3. Acceptance: `build_manifest.json` has `battery_reconstruction` with few unusable intervals, and gross
@@ -57,4 +57,4 @@ and the data volume are deployed from the homelab repository.
 ## Status
 
 **valid** until battery go-live. Reconstruction and refusal are in the code (climate plan item 6); the
-install-day config is unset and untested on real counters.
+install-day config is unset, untested on real counters.
