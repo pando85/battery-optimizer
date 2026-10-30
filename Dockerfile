@@ -33,9 +33,9 @@ ARG GIT_SHA=""
 
 LABEL org.opencontainers.image.title="battery-optimizer" \
       org.opencontainers.image.description="Battery optimisation toolkit: Prometheus/Home Assistant extraction, dataset build and battery MPC benchmarks" \
-      org.opencontainers.image.source="https://github.com/pando85/battery-optimizer" \
-      org.opencontainers.image.url="https://github.com/pando85/battery-optimizer" \
-      org.opencontainers.image.documentation="https://github.com/pando85/battery-optimizer#readme" \
+      org.opencontainers.image.source="https://github.com/pando85/home-energy-optimizer" \
+      org.opencontainers.image.url="https://github.com/pando85/home-energy-optimizer" \
+      org.opencontainers.image.documentation="https://github.com/pando85/home-energy-optimizer#readme" \
       org.opencontainers.image.licenses="GPL-3.0-only" \
       org.opencontainers.image.revision="${GIT_SHA}"
 

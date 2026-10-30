@@ -1,7 +1,7 @@
 # battery-optimizer
 
-[![CI](https://github.com/pando85/battery-optimizer/actions/workflows/ci.yml/badge.svg)](https://github.com/pando85/battery-optimizer/actions/workflows/ci.yml)
-[![Images](https://github.com/pando85/battery-optimizer/actions/workflows/images.yml/badge.svg)](https://github.com/pando85/battery-optimizer/actions/workflows/images.yml)
+[![CI](https://github.com/pando85/home-energy-optimizer/actions/workflows/ci.yml/badge.svg)](https://github.com/pando85/home-energy-optimizer/actions/workflows/ci.yml)
+[![Images](https://github.com/pando85/home-energy-optimizer/actions/workflows/images.yml/badge.svg)](https://github.com/pando85/home-energy-optimizer/actions/workflows/images.yml)
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE.md)
 
 PVPC-aware home battery dispatch optimizer for Home Assistant. It ships an offline extraction, dataset
@@ -89,7 +89,7 @@ uv sync --extra dev
 uv run battery-optimizer --help
 
 # Or install the CLI from a release
-uv tool install https://github.com/pando85/battery-optimizer/releases/download/vX.Y.Z/battery_optimizer-X.Y.Z-py3-none-any.whl
+uv tool install https://github.com/pando85/home-energy-optimizer/releases/download/vX.Y.Z/battery_optimizer-X.Y.Z-py3-none-any.whl
 ```
 
 Or run the multi-arch container image (`ghcr.io/pando85/battery-optimizer`; tags, the `serve` example and

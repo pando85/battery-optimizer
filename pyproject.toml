@@ -25,9 +25,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/pando85/battery-optimizer"
-Issues = "https://github.com/pando85/battery-optimizer/issues"
-Changelog = "https://github.com/pando85/battery-optimizer/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/pando85/home-energy-optimizer"
+Issues = "https://github.com/pando85/home-energy-optimizer/issues"
+Changelog = "https://github.com/pando85/home-energy-optimizer/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
