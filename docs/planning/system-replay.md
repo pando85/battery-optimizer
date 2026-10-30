@@ -135,16 +135,20 @@ Key findings:
 Read-only: the runner writes only below the data directory. Use the pulled cluster store (`just pull-store`,
 see [configuration](../configuration.md)); never point it at the frozen `~/data/energy-baseline` store.
 
-Identities recorded in the report (they must match on a faithful reproduction):
+**Always use a fresh run id.** The runner does not refuse an existing id: it writes into the same
+directory and mixes the new outputs with the old ones. The reference run below is the clean
+reproduction `v1-20261030-repro`, made from a scratch worktree of `f5be13d`.
+
+Identities recorded in the report of the reference run (they must match on a faithful reproduction):
 
 | field | value |
 |---|---|
-| repository commit | `f5be13d` (the recorded run printed `109432e...-dirty`: the same runner before it was committed) |
+| repository commit | `f5be13da8fb7c3eeef958002de205e06f8a59374` (`f5be13d`, clean tree) |
 | climate config | `config/climate.yaml`, `config_version: 2`, hash `228884683bc52be1c85ad2edb167900f6e58d7548678adb1277a21042ff15d18` |
 | climate feature set | `da6d678016ed5b27f997640e5cfa804856daf987a2550ab04517f93c6bd4554b` |
 | dataset | `cdd448abb006d401854b193f7a240c367c92908ecfa75a76d76a413828e80e9d` |
 | tariff | `config/tariff.yaml` (battery block, 5.12 kWh, 2.5 kW, RTE 0.80) |
-| run id | `v1-20261030` |
+| run id | `v1-20261030-repro` |
 
 ```bash
 git checkout f5be13d
@@ -153,18 +157,34 @@ uvx uv@0.13.5 run python hack/system_sim.py \
     --feature-set da6d678016ed5b27f997640e5cfa804856daf987a2550ab04517f93c6bd4554b \
     --dataset <store>/analysis/v1/cdd448abb006d401854b193f7a240c367c92908ecfa75a76d76a413828e80e9d \
     --config config/climate.yaml --tariff config/tariff.yaml \
-    --run-id v1-20261030
+    --run-id <new-run-id>        # never reuse an existing id (it is not refused and mixes outputs)
 ```
 
 Other flags: `--seasons S2,S3` (default), `--oracle-time-limit-s 600` (default), `--no-battery` (skip the
 benchmark runs and keep the heat-pump and sanity-check sections), `--data-dir` (overrides the variable).
 The pinned uv version is the one in `.github/actions/setup-uv/action.yml`.
 
-Runtime: the six benchmark outputs of the recorded run were written about 1 to 2 minutes apart (6.5 minutes
-from the first to the last; the start time was not recorded), so budget roughly ten minutes. The oracle
-solves dominate.
+Runtime: 451 s wall (7.5 minutes, including the environment build) for the reference run, so budget
+about ten minutes. The oracle solves dominate.
 
-Outputs, all in `<store>/analysis/v1/system-sim/v1-20261030/`:
+**Reproduction check.** The first run of this analysis (id `v1-20261030`) printed code version
+`109432e...-dirty`, i.e. the runner as an uncommitted working tree on top of `109432e`. The reference
+run repeats it at the committed `f5be13d` and reproduces it exactly:
+
+- every numeric field of `report.json` (heat-pump, sanity-check and transfer statistics, meter factors,
+  costs, savings, oracle figures and solver statuses) is identical, so the tables on this page are
+  unchanged;
+- the per-scenario `results.parquet` of all six benchmark runs are identical, and the `schedules.parquet`
+  differ only in the `run_id` column;
+- the only differences are bookkeeping: the recorded code version (and with it the benchmark run
+  directory names), and `no_battery` `floor_hit_share`, which the original run reported as a share and
+  the committed runner reports as null (not applicable: that rung sits at the SOC floor by
+  construction). No table here uses it.
+
+The committed runner is therefore the one behind these results as far as costs and heat-pump figures
+go, which is evidence from identical outputs rather than from a shared commit.
+
+Outputs, all in `<store>/analysis/v1/system-sim/<run-id>/`:
 
 - `report.json` (every input, per-band statistics, per-scenario heat-pump and battery figures, savings),
 - `report.md` (the tables above with absolute figures),
@@ -174,7 +194,7 @@ Outputs, all in `<store>/analysis/v1/system-sim/v1-20261030/`:
 
 ### Where the private figures live
 
-`<store>/analysis/v1/system-sim/<run-id>/report.md` holds the euro and energy totals. They stay in the
+`<store>/analysis/v1/system-sim/<run-id>/report.md` (for example `v1-20261030-repro`) holds the euro and energy totals. They stay in the
 data directory and never enter the repository.
 
 ## 7. Decision it feeds
