@@ -47,6 +47,26 @@ The diagram's AppDaemon-to-pump connection is **existing**. The planned `Climate
 
 **Single-writer rule:** the planning process writes neither device. AppDaemon owns HVAC and forced-DHW writes until an independently reviewed migration; HA/Omnibattery owns battery-device regulation once commissioned. A plan is advice, not acknowledgement of execution.
 
+## Packaging and workload decision
+
+**One source repository, one versioned Python distribution, one OCI image, multiple entrypoints.** In the near-term deployment, the same image continues to power:
+
+| Workload | Image | Command / responsibility | Permissions |
+|---|---|---|---|
+| Existing **optimizer Deployment** (one replica) | `battery-optimizer` today; future `home-energy-optimizer` | `serve`: read-only battery and climate planning in one process, separately scheduled/limited solver work | Read-only HA/Prometheus access; no physical write capability |
+| Existing **pipeline CronJob** | **Exactly the same OCI image and pinned digest** | `extract` / `validate` / `build`; future offline training/evaluation subcommands | Read-only telemetry plus scoped dataset/PVC writes; no HA actuation |
+| Existing **AppDaemon Deployment** | Its **own existing image**, unchanged by the planning migration | Climate/DHW actuation, with legacy schedules and optional validated ClimatePlan consumption | HA service permissions needed for HeishaMon commands |
+
+This is **one optimizer image**, **not one image per optimizer domain**. A shared image does **not** imply one container, process, service account or failure boundary for every responsibility. The optimizer Deployment and pipeline CronJob already have different lifecycles and permissions; they only share an artifact.
+
+**Optional post-migration actuator:** If AppDaemon is eventually retired, the preferred candidate is a dedicated `climate-actuator` Deployment using the **same optimizer OCI image** with a separate `climate-actuator` entrypoint, separate narrowly scoped credentials, independently configurable availability/restarts and exclusive HA/HeishaMon write ownership. It replaces AppDaemon's climate execution role, rather than granting write access to `serve`. Such a deployment is **not approved or needed for the initial climate planner**; its creation, credential scope, failsafe behavior and exclusive ownership must be decided and verified separately. No direct Modbus writer should be added. Packaging together does not weaken runtime least privilege.
+
+### Proposed repository and artifact naming
+
+`pando85/home-energy-optimizer` is the preferred future repository name because the software will cover battery dispatch *planning* and HVAC/DHW optimization. **A GitHub repository rename is not an automatic OCI/Python/CLI migration.** The existing `battery_optimizer` import name, `battery-optimizer` command and `ghcr.io/pando85/battery-optimizer` image remain supported through the first climate milestones; renaming the repository or identifiers requires separate reviewed compatibility and GitOps changes. Preserve archived dataset provenance, package imports, binary command usage, existing API paths and pinned digest deployment references.
+
+The full staged migration and proposed commands are specified in the [implementation plan](../planning/climate-optimizer-implementation.md#packaging-release-and-rename-migration).
+
 ## Rejected alternatives
 
 | Alternative | Reason |

@@ -183,6 +183,41 @@ Do **not** equate `disabled`, transport loss or optimizer failure with `off`. Do
 - Run climate solver work off the shared event loop; bound runtime and queueing. Do not let climate solves starve battery slot closing, price archiving, API liveness, or existing battery MPC work. Benchmark CPU/memory on the current Deployment before raising limits. If demand warrants it, separate worker pools inside the process, not new pods by default.
 - Keep GitOps ownership of image digest, explicit enable flags, secrets, monitoring and rollbacks in `pando85/homelab`. No auto-promotion from shadow to active on image or ConfigMap update.
 
+### Packaging, release and rename migration
+
+**Near-term: retain the current release name and deploy the same image for its two existing workloads.** Do not introduce `climate-optimizer` or an additional image build. The package contains domain-specific `battery` and `climate` planning modules, with separate CLI commands but a common dependency set and OCI release.
+
+| Kubernetes resource | Container image | Process | Operational separation |
+|---|---|---|---|
+| Existing `battery-optimizer` Deployment | Existing pinned `ghcr.io/pando85/battery-optimizer` OCI image | `battery-optimizer serve`, eventually scheduling both battery and climate planners in-process | Read-only HA token; independent planner snapshots, readiness, solve budgets and metrics |
+| Existing `battery-optimizer-pipeline` CronJob | **Same image and pinned digest** | Existing `extract`, `validate`, `build`; future offline `climate-evaluate`/training mode if justified | Short-lived batch process; dataset/PVC and historical API access only |
+| Existing AppDaemon Deployment | Its **existing separate AppDaemon image** | Existing `climate_control` / `dhw_control` code; later a thin `ClimatePlan` reader/executor | Sole current HA/HeishaMon climate writer, with manual override and rollback |
+
+Planned CLI shape after the optional project-wide rename (illustrative, **not implemented**):
+
+~~~console
+home-energy-optimizer serve
+home-energy-optimizer extract
+home-energy-optimizer validate
+home-energy-optimizer build
+home-energy-optimizer benchmark
+home-energy-optimizer climate-evaluate   # proposed
+home-energy-optimizer climate-actuator   # future, separately authorized
+~~~
+
+**Optional replacement for AppDaemon:** package `climate-actuator` in the same OCI artifact but run it as a **separate Kubernetes Deployment/process**, with its own service account, restricted HA write credential, supervised reconciliation and exclusive command ownership. The read-only `serve` process must still reject all actuation calls. Do not run the actuator as a side effect of starting `serve`, embed its writable HA client in the planner, or deploy it until the C5/retirement-specific gates have been reviewed. When enabled, the intent is to replace AppDaemon's actuation Deployment, **not** to add a permanently competing writer. The separate battery/Omnibattery controller remains independently owned.
+
+**Staged naming/operational migration** (a separate follow-up PR or PR series; do not combine with climate runtime development):
+
+1. **Repository URL:** Rename GitHub `pando85/battery-optimizer` to `pando85/home-energy-optimizer` once the architectural documentation is approved; audit consumers, GitHub Actions, release tooling, issue/PR links and configured source URLs. Do not rely solely on GitHub's old-URL redirects.
+2. **Python and CLI compatibility:** Decide an import/entrypoint compatibility period before switching `battery_optimizer` to `home_energy_optimizer`. Preserve running scripts, packaging metadata and existing command usage until migrated in tested increments.
+3. **OCI identity and supply chain:** Publish and scan the new GHCR image name separately, ensure actual manifest availability and signed/provenance requirements, then update homelab's image **by digest**. GHCR names are not guaranteed to redirect after a repository rename. Do not remove old image tags before pin consumers move.
+4. **GitOps rollout:** Update the optimizer Deployment and pipeline CronJob to the **same verified new digest**, keeping their commands, PVC/mounts, ServiceMonitor/PrometheusRule, secrets, service names and ArgoCD identities stable unless a later explicit migration demands a change.
+5. **Persistent dataset/API compatibility:** Preserve content-addressed manifests, `dataset_id`, `code_version`, archived source hashes, existing `/plan` and `/status` contracts and historical report reproducibility. Record any migration alias or metadata format version rather than rewriting historical artifacts.
+6. **Rollback:** Keep a tested reference to the prior image digest, command and GitOps configuration. Repository rename or branding must **not** toggle battery or climate actuation.
+
+The target is **one image build and release pipeline**; existing battery planner Deployment and pipeline CronJob remain separate processes/workloads, and AppDaemon remains a separately built image until a distinct actuator-replacement decision. Creating the actuator entrypoint does not authorize running it, and this plan intentionally avoids introducing a third planner Deployment.
+
 ## 5. Climate ↔ battery integration
 
 The existing `structured_forecast.py` (LF-1) **already** replays the AppDaemon policy and estimates HVAC electricity offline. Do not duplicate or delete it when adding climate MPC. Make load forecast provenance explicit:
