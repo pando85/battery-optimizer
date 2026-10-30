@@ -129,7 +129,9 @@ docstring.
 throughput costs and terminal values, re-optimizing at every parameter pair rather than rescoring a
 fixed schedule. Break-even uses the **closed-form algebraic intersection** of the two schedules'
 cost lines (accounting for unequal initial SOC), not a binary search. **Not a physical aging model,
-no calibration.** Terminal optimization vs scoring separated. Runner: `hack/economic_sensitivity.py`.
+no calibration.** Terminal optimization vs scoring separated. Runner: `hack/economic_sensitivity.py` (oracle only); `hack/throughput_sweep.py` sweeps the throughput
+cost on the realistic `rolling_horizon` policy and the oracle over several windows and reports relative
+saving, EFC and the knee (the wear-cost decision is in [battery-model](components/battery-model.md#wear-cost-decision-2026-10-31)).
 See module docstring.
 
 ## Replay runtime (`replay_runtime.py`)

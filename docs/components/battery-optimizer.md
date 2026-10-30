@@ -59,13 +59,17 @@ by this optimizer, under a separate ADR; the shadow phase has no writer.
   and `:289`), and the PVPC reader drops only non-finite values (`service/pvpc.py:108-115`). Remaining limit:
   at a negative price the optimiser wants to import as much as it can, bounded only by the import-limit
   headroom on forecast load (the cap in the assumption above), and export is not modelled.
-- Throughput cost 0.0, so marginal cycles that merely clear the 0.80 round trip are taken
-  (about 1.2 equivalent full cycles per winter day in the replay).
+- **Throughput cost 0.01 EUR/kWh** per AC kWh and direction (`config/service.yaml`, set 2026-10-31), the knee
+  of the rolling-horizon sweep: it keeps 98% (S2), 98% (S3) and 99% (summer) of the zero-cost saving and cuts
+  cycling from about 1.2 to about 0.9 to 1.0 equivalent full cycles per day, well inside the warranty cycle
+  budget ([sweep table and warranty](battery-model.md#wear-cost-decision-2026-10-31)). At 0.0 every marginal
+  cycle that clears the 0.80 round trip was taken. The sweep used the benchmark's two-publication rolling
+  horizon, not the live 15-minute re-solve; the live planner's behaviour at 0.01 is unmeasured.
 - Omnibattery's own price features will be off, so this is the only battery price reactor.
 
 ## Invalidated when
 
-- Any [battery-model](battery-model.md) parameter changes, or the wear cost is set.
+- Any [battery-model](battery-model.md) parameter changes, or the wear cost is changed.
 - [tariff-prices](tariff-prices.md) changes (taxes confirmed, holidays added, new publication timing).
 - The load forecast changes regime (comfort schedule, boost): re-check floor-hit share and clipping.
 - At go-live: measured SOC replaces simulated SOC; the charge adapter caps the grid target below the
@@ -85,5 +89,5 @@ explained before go-live; the floor-hit share on expensive cold-day slots stays 
 
 ## Status
 
-**valid, shadow only** (2026-10-30). Not go-live ready: wear cost, idle draw, measured SOC, the import-cap
-adapter and the actuator ADR are open.
+**valid, shadow only** (2026-10-31). Not go-live ready: idle draw, measured SOC, the import-cap adapter and the
+actuator ADR are open; the wear cost is set (0.01) and is re-checked on measured data after commissioning.

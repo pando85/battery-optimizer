@@ -519,7 +519,7 @@ Price enters through **boost** (at most 0.04 €/kWh for 3 h or more, tunable): 
 7. Disable OmniBattery's native economic features.
 8. Charge adapter with a grid target capped below the import limit minus a margin, with a charge-rate bound; test the target and cap interaction at commissioning.
 9. Boost interlock in AppDaemon (battery state of charge, then soak, then DHW), reading the battery state read-only.
-10. Throughput cost: run the existing sensitivity sweep, pick the knee, set `planning.throughput_cost_eur_per_kwh` in `config/service.yaml`, record the decision with the warranty terms.
+10. Throughput cost: **done 2026-10-31** (0.01 EUR/kWh, the knee of the rolling-horizon sweep; decision, table and warranty terms in [battery-model](../components/battery-model.md#wear-cost-decision-2026-10-31); re-check on measured data after commissioning).
 11. Actuator ADR (separate writer process, scoped token, shadow-rule amendment in `AGENTS.md`), then the failure tests of gate D.
 12. Gate C on two weeks of real battery telemetry in the new regime.
 

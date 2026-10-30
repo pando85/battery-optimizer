@@ -183,6 +183,9 @@ def test_committed_service_config_loads(monkeypatch):
     monkeypatch.setenv("BATTERY_OPTIMIZER_PROMETHEUS_URL", "http://prom.example:9090")
     config = load_service_config(REPO / "config" / "service.yaml")
     assert config.mode == "shadow"
+    # The wear cost is the knee of the rolling-horizon sweep (docs/components/battery-model.md);
+    # 0.0 would take every marginal cycle.  Change it only with a new sweep.
+    assert config.planning.throughput_cost_eur_per_kwh == 0.01
     assert config.home_assistant.url == "https://ha.example"
     assert config.home_assistant.token.reveal() == "secret-token"
     assert config.entities.get("grid_power") == "sensor.shellyem_main_channel_1_power"

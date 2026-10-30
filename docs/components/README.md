@@ -91,7 +91,7 @@ flowchart LR
 | [boost-mode](boost-mode.md) | heat-pump-controller, battery-load-forecast |
 | [system-replay-benchmark](system-replay-benchmark.md) | the decisions in the ADRs |
 
-## Status (2026-10-30)
+## Status (2026-10-31)
 
 | Component | Status | Since | One-line reason |
 |---|---|---|---|
@@ -102,8 +102,8 @@ flowchart LR
 | [thermal-model](thermal-model.md) | parked | 2026-10-30 | C2 UNDETERMINED, no model accepted |
 | [hp-consumption-forecast](hp-consumption-forecast.md) | planned (LF-1 stale on rule retirement) | 2026-10-30 | Interface specified, not built; LF-1 replays the legacy rule |
 | [battery-load-forecast](battery-load-forecast.md) | valid for the legacy regime, stale at go-live of the comfort schedule | 2026-10-30 | 28-day mean learns from legacy heat-pump hours |
-| [battery-model](battery-model.md) | provisional | 2026-10-30 | RTE 0.80, SOC window, zero idle draw and zero wear cost are assumptions |
-| [battery-optimizer](battery-optimizer.md) | valid (shadow only) | 2026-10-30 | Objective unchanged by the decoupling; not go-live ready |
+| [battery-model](battery-model.md) | provisional | 2026-10-31 | RTE 0.80, SOC window and zero idle draw are assumptions; wear cost set to 0.01 from the sweep, to re-check on measured data |
+| [battery-optimizer](battery-optimizer.md) | valid (shadow only) | 2026-10-31 | Objective unchanged by the decoupling; not go-live ready |
 | [tariff-prices](tariff-prices.md) | provisional | 2026-10-30 | Taxes unconfirmed, holidays missing |
 | [boost-mode](boost-mode.md) | planned | 2026-10-30 | Rule, thresholds and interlock not built; phase 2 after the comfort controller works |
 | [system-replay-benchmark](system-replay-benchmark.md) | valid as recorded (legacy and transferred regimes) | 2026-10-30 | Replay B load shape was never the real comfort schedule |
