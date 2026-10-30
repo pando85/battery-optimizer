@@ -65,6 +65,7 @@ change leads to a recalibration instead of a silent drift.
 | [Climate optimizer plan](planning/climate-optimizer-implementation.md) | Shared-runtime components, temperature/DHW modeling, shadow evaluation, AppDaemon migration and control gates |
 | [C2 recovery and alternative identification](planning/climate-c2-recovery.md) | UNDETERMINED outcome, diagnostic-first model simplification, plant/energy identification and new prospective promotion gates |
 | [Climate flow calibration and optimization (C7-F)](planning/climate-flow-calibration-optimization.md) | Optional model-free joint field trial of permitted heating hours and water temperature; guarded flow actuation parked |
+| [Comfort controller design](planning/comfort-controller-design.md) | Homelab AppDaemon comfort controller replacing the cheapest-hours rule: run logic, schedule, software water-temperature curve, DHW rule, rollback, before/after evaluation and the shadow MPC (track B) |
 | [Whole-system replay](planning/system-replay.md) | Offline heat-pump regime x battery replay (`hack/system_sim.py`): results as relative figures and how to reproduce them |
 
 ## Provenance

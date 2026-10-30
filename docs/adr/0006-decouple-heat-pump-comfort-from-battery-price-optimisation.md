@@ -1,12 +1,12 @@
 # ADR-0006: Decouple heat-pump comfort control from battery price optimisation
 
-- **Status:** Accepted (2026-10-30; architecture and interface only; no authorisation to change physical controls)
+- **Status:** Accepted (2026-10-30; architecture and interface only; no authorisation to change physical controls); amended 2026-10-31 (decisions 3 and 4, see [Amendment 2026-10-31](#amendment-2026-10-31))
 - **Date:** 2026-10-30
 - **Decision owners:** Homelab maintainers (the owner agreed these decisions on 2026-10-30)
 - **Supersedes:** decisions 1 and 2 of [ADR-0005](0005-shared-energy-planning-climate.md) (the shared planning runtime with a price-driven climate MPC). Decisions 3 to 7 of ADR-0005 stay in force.
 - **Extends:** [ADR-0001](0001-home-battery-economic-dispatch.md) (section 7, the integration boundary) and [ADR-0004](0004-battery-optimizer-production-architecture.md) (Omnibattery as sole Modbus writer; gates B, C and D)
 - **Evidence:** [Whole-system replay](../planning/system-replay.md)
-- **Execution plans:** [Climate optimizer implementation plan](../planning/climate-optimizer-implementation.md) (new objective and ordered work list), [C7-F field trial](../planning/climate-flow-calibration-optimization.md)
+- **Execution plans:** [Climate optimizer implementation plan](../planning/climate-optimizer-implementation.md) (new objective and ordered work list), [C7-F field trial](../planning/climate-flow-calibration-optimization.md), [Comfort controller design](../planning/comfort-controller-design.md) (2026-10-31)
 - **Affected repositories:** `pando85/home-energy-optimizer` (battery optimiser, evaluation) and `pando85/homelab` (AppDaemon/HA configuration, heat-pump control, battery integration)
 
 ## Context
@@ -113,3 +113,37 @@ The battery kernel, oracle, rolling horizon and dispatch contract; the live plan
 ### Not decided here
 
 The actuator ADR; the staged package rename (not coupled to go-live or authority changes); the HP-plan entity implementation; any throughput cost value; the boost threshold beyond its starting value. The staged rename loses part of its motivation (a co-hosted climate planner in `serve`) but stays valid.
+
+## Amendment 2026-10-31
+
+The owner and the maintainers agreed the comfort-controller design in
+[comfort-controller-design](../planning/comfort-controller-design.md). The text above is kept as decided on
+2026-10-30. Where it differs from this section, this section governs.
+
+- **Decision 3 (boost), DHW step:** the DHW boost target is **at most 50 degC**, not 55 to 60 degC. The
+  heat pump alone reaches it, so the 3 kW electric heater never starts (service manual: above about 51 to
+  55 degC needs the heater). The other boost decisions stand.
+- **Decision 4 (price reactors), DHW:** DHW **stays price-optimised**; DHW price forcing is not retired.
+  Shifting the tank is lossless, whereas the battery loses 10 to 20% round trip and has limited capacity.
+  Rule: the cheapest 2 h window of the day, ranked by price divided by expected COP, avoiding the
+  optimum-start warm-up, tank target at most 50 degC. There are now **three price reactors**: the battery
+  optimiser, the DHW scheduler and boost. The legacy cheapest-hours space-heating rule is still retired.
+  Two writers in the same cheap hours (new risk 5) and the import-limit risk (new risk 3) therefore grow:
+  the battery grid-target cap below the 5.0 kW limit is mandatory before go-live, and AppDaemon never
+  triggers the 3 kW heater.
+- **Heat-pump water temperature:** AppDaemon sets it, in direct mode, through a **software heating curve**
+  with editable points (not the unit's native curve), integers clamped to 20 to 35 degC, written only in
+  direct mode and rate-limited. This replaces "the native heating curve" of decision 1 and of the C7-F
+  arm B wording.
+- **Rollback:** by **`git revert` in homelab**, with the legacy app archived there. There is no runtime
+  strategy switch. If AppDaemon is down the existing watchdog leaves the pump heating at the last water
+  temperature and the thermostats keep protecting comfort.
+- **Evaluation:** without a runtime switch the [C7-F](../planning/climate-flow-calibration-optimization.md)
+  trial cannot alternate arms. It becomes a **before/after comparison** normalised for outdoor temperature,
+  preregistered before go-live, which is weaker evidence than a randomised trial and is reported as such.
+- **Shadow climate MPC permitted:** a thermal model and an MPC (minimum kWh subject to the same comfort
+  schedule, price-blind) may be built in this repository and run **in shadow** for comparison. This partly
+  un-parks C1b, **as shadow only**: no writes, no new credentials and no Home Assistant service calls. The
+  shadow rule of `AGENTS.md` is unchanged. Shadow validates predictions and plan differences, not the
+  realised comfort of the MPC.
+- **Rollout gate:** the controller is merged and tested only once the house battery is working.
