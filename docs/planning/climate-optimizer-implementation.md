@@ -19,7 +19,7 @@ This is an **incremental extension** of the existing resident battery-optimizer 
 | AppDaemon runtime | Single-replica `home-assistant` chart Deployment; `acockburn/appdaemon:4.5.13`, `apps.yaml`; deployed with HA via ConfigMaps | Existing control authority and user toggles must remain intact |
 | Space heating/cooling | `climate_control.py` chooses PVPC below 2/3 of a historical mean, otherwise the cheapest minimum number of hours | No room-temperature, COP, heat-loss or weather forecast in the planning objective |
 | DHW | `dhw_control.py` forces hot water in the cheapest hour of each 12-hour block | No tank-need or water-demand prediction; separate app can compete with unified planning |
-| Plant control | `input_select.heishamon_heatmode` maps via HA automation to HeishaMon `SetOperationMode`; `switch.aquarea_force_dhw_mode` is a separate actuator | Input-helper state is not equivalent to confirmed heat-pump mode; avoid unbounded state waits |
+| Plant control | `input_select.heishamon_heatmode` maps via HA automation to HeishaMon `SetOperationMode`; `switch.aquarea_force_dhw_mode` is a separate actuator | Input-helper state is not equivalent to confirmed heat-pump mode; avoid unbounded state waits in the C5 executor (C0 keeps the proven command path) |
 | Available telemetry | HeishaMon exposes heating/DHW thermal/electric power, COP-related measurements, tank/flow/outdoor temps, compressor/defrost state; HA LocalTuya has bedroom, hall-kitchen and office thermostats | Entity IDs, rooms and topology verified (see the audit below); still verify timestamps, units and calibration before modeling |
 | Existing thermal observability | Grafana climate/room/energy dashboards, a Shelly EM branch reported as aerothermal load | Channel 2 reads above HeishaMon (see the audit below); reconcile in C1/C2 before treating either as ground truth |
 | Shared data/runtime | `service/ha_client.py`, `entity_store.py`, `pvpc.py`, `timegrid.py`, `history.py`; weather/PVPC archives, 15-minute UTC time grid, Prometheus, shadow sink and metrics | Reuse; do not build another data-ingestion stack |
@@ -31,7 +31,8 @@ Relevant source:
 [`climate_control.py`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/climate_control.py),
 [`dhw_control.py`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/appdaemon/apps/dhw_control.py),
 [`heishamon.yaml`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/config/integrations/heishamon.yaml),
-[`home-assistant/values.yaml`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/values.yaml).
+[`home-assistant/values.yaml`](https://github.com/pando85/homelab/blob/master/apps/home-assistant/values.yaml),
+[`GoHeishaMon`](https://github.com/pando85/GoHeishaMon) (the owner's fork running on the CZ-TAW1; `src/taw2mqtt.go`, `HandleSetOperationMode` accepts 0-10).
 
 ### Verified plant topology and data audit (read-only Prometheus and homelab review, 2026-10-30)
 
@@ -62,7 +63,7 @@ Not usable, or with caveats:
 - The `instance` label changes on every HA restart: aggregate queries by `entity`.
 - Heating vs DHW can be separated historically from the separate heat and DHW power metrics. AppDaemon's permission schedule can be reconstructed by replaying the legacy policy (as `structured_forecast.py` does).
 
-**Proposed homelab change (text-state history):** add numeric template sensors, for example a defrost binary sensor and a numeric operating-mode code, so Prometheus starts retaining defrost and mode history.
+**Part of C0/C1a homelab work (text-state history):** numeric template sensors for the operating-mode code, defrost and the 3-way valve, so Prometheus starts retaining their history.
 
 **Out of scope for the initial rollout:** hardware flow-temperature changes, direct Modbus control, multi-pump dispatch, automatic battery actuation, replacing Omnibattery, installing PV generation, retraining large ML models, and removing AppDaemon. Any projected savings before controlled validation are **model estimates**, not measured bill reductions.
 
@@ -211,7 +212,7 @@ The read-only endpoint publishes **proposals**, not a write API or a claim that 
 | **Active (future gate)** | Execute only the current valid, acknowledged intent while supervising temperatures, hardware mode and minimum run times |
 | **Degraded / fault** | Expire optimization authority; transition through a documented safe controller/hardware fallback rather than assuming the last HA helper state is safe |
 
-Only one climate writer may be authoritative at a time. When replacing independent legacy climate/DHW timers, transition both to a single coordinated executor or retain DHW hardware ownership explicitly—never run overlapping force-DHW schedules from two controllers. AppDaemon may call HA services, but must confirm the *reported* HeishaMon operating mode; `input_select` reflecting a requested option is insufficient. Every actuation needs deadline, bounded retries, idempotent intent handling and mismatch alerting.
+Only one climate writer may be authoritative at a time. When replacing independent legacy climate/DHW timers, transition both to a single coordinated executor or retain DHW hardware ownership explicitly—never run overlapping force-DHW schedules from two controllers. From C5, AppDaemon may call HA services, but must confirm the *reported* HeishaMon operating mode; `input_select` reflecting a requested option is insufficient. Every C5 actuation needs deadline, bounded retries, idempotent intent handling and mismatch alerting. These requirements apply to the C5 executor, not to C0, which keeps the proven legacy command path.
 
 Do **not** equate `disabled`, transport loss or optimizer failure with `off`. Document how the pump's native thermostats/frost protection continue to operate, how a stale heating request is revoked, and what manual takeover does during a restart. The proposed climate plan consumer is a separately reviewed homelab PR; no runtime control changes in this planning PR.
 
@@ -274,8 +275,8 @@ Forecast interfaces should carry UTC slot IDs, kWh, quality and model/plan versi
 
 | Stage | Repository | Deliverable | Exit gate |
 |---|---|---|---|
-| **C0 — Correctness audit and stabilization** | homelab | Scoped by risk (below): must-have fixes first, then should-have; preserve existing user-facing toggles | Tests cover the must-have cases (disable/crash/restart, retry vs enable flag, command mismatch and lost HA) and, for should-have, invalid/missing/negative price and both DST days |
-| **C1a — Offline extraction and climate feature set** | battery-optimizer + homelab configuration | Map verified room, tank, compressor, power and weather data (mode-aware, including cooling power/energy) into extraction and a **separate climate feature set**; quality report; homelab numeric template sensors for defrost and operating mode; no control writes | Enough measured history and documented gaps to fit a model without inventing data; `dataset_id` and existing feature-set ids unchanged; battery baseline regression-free |
+| **C0 — Correctness audit and stabilization** | homelab | The agreed scope below (disable restores the heat mode, HA watchdog, retry re-check, full heat-mode map, numeric sensors); preserve existing user-facing toggles | Tests cover disable, the watchdog (stale heartbeat while enabled and `DHW`), the retry loop re-checking the toggle and the nine-option mode map |
+| **C1a — Offline extraction and climate feature set** | battery-optimizer + homelab configuration | Map verified room, tank, compressor, power and weather data (mode-aware, including cooling power/energy) into extraction and a **separate climate feature set**; quality report; homelab numeric template sensors for operating mode, defrost and 3-way valve (C0 homelab work); no control writes | Enough measured history and documented gaps to fit a model without inventing data; `dataset_id` and existing feature-set ids unchanged; battery baseline regression-free |
 | **C2 — Thermal and DHW identification, economic gate** | battery-optimizer | Pure model(s) (first-order and two-state slab+air), fitting, safe parameter envelopes, recorded versions and chronological validation; COP derived from energy; economic go/no-go gate (below) | Held-out trajectory error and bias outperform a defined simple/persistence baseline; bad sensors trigger model fallback; gate result recorded |
 | **C1b — Live climate observer** | battery-optimizer | Live climate observer in `serve` behind a feature flag, read-only; deferred until C3 and only after the C2 gate passes | Existing battery runtime unaffected; freshness and quality metrics |
 | **C3 — Climate shadow planner** | battery-optimizer | After the C2 gate: temperature-aware heuristic then climate MPC, versioned plan, read-only GET, shadow metrics, executor not connected | Deterministic, physically feasible plans, bounded solve latency, no interference with existing battery runtime |
@@ -286,13 +287,28 @@ Forecast interfaces should carry UTC slot IDs, kWh, quality and model/plan versi
 
 **Ordering:** C0 can begin independently in `homelab`; C1a and C2 come first and can run while legacy heating stays active. C1b and C3–C5 start only if the C2 gate passes. C3–C4 must precede any C5 actuation. C6 can start read-only before C5 but must distinguish hypothetical shadow schedules from committed ones. The battery Phase D commissioning/authorization is **independent** of C5. No timeline, energy savings percentage or thermal parameter is assumed.
 
-### C0 scope by risk
+### C0 scope (agreed after the owner's review)
 
-| Priority | Scope |
+**Agreed C0 scope (homelab):**
+
+- Disabling `input_boolean.appdaemon_climate_enable` cancels the timers and restores the heat mode (`input_select.appdaemon_climate_heat_mode`) with a notification. AppDaemon shutdown or reload never changes the mode.
+- An HA watchdog automation restores the heat mode when the AppDaemon heartbeat (`sensor.last_appdaemon_connection`) is stale for 15 minutes while climate control is enabled and the pump reports `DHW`.
+- The toggle is the manual override.
+- The price-retry loop re-checks the toggle before re-registering.
+- The "Set heatmode" automation maps all nine options to `SetOperationMode` 0-8.
+- Numeric template sensors for the operating-mode code, defrost and the 3-way valve, so Prometheus keeps their history.
+
+**Reviewed and not changed, with reasons:**
+
+| Item | Decision |
 |---|---|
-| **Must-have now** | Never leave space heating disabled after disable/crash/restart (stale `DHW` mode); bounded retries that re-check the enable flag; mode changes confirmed against the reported `sensor.aquarea_mode` with a deadline |
-| **Should-have** | Stale/partial price and DST handling; no overlapping force-DHW |
-| **Later** | Refactors that the C4/C5 executor would replace |
+| Mode command path and acknowledgement | Proven reliable in years of operation; owner decision. Confirming the reported mode with a deadline is a C5 executor requirement, not C0 |
+| DST timers | AppDaemon 4.5.13 resolves non-existent or repeated wall-clock times to a fixed instant. Worst case is a one-hour shift or one extra heating hour twice a year; heating is never lost |
+| Stale PVPC at the 00:00:30/00:00:40 runs | The `pvpc_updated` integration rewrites the attributes within 0.5 s of midnight from cached next-day prices (verified on 75/75 midnights); missing data makes the sensor unavailable rather than stale |
+| DHW app (re-force inside the chosen hour, overlap with heating windows, no notification without prices) | By design or harmless |
+| Timer cancellation through AppDaemon internals | Left as is; owner decision |
+
+Comfort awareness (a temperature guard) is deferred to C3.
 
 Any change to which hours the legacy policy selects is a versioned policy change and needs a matching `structured_forecast.py` replay update. Every AppDaemon ConfigMap change restarts AppDaemon (reloader), so C0 merges are actuation events until restart handling is fixed.
 
@@ -310,7 +326,7 @@ Run each under both levers: **permission only**, and **permission plus setpoint 
 
 ### Recommended first implementation PRs
 
-- **homelab — C0:** the must-have items first (no stale `DHW` mode, bounded retries, confirmed mode change), then the should-have items. Preserve current schedules by default.
+- **homelab — C0:** the agreed scope above (disable restores the heat mode, HA watchdog, retry re-check, nine-option mode map, numeric template sensors). Preserve current schedules by default.
 - **battery-optimizer — C1a:** offline extraction and a separate climate feature set from the existing Prometheus archive; model input audits for room, tank and HVAC electric/thermal power.
 - **battery-optimizer — C2:** offline first-order and two-state thermal models, COP derived from energy, test fixtures and the economic gate; no runtime configuration or actuator.
 - **battery-optimizer — C3 (after the gate):** opt-in shadow planning and `GET /climate/plan`; prove battery shadow behavior unaffected.
@@ -337,7 +353,7 @@ Run each under both levers: **permission only**, and **permission plus setpoint 
 | Missing, stale, negative and partly published PVPC prices | Correct availability/error attribution, no random coercion and explicit policy for estimated tail |
 | Stale room/outdoor/tank sensors; open windows; contradictory zone temperatures | No false thermal learning; conservative limits or no optimizer actuation |
 | Solver timeout, CPU saturation, failed persistence, restart or overlapping generations | No old/stale plan execution, no battery shadow starvation, bounded recovery |
-| HA disconnect, wrong helper state, MQTT acknowledgement mismatch | No infinite wait or false command-success metric; hardware mode reconciled |
+| HA disconnect, wrong helper state, MQTT acknowledgement mismatch (C5 executor; not a C0 requirement) | No infinite wait or false command-success metric; hardware mode reconciled |
 | Manual override, disable during heating, competing DHW event | Deterministic owner transition; no orphaned timer or conflicting writer |
 | Defrost, compressor short cycle, tank draw, pump hygiene/legionella cycle | Machine/hygiene safeguards remain authoritative, do not train on misleading intervals |
 | Cooling requests while heating-only planner active | Refuse to produce cooling control; no unsafe water-temperature or dew-point commands |
@@ -357,7 +373,7 @@ The architecture is ready for implementation when this document and ADR are revi
 - [x] Panasonic operating mode and room sensor configuration (permission `Heat+DHW` vs `DHW`; thermostat climate metrics).
 - [ ] Manufacturer-safe cycling bounds and native frost/hygiene behavior.
 - [x] Initial heat mode comfort band: minimum 22 °C, maximum 28 °C, as versioned configuration (per room, optionally per time of day).
-- [ ] DHW comfort bands and manual/holiday/disable semantics.
+- [ ] DHW comfort bands and holiday semantics. Disable semantics are decided (C0 scope: the toggle is the manual override and restores the heat mode); manual/holiday behavior of the future executor stays open.
 - [ ] Whether battery-optimizer's current deployment can accommodate thermal-data ingestion and solves without interrupting existing slots/archival.
 - [ ] Source of reliable historical weather forecasts (existing `weather.forecast_home` archive and limits) and price snapshots for causal replay.
 - [ ] C2 gate thresholds, predeclared before the gate is run.
@@ -371,4 +387,5 @@ The architecture is ready for implementation when this document and ADR are revi
 - [tvofi/heatpump_optimizer (MIT-licensed, inspectable MPC reference)](https://github.com/tvofi/heatpump_optimizer)
 - [EMHASS (thermal/energy scheduling reference)](https://github.com/davidusb-geek/emhass)
 - [Homelab AppDaemon controls](https://github.com/pando85/homelab/tree/master/apps/home-assistant/appdaemon/apps)
+- [GoHeishaMon (owner's fork on the CZ-TAW1; `src/taw2mqtt.go`, `HandleSetOperationMode` accepts 0-10)](https://github.com/pando85/GoHeishaMon)
 - [Homelab battery optimizer deployment](https://github.com/pando85/homelab/blob/master/docs/deployment/battery-optimizer.md)
