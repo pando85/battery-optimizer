@@ -2,6 +2,7 @@
 
 - **Status:** Proposed recovery plan (not an amendment to C2 or approval for actuation).
 - **Recorded outcome:** 2026-10-30, C2 config v2, first and only predeclared iteration: **UNDETERMINED / no-go**.
+- **Progress:** 2026-10-31, steps R0 to R2 done as track-B step B0 ([section 7](#7-status-2026-10-31-b0-results-r0-to-r2)); G-R1 to G-R3 not reached.
 - **Parent:** [climate optimizer implementation](climate-optimizer-implementation.md), especially the immutable [C2 outcome](climate-optimizer-implementation.md#c2-model-iteration-the-one-predeclared-iteration-config-version-2).
 - **Related:** [C7-F water-flow identification](climate-flow-calibration-optimization.md), [ADR-0005](../adr/0005-shared-energy-planning-climate.md).
 - **Scope:** Diagnosis and replacement validation strategy for the *building/plant/electricity* models. Existing AppDaemon and pump settings remain untouched.
@@ -84,3 +85,69 @@ C7-F remains an **independent** control-lever study but cannot skip the action-m
 - Keep one climate/DHW hardware writer in AppDaemon, with manual override, DHW/defrost precedence, stale-input protection and safe rollback; no experiments through the optimizer service.
 - A 15-minute planning grid is not a command frequency and must not drive high-frequency water-setpoint changes.
 - Keep no-go and inconclusive reports visible in status pages; do not silently substitute the failed B fit as a production default.
+
+## 7. Status 2026-10-31: B0 results (R0 to R2)
+
+Track-B step B0 ([comfort controller design](comfort-controller-design.md#13-track-b-shadow-thermal-model-mpc))
+ran R0 to R2 on 2026-10-31 as a read-only analysis. The full results are private (per-step JSON in the data
+directory); this section records only what they mean. **Everything that fits a model on one season and
+scores it on the other (S2 to S3, S3 to S2) is exploratory**: S3 was already inspected in C2, so it is not a
+pristine holdout, and no number below is a confirmatory gate result.
+
+### 7.1 Gate outcomes
+
+| Step / gate | Outcome |
+|---|---|
+| R0 reproduce C2 v2 | **Done: reproduced exactly.** Every value of `validation.json` equals run `c1794f600291` (no differences); only the model id differs, because the code version moved on (the climate code and config are unchanged). |
+| R1 sensor and energy audit | Done (deliverable, no gate). |
+| R2 identifiability | Done (deliverable, no gate). The stop rule ("drop the latent slab") is triggered with the return-water channel in the fit and **not** triggered without it. |
+| **G-R1** observation model | **Not reached.** The plan requires numerical thresholds predeclared after R0 and before the reserved period; none exist. There is also no heating data after the cutoff: space heating has been off since the reserved period began ([regime log](../components/regime-log.md)). The exploratory numbers below are not a pass. |
+| **G-R2** action response | **Not reached.** No issued-forecast archive covers heating (it starts 2026-10-25). The lever it validates, the binary on/off permission, **no longer exists under ADR-0006**, so the gate is written around a removed action: a **plan gap** to be closed in the next gate revision (which action is validated: start time, setpoint or water target?). The early signal points to fail: the permission-to-heat link alone has a daily energy error of about 21% against the 15% limit. |
+| **G-R3** policy | **Not reached.** No accepted action model; ADR-0006 also changed the metric (electricity primary) and the comparator is no longer the running policy. |
+
+### 7.2 Root causes
+
+1. **The slab bound is a measurement artefact, not a property of the slab.** The return-water sensor
+   observes the water loop with a **flow-dependent offset** (about 0.1 K at low pump flow, 2.4 to 3.0 K at
+   high flow in S3), so `y2 = T_s + constant` is misspecified. With the return channel in the fit the
+   profile of the slab capacity is pulled to the lower bound (6 of 7 leave-one-month-out folds hit it, and
+   leaving one month out flips the fit to a second optimum). Fitted on **room air only**, the slab is
+   identified in the interior at **about 10.6 to 12.5 kWh/K** in both seasons, and the other parameters are
+   stable. Model A's parameters are stable as well.
+2. **A missing daily cycle, with a weekday/weekend shape, drives the 6 to 12 h errors.** The open-loop
+   error has the same time-of-day pattern in both seasons (too cool at night, too warm in the evening) and
+   weekends differ from weekdays. Likely drivers: occupancy and internal gains, plus a diurnal error of the
+   outdoor sensor (sun at midday, a night offset).
+3. **The season shift explains the 24 h and the energy bias.** The apparent UA fell by about 22% from S2 to
+   S3 while the solar gain term collapsed, with setpoint, water target, valve-shut time and outdoor sensor
+   all changing: a regime confound, not insulation. The simulated valve share is higher than the measured
+   one, so the closed loop adds heat.
+4. **The COP error comes from extra starts.** S3 had about 37% more heating runs than S2; hours with two
+   or more starts are under-predicted by about 25%, while the error is uniform across lift bins. A
+   starts/cycling term is missing from the lift table; this is not a lift error.
+
+### 7.3 Most promising model (exploratory)
+
+A **2-state (air plus slab) model fitted on room air only**, with a **weekday/weekend daily gain**, and the
+trailing-window **weekly re-estimation** of the level parameters (UA, q0). Room-mean RMSE at 6 and 12 h
+(S2 to S3, measured-heat driven): **0.249 and 0.325 K**, against 0.334 and 0.426 for C2's model A and
+0.447 and 0.536 for persistence. The reverse fold (S3 to S2) improves too. The daily gain is the largest
+single contribution (about 20% at 6 and 12 h in both directions); the air-only 2-state structure adds a
+few percent; valve handling adds about 0.01 K.
+
+Limits: at 24 h no structure passes a 0.15 K bias limit across seasons without adaptive re-estimation, 1 h
+ties persistence (sensor resolution), and 3 h is only 5 to 20% better. **The useful horizon is 6 to
+12 h.** Hall/kitchen is the hardest room, and a per-room model is useful to the controller but no shortcut
+for accuracy. A good heat-driven fit does not license actions while the permission-to-heat link fails.
+The preregistered thresholds for the next test are in the
+[2026-27 preregistration](climate-preregistration-2026-27.md).
+
+### 7.4 Reproduction
+
+The scripts are **not committed**: they hard-code local paths, cache pickles and carry exploration-order
+names, so they are not a clean runner. They live next to the outputs in the private data directory under
+`analysis/v1/climate-b0/b0-20261031/` (`scripts/`, run id `b0-20261031`). The inputs are the climate
+feature set `da6d678016ed`, dataset `cdd448abb006`, `config/climate.yaml` version 2 (hash `22888468...`)
+and the repository at `4d1dadf` (climate code identical to the C2 run's `9055b4d`). Run them with the pinned
+uv from the scripts directory, for example `uvx uv@<pinned> run --frozen --project <repo> python r0.py`.
+They would need to become a clean `hack/` runner before any confirmatory use.

@@ -85,22 +85,50 @@ its valve because the room is below the new setpoint, the run logic of section 2
 the room reaches the minimum at the window start. The run logic stays purely demand-driven. The lead time
 is a table by outdoor-temperature band, **editable as HA helpers**.
 
-The values come from the warm-up analysis (track B, step B0, in progress); **no owner decision is needed**
-(owner, 2026-10-31). Until B0 reports, the implementation uses **conservative, editable placeholders**:
-**180 min** when the outdoor temperature is below 6 degC and **120 min** at or above 6 degC. The table
-below is kept as the TODO for the measured values:
+The defaults come from the warm-up analysis (track B, step B0, run `b0-20261031`, 2026-10-31); **no owner
+decision is needed** (owner, 2026-10-31). They are the **p75 of the measured lead time** by day type,
+editable as HA helpers:
 
-| Outdoor band (degC) | Lead time: early-start write before the window start (minutes) |
-|---|---|
-| TODO (below -2) | TODO from B0 |
-| TODO (-2 to 2) | TODO from B0 |
-| TODO (2 to 6) | TODO from B0 |
-| TODO (6 to 10) | TODO from B0 |
-| TODO (10 and above) | TODO from B0 |
+| Outdoor band (degC) | Weekday, target 12:00 (minutes) | Weekend, target 09:00 (minutes) |
+|---|---|---|
+| below 8 | 675 | 530 |
+| 8 to 12 | 545 | 430 |
+| 12 and above | 275 | 215 |
 
-The band edges above are also placeholders. No measured lead time is guessed in this document; the first
-deployment uses the B0 values or, if B0 is late, the 180/120 min placeholders above (editable helpers),
-recorded in the [regime log](../components/regime-log.md) when deployed.
+**How they were measured.** The scenario is a hall/kitchen at 23.5 degC at 22:00 that coasts at the
+observed night cool-down rate, then restarts; the lead is the compressor-to-trough lag plus the time to
+re-warm. Rates are the October to April episodes of the S3 winter (2025-26), at **26 degC water**, which
+is **conservative under the warmer software curve** of section 7.1. The outdoor band is the mean
+debiased outdoor temperature of the night. A Monte Carlo over the observed episodes (rates drawn
+independently, which widens the tails) gives the percentiles; the table uses the p75.
+
+| Context (S3, hours before the target) | p50 weekday | p90 weekday | p50 weekend | p90 weekend |
+|---|---|---|---|---|
+| below 8 degC | 8.3 to 8.4 | 12.8 | 6.7 to 6.8 | 10.2 |
+| 8 to 12 degC | 6.2 | 11.4 | 5.1 | 9.0 |
+| 12 degC and above | 2.7 | 7.4 | 2.2 | 5.9 |
+
+Measured rates (October to April, per thermostat room): cooling **0.04 to 0.12 K/h** (night median),
+warming **0.08 to 0.19 K/h** at 26 degC water (median of the heating episodes, by band), lag between
+compressor start and the first rise **0.5 to 0.75 h** (resolution about 0.5 h, because the thermostat
+reports a change only every 30 min). In cold weather about 20% of the hall/kitchen heating episodes at
+26 degC water do not raise the room at all.
+
+**Consequence.** In cold weather the p75 early start falls around **01:00** (weekday, 00:45) or just
+after midnight (weekend, 00:10), so a night setback pays only in **mild** weather. At the S3 setpoint and 26 degC water the morning deficit from a
+07:00 start could not be recovered (median 12 to 24 h in bands below 12 degC), so a lower water
+temperature makes optimum start much less effective.
+
+**Night floor (21 degC).** Under the 23.5 degC schedule the hall/kitchen rarely goes below 21 degC
+before the early start (at most 0.7% of nights in every band). The bedroom does so more often; if it
+keeps its observed evening offset from the hall (0.1 to 0.6 K lower), the share is 0.5 to 3.1% (S3) and
+1.3 to 7.7% (S2). The bedroom's **21.5 degC setpoint keeps demand-driven heating protecting it**: the
+run logic of section 2 starts the heat pump when the room falls below the setpoint minus the hysteresis.
+The floor needs no extra rule; the share of time below the minimum in section 12 watches it.
+
+The first deployment uses these p75 defaults and records them in the [regime log](../components/regime-log.md)
+when deployed. The 180/120 min placeholders are withdrawn. Band edges are the measured ones (B0 pooled
+the fewer-than-4 degC nights with 4 to 8 degC because of too few nights).
 
 ## 7. Water temperature and hot water
 
@@ -212,7 +240,7 @@ Metrics:
 - compressor starts per day;
 - DHW cost share.
 
-**Preregister the criteria before go-live** (the same discipline as the F2a preregistration: criteria and
+**Preregister the criteria before go-live** (see [climate preregistration 2026-27](climate-preregistration-2026-27.md); the same discipline as the F2a preregistration: criteria and
 thresholds committed before the first controller day). A before/after comparison is **weaker evidence than a
 randomised trial**: weather, occupancy and tariff differ between periods and the normalisation is
 imperfect. The result is read with that limit stated.
