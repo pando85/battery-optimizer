@@ -1,0 +1,153 @@
+# Climate optimizer (C2): comfort band, training filters, model envelope, acceptance criteria and gate
+# thresholds. Committed BEFORE any model result exists, as the plan requires; the plan is
+# docs/planning/climate-optimizer-implementation.md ("C2 design and predeclared gate").
+#
+# Everything here is %, K, Kh (degree-hours), kWh or a count: no money threshold and no site
+# coordinate. Site coordinates and the always-open valve share `phi` live in a private YAML in the
+# data dir (see docs/architecture.md). The file is validated strictly by
+# battery_optimizer.climate.config: an unknown, missing, duplicated or out-of-range key is an error.
+# A change is a new `config_version` and a new config hash in every result it touches.
+
+config_version: 1
+timezone: Europe/Madrid
+
+# --- comfort band heat-v1 -------------------------------------------------------------------------
+comfort:
+  band: heat-v1
+  low_c: 22.0
+  high_c: 28.0
+  rooms: [bedroom, hall_kitchen, office_t]
+  excluded_rooms: [office_a] # large internal gain (servers): modelled as a heat sink, not comfort
+
+# --- seasons and folds (inclusive local dates) ----------------------------------------------------
+seasons:
+  S1: {start: 2023-11-08, end: 2024-04-30} # train only
+  S2: {start: 2024-10-01, end: 2025-04-30} # train, secondary test
+  S3: {start: 2025-10-01, end: 2026-04-30} # held-out test and primary gate period
+  fit_months: [10, 11, 12, 1, 2, 3, 4]
+  gate_months: [11, 12, 1, 2, 3] # the gate and headline metrics
+  reserved_from: 2026-10-01 # untouched, reserved for C4
+folds:
+  - {train: [S1], test: S2}
+  - {train: [S1, S2], test: S3}
+
+# --- derived signals ------------------------------------------------------------------------------
+signals:
+  step_seconds: 900
+  dhw: # a slot is domestic hot water when the pump drew or delivered it, or force-DHW was on
+    min_electric_kwh: 0.02
+    min_thermal_kwh: 0.05
+    force_share: 0.5
+  cooling: # a slot is cooling when the pump drew or delivered it in cool mode
+    min_electric_kwh: 0.02
+    min_thermal_kwh: 0.05
+  valve:
+    open_margin_k: 0.0 # a room's valve is inferred open when its temperature < setpoint - margin
+  counter_check:
+    min_daily_kwh: 1.0 # a day enters the Q_heat vs counter cross-check above this thermal energy
+
+# --- training filters -----------------------------------------------------------------------------
+filters:
+  drop_unknown_quality: true # a slot with any required input unknown (NaN) is dropped
+  window_open:
+    drop_k: 0.5 # a comfort room falls by more than this ...
+    slots: 1 # ... within this many 15-minute slots
+  valves_shut:
+    min_rooms_at_setpoint: 2 # at least this many comfort rooms at or above setpoint
+  thermostat_outage: # inclusive local dates whose thermostat data is unusable (Feb 2026, about 3 days)
+    windows:
+      - {start: 2026-02-09, end: 2026-02-12}
+  drop_cooling_slots: true
+  drop_rule_disabled_days: true # a day on which the climate rule was disabled has no replayed u
+
+# --- thermal models -------------------------------------------------------------------------------
+model:
+  step_seconds: 900
+  window_hours: 48 # simulation-error fit windows, from local midnight
+  forecast_origins_local_hours: [0, 6, 12, 18]
+  forecast_horizons_hours: [1, 6, 12, 24]
+  envelope:
+    tau_h: [10.0, 500.0] # C / UA
+    ua_kw_per_k: [0.03, 0.5]
+    c_slab_kwh_per_k: [2.0, 60.0]
+    k_kw_per_k: [0.1, 3.0]
+    q0_kw: [0.0, 3.0]
+  slab_proxy: # return temperature in steady circulation is a second slab measurement
+    min_flow_l_per_min: 5.0
+    min_minutes_into_run: 10
+  response:
+    phi_default: 0.3 # always-open share until floor areas are supplied
+    valve_open_margin_k: 0.25 # open = T_air < setpoint - margin
+  selection:
+    b_min_rmse_gain: 0.10 # use B only if it beats A by this much at 12 h and 24 h
+    horizons_hours: [12, 24]
+
+acceptance:
+  q_driven: # measured Q, season S3
+    rmse_k: {6: 0.30, 12: 0.40, 24: 0.50}
+    abs_bias_24h_k: 0.15
+    min_gain_vs_baseline: 0.15 # at 12 h and 24 h against the better baseline
+    gain_horizons_hours: [12, 24]
+  u_driven: # replayed u through the response model, season S3
+    rmse_24h_k: 0.60
+    daily_energy_mape: 0.15
+    season_energy_bias: 0.05
+    regime_energy_bias: 0.10 # within each min_hours regime of S3
+  legacy_replay: # simulated legacy against realized, season S3
+    cost_rel_error: 0.05
+    electricity_rel_error: 0.05
+    kh_below_low_rel_error: 0.25
+    kh_below_low_abs_error: 10.0
+  parameters:
+    fold_rel_diff: 0.30 # each parameter within this between the two folds
+  max_iterations: 1 # one predeclared model iteration
+
+cop:
+  min_q_kwh: 0.1 # hourly rows below this are excluded
+  cop_range: [1.0, 9.0] # implied COP outside is excluded
+  table_bin_k: 2.0 # baseline: COP table binned by T_out
+  defrost_knee_c: 5.0 # the max(0, 5 - T_out) term
+  daily_mape: 0.08
+  season_error: 0.03
+
+# --- policies and simulator -----------------------------------------------------------------------
+policies:
+  heuristic:
+    decision_minute: 0 # hourly decisions at :00
+    min_on_hours: 1
+    min_off_hours: 1
+    max_horizon_hours: 24
+    never_heat_above_c: 28.0
+  perfect_foresight:
+    max_blocks_per_day: 4
+  setpoint_offset: # reported only, never gated
+    offset_k: 2.0
+    max_setpoint_c: 28.0
+
+# --- gate heat-v1 (permission lever, S3, primary model) -------------------------------------------
+gate:
+  band: heat-v1
+  hard:
+    max_kh_above_high: 0.0
+    starts_per_day_ratio_max: 1.10 # modelled mean starts per day, against simulated legacy
+    max_starts_per_day: 30
+    max_blocks_per_day: 4
+    mismatch_run_keeps_sign: true
+    model_accepted: true
+  cost: # condition C, heuristic variant m_cost
+    min_saving: 0.10
+    bootstrap_lower_bound_above: 0.0
+    saving_exceeds_replay_error: true
+    comfort_kh_tolerance_per_room: 5.0 # Kh below low per comfort room, against legacy
+    worst_excursion_floor_c: 21.5 # worst room excursion at least min(legacy worst, this)
+  comfort: # condition K, heuristic variant m_comfort
+    min_kh_reduction: 0.25 # Kh below low summed over the comfort rooms
+    bootstrap_lower_bound_above: 0.0
+    reduction_exceeds_replay_error: true
+    cost_point_delta_max: 0.0
+    cost_bootstrap_upper_bound_max: 0.03
+  model_error:
+    ood_share_warn: 0.10
+  statistics:
+    block_days: 7
+    confidence: 0.95
