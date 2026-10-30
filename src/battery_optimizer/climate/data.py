@@ -20,6 +20,11 @@ Derived signals
   only slots in which the compressor has been off at least ``signals.t_out_debias.min_off_minutes``
   and interpolates linearly in time across running periods up to ``max_gap_hours``; longer
   periods are ``NaN``.  The raw ``t_out`` stays for diagnostics.
+* ``fusion`` (only with a ``reference_station`` in the site file): the station reference ``r``, the
+  fused series ``t_out_fused = r + mu + x_hat`` (Kalman-smoothed local offset, see
+  :mod:`battery_optimizer.climate.tout`) with its standard deviation, and the hash of the station
+  manifest.  ``t_out_model`` is the series the models read, chosen by ``signals.t_out_source``
+  (``debiased`` unless the configuration says ``fused``); the ``outdoor_unknown`` filter follows it.
 * ``valve_open_inferred``: from room temperature and setpoint (a room below its setpoint wants
   heat); ``climate_action`` has no history before 2026-10-30.  Not the plant's valve cap.
 * ``solar``: clear-sky proxy, the positive part of the sine of the solar elevation at the slot
@@ -40,6 +45,7 @@ The feature table is verified through its manifest by :func:`load_climate_data`.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -52,6 +58,14 @@ import pyarrow as pa
 import yaml
 
 from battery_optimizer.climate.config import ClimateConfig
+from battery_optimizer.climate.station import (
+    StationError,
+    StationSeries,
+    load_station,
+    month_range,
+    reference_at_slots,
+)
+from battery_optimizer.climate.tout import OffsetParams, fit_offset_model, fuse, offset_observations
 from battery_optimizer.features import FEATURES_DIRNAME, column_array, load_features
 from battery_optimizer.load_forecast import SideInputs
 from battery_optimizer.paths import resolve_data_dir
@@ -61,6 +75,7 @@ from battery_optimizer.structured_forecast import replay_mask_for_day
 __all__ = [
     "ClimateData",
     "ClimateDataError",
+    "Fusion",
     "Site",
     "build_climate_data",
     "debias_outdoor",
@@ -111,10 +126,13 @@ class Site:
     longitude: float
     phi: float | None
     sha256: str
+    #: WMO id of the AEMET station used as the outdoor reference (private: reveals the area).
+    reference_station: str | None = None
 
 
 def load_site(path: str | Path) -> Site:
-    """Read ``<data_dir>/climate/site.yaml``: ``latitude``, ``longitude`` and optional ``phi``.
+    """Read ``<data_dir>/climate/site.yaml``: ``latitude``, ``longitude`` and the optional ``phi``
+    and ``reference_station`` (a quoted 5-digit WMO id).
 
     The file lives in the private data dir and is never committed; its hash is recorded in
     results so a different site cannot go unnoticed.
@@ -127,7 +145,7 @@ def load_site(path: str | Path) -> Site:
     raw = yaml.safe_load(payload)
     if not isinstance(raw, dict) or not {"latitude", "longitude"} <= raw.keys():
         raise ClimateDataError(f"site file {p}: needs latitude and longitude")
-    extra = set(raw) - {"latitude", "longitude", "phi"}
+    extra = set(raw) - {"latitude", "longitude", "phi", "reference_station"}
     if extra:
         raise ClimateDataError(f"site file {p}: unknown key(s) {sorted(extra)}")
 
@@ -138,11 +156,17 @@ def load_site(path: str | Path) -> Site:
         return float(v)
 
     phi = number("phi", 0.0, 1.0) if raw.get("phi") is not None else None
+    station = raw.get("reference_station")
+    if station is not None and not (
+        isinstance(station, str) and len(station) == 5 and station.isdigit()
+    ):
+        raise ClimateDataError(f"site file {p}: reference_station must be a quoted 5-digit WMO id")
     return Site(
         latitude=number("latitude", -90.0, 90.0),
         longitude=number("longitude", -180.0, 180.0),
         phi=phi,
         sha256=hashlib.sha256(payload).hexdigest(),
+        reference_station=station,
     )
 
 
@@ -213,6 +237,26 @@ def _local_calendar(starts_us: np.ndarray, tz: ZoneInfo) -> tuple[list[datetime]
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class Fusion:
+    """The station reference fused with the house sensor (see :mod:`...climate.tout`)."""
+
+    #: Station temperature at the slot midpoints; ``NaN`` in gaps longer than the bridge.
+    reference: np.ndarray
+    #: ``r + mu + x_hat`` where the reference is known, ``t_out_debiased`` elsewhere.
+    fused: np.ndarray
+    #: Smoother standard deviation (K); ``NaN`` where the series fell back to ``t_out_debiased``.
+    sd: np.ndarray
+    #: Slots whose fused value is ``reference + offset`` (not the fallback).
+    from_reference: np.ndarray
+    #: Offset model fitted on the ``signals.t_out_fused.fit_seasons`` slots only.
+    params: OffsetParams
+    n_fit_obs: int
+    #: Trusted dark offset observations (all seasons) the smoother used.
+    observed: np.ndarray
+    station_sha256: str
+
+
 @dataclass
 class ClimateData:
     """Climate signals on the feature grid.  Arrays have one entry per 15-minute slot."""
@@ -260,6 +304,38 @@ class ClimateData:
     train: np.ndarray
     #: Raw feature columns that later stages use directly (flow, return, tank, starts, ...).
     columns: dict[str, np.ndarray] = field(default_factory=dict)
+    t_out_source: str = "debiased"
+    fusion: Fusion | None = None
+
+    @property
+    def t_out_model(self) -> np.ndarray:
+        """The outdoor series the models read: ``signals.t_out_source``."""
+        if self.t_out_source == "fused":
+            assert self.fusion is not None
+            return self.fusion.fused
+        return self.t_out_debiased
+
+    @property
+    def station_sha256(self) -> str:
+        """Hash of the station manifest (``""`` without a reference station)."""
+        return self.fusion.station_sha256 if self.fusion is not None else ""
+
+    @property
+    def input_sha256(self) -> str:
+        """One id that changes when any input does: feature set, dataset, config, site file and
+        station manifest (and so a different outdoor series)."""
+        blob = json.dumps(
+            {
+                "feature_set_id": self.feature_set_id,
+                "dataset_id": self.dataset_id,
+                "config_sha256": self.config_sha256,
+                "site_sha256": self.site_sha256,
+                "station_sha256": self.station_sha256,
+                "t_out_source": self.t_out_source,
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(blob.encode()).hexdigest()
 
     @property
     def n(self) -> int:
@@ -467,6 +543,53 @@ def _replay_u(
 # Build
 # ---------------------------------------------------------------------------
 
+
+def station_months(starts_us: np.ndarray) -> list[tuple[int, int]]:
+    """Months of station data a grid needs: its span plus a day either side for interpolation."""
+    first = datetime.fromtimestamp(int(starts_us[0]) / 1e6 - 86400, tz=UTC).date()
+    last = datetime.fromtimestamp(int(starts_us[-1]) / 1e6 + SLOT_SECONDS + 86400, tz=UTC).date()
+    return month_range(first, last)
+
+
+def _fuse_station(
+    station: StationSeries,
+    *,
+    config: ClimateConfig,
+    starts_us: np.ndarray,
+    t_out: np.ndarray,
+    t_out_valid: np.ndarray,
+    t_out_debiased: np.ndarray,
+    solar: np.ndarray,
+    day_season: np.ndarray,
+    day_of_slot: np.ndarray,
+) -> Fusion:
+    """Fit the offset model on the fit seasons, then smooth over the whole grid."""
+    cfg = config.signals.t_out_fused
+    reference = reference_at_slots(
+        station.times_us, station.temp_c, starts_us + SLOT_US // 2, cfg.max_ref_gap_hours
+    )
+    observed = t_out_valid & (solar < cfg.dark_solar_max)
+    y = offset_observations(t_out, reference, observed)
+    fit_days = np.isin(day_season, list(cfg.fit_seasons))
+    y_fit = np.where(fit_days[day_of_slot], y, np.nan)  # held-out slots never reach the fit
+    try:
+        fit = fit_offset_model(y_fit)
+    except ValueError as exc:
+        raise ClimateDataError(f"the outdoor offset model cannot be fitted: {exc}") from exc
+    fused, sd = fuse(reference, y, fit.params)
+    known = np.isfinite(fused)
+    return Fusion(
+        reference=reference,
+        fused=np.where(known, fused, t_out_debiased),
+        sd=np.where(known, sd, np.nan),
+        from_reference=known,
+        params=fit.params,
+        n_fit_obs=fit.n_obs,
+        observed=np.isfinite(y),
+        station_sha256=station.manifest_sha256,
+    )
+
+
 _ROOM_COLUMNS = tuple(
     c for r in ROOMS for c in (f"room_{r}_temp_mean_c", f"room_{r}_setpoint_mean_c")
 )
@@ -515,8 +638,13 @@ def build_climate_data(
     prices: np.ndarray | None = None,
     feature_set_id: str = "",
     dataset_id: str | None = None,
+    station: StationSeries | None = None,
 ) -> ClimateData:
-    """Derive the climate signals from a feature table (and prices on the same grid)."""
+    """Derive the climate signals from a feature table (and prices on the same grid).
+
+    With a *station* series the fused outdoor temperature is built too; ``signals.t_out_source``
+    then picks the series the ``outdoor_unknown`` filter and ``t_out_model`` follow.
+    """
     _require(table, REQUIRED_COLUMNS)
     tz = ZoneInfo(config.timezone)
     n = table.num_rows
@@ -592,6 +720,27 @@ def build_climate_data(
         max_gap_slots=int(sig.t_out_debias.max_gap_hours * 60 // step_min),
     )
 
+    solar = solar_proxy(starts_us + SLOT_US // 2, site.latitude, site.longitude)
+    fusion = None
+    if station is not None:
+        fusion = _fuse_station(
+            station,
+            config=config,
+            starts_us=starts_us,
+            t_out=t_out,
+            t_out_valid=t_out_valid,
+            t_out_debiased=t_out_debiased,
+            solar=solar,
+            day_season=day_season,
+            day_of_slot=day_of_slot,
+        )
+    elif sig.t_out_source == "fused":
+        raise ClimateDataError(
+            "signals.t_out_source is 'fused' but there is no station series "
+            "(set reference_station in the site file and fetch it)"
+        )
+    t_out_model = fusion.fused if sig.t_out_source == "fused" else t_out_debiased
+
     # --- training filters (True = drop the slot) ----------------------------------------------
     flt = config.filters
     required = [
@@ -604,9 +753,7 @@ def build_climate_data(
     unknown = ~np.logical_and.reduce(required) if flt.drop_unknown_quality else np.zeros(n, bool)
     # kept apart from unknown_quality: a long compressor run leaves T_out unknown by design, and
     # diagnostics that do not need T_out must not inherit that
-    outdoor_unknown = (
-        ~np.isfinite(t_out_debiased) if flt.drop_unknown_quality else np.zeros(n, bool)
-    )
+    outdoor_unknown = ~np.isfinite(t_out_model) if flt.drop_unknown_quality else np.zeros(n, bool)
 
     window_open = np.zeros(n, dtype=bool)
     k = flt.window_open.slots
@@ -677,13 +824,15 @@ def build_climate_data(
         dhw=dhw,
         cooling=cooling,
         valve_open_inferred=valve_open,
-        solar=solar_proxy(starts_us + SLOT_US // 2, site.latitude, site.longitude),
+        solar=solar,
         price=price,
         u=u,
         u_reason=u_reason,
         drop=drop,
         train=train,
         columns={name: col(name) for name in dict.fromkeys(_KEPT_COLUMNS)},
+        t_out_source=sig.t_out_source,
+        fusion=fusion,
     )
 
 
@@ -699,6 +848,8 @@ def load_climate_data(
 
     The feature table and the dataset are verified through their manifests.  *site* defaults to
     ``<data_dir>/climate/site.yaml``.  Without a *dataset* there are no prices, so no ``u``.
+    A site with a ``reference_station`` loads that station's stored months (verified through
+    their manifests) and builds the fused outdoor series.
     """
     root = resolve_data_dir(data_dir)
     base = root / "analysis" / "v1" / FEATURES_DIRNAME
@@ -725,6 +876,13 @@ def load_climate_data(
                 f"the dataset's time zone {tz_local!r} differs from the config's "
                 f"{config.timezone!r}"
             )
+    series = None
+    if site.reference_station is not None:
+        starts_us = table.column("interval_start").cast(pa.int64()).to_numpy()
+        try:
+            series = load_station(root, site.reference_station, station_months(starts_us))
+        except StationError as exc:
+            raise ClimateDataError(str(exc)) from exc
     return build_climate_data(
         table,
         config=config,
@@ -732,4 +890,5 @@ def load_climate_data(
         prices=prices,
         feature_set_id=str(manifest.get("feature_set_id") or matches[0].name),
         dataset_id=dataset_id,
+        station=series,
     )

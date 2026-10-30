@@ -59,6 +59,18 @@ no OMIE prices; run `extract --source omie` against the copy before anything tha
 `<data dir>/climate/site.yaml` (`latitude`, `longitude`, optional `phi`, the always-open valve share).
 It is private, stays in the data dir and is never committed; `pull-store` does not touch it.
 
+The file may also hold `reference_station`, the quoted 5-digit WMO id of the AEMET station used as the
+independent outdoor-temperature reference (`reference_station: "<5-digit WMO id>"`). The choice
+reveals the site's area, so it lives only in this private file, never in the repository. The station's
+hourly SYNOP reports are fetched with `hack/climate_station.py fetch` into
+`<data dir>/climate/station/<WMO>/raw/` (one immutable file and manifest per month). Without the key
+the climate loader behaves as before and `signals.t_out_source: fused` is refused. See
+[Fused outdoor temperature](architecture.md#fused-outdoor-temperature-stationpy-toutpy).
+
+*Attribution:* the station data is "Fuente: AEMET (via Ogimet)": AEMET's synoptic observations,
+served by Ogimet (<https://www.ogimet.com/cgi-bin/getsynop>). Ogimet's terms are not known, so fetches
+are monthly, at least 5 s apart and never repeated for a stored month.
+
 **Code identity without git (container images).** Lineage records the commit via
 `git rev-parse HEAD`. Where git is unavailable, set `BATTERY_OPTIMIZER_GIT_SHA` at build time to a
 40-character lowercase commit SHA (optionally suffixed `-dirty`); it is used only when git cannot

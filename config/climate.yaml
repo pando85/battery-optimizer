@@ -50,6 +50,15 @@ signals:
   t_out_debias: # the Aquarea outdoor sensor reads 1.5 to 2.5 K low while the compressor runs
     min_off_minutes: 30 # a slot is a valid reading once the compressor has been off this long
     max_gap_hours: 6.0 # a longer run is not interpolated: unknown (chosen from the data, see PR)
+  # Which outdoor series the models read: the debiased house sensor, or the station reference fused
+  # with it (needs `reference_station` in the private site file). Switched in a separate commit,
+  # only after the held-out leave-block-out comparison (docs/architecture.md, "Fused outdoor
+  # temperature").
+  t_out_source: debiased
+  t_out_fused: # Kalman-smoothed offset between the house sensor and the station reference
+    max_ref_gap_hours: 3.0 # station gaps up to this long are bridged; longer ones: no reference
+    dark_solar_max: 0.05 # offset observed only where the clear-sky proxy is below this
+    fit_seasons: [S1, S2] # the offset model is fitted on these seasons only, never on S3
 
 # --- training filters -----------------------------------------------------------------------------
 filters:

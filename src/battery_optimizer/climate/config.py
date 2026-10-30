@@ -268,6 +268,14 @@ SCHEMA: Spec = section(
                     {"min_off_minutes": integer(15, 240), "max_gap_hours": num(0.25, 48.0)}
                 ),
                 "counter_check": section({"min_daily_kwh": _POSITIVE}),
+                "t_out_source": text("debiased", "fused"),
+                "t_out_fused": section(
+                    {
+                        "max_ref_gap_hours": num(0.25, 12.0),
+                        "dark_solar_max": num(0.0, 0.5),
+                        "fit_seasons": seq(text("S1", "S2", "S3"), min_len=1, unique=True),
+                    }
+                ),
             }
         ),
         "filters": section(
@@ -415,6 +423,8 @@ def _cross_checks(cfg: Section) -> None:
         raise _fail("signals.t_out_debias.min_off_minutes", "must be a whole number of slots")
     if cfg.filters.valves_shut.min_rooms_at_setpoint > len(comfort.rooms):
         raise _fail("filters.valves_shut", "min_rooms_at_setpoint exceeds the comfort rooms")
+    if "S3" in cfg.signals.t_out_fused.fit_seasons:
+        raise _fail("signals.t_out_fused.fit_seasons", "must not include the held-out season S3")
     seasons = [cfg.seasons[name] for name in ("S1", "S2", "S3")]
     for name, s in zip(("S1", "S2", "S3"), seasons, strict=True):
         if s.start > s.end:
