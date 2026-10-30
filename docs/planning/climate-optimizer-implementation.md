@@ -1,6 +1,6 @@
 # Climate optimizer: shared-runtime architecture and phased implementation plan
 
-- **Status:** Proposed (documentation only; no application change or permission to actuate). Amended 2026-10-30 with the plant topology, data audit, the C2 design and its predeclared gate
+- **Status:** Proposed (documentation only; no application change or permission to actuate). Amended 2026-10-30 with the plant topology, data audit, the C2 design and its predeclared gate, and the C2 outcome (UNDETERMINED, no-go)
 - **Date:** 2026-10-30
 - **Architecture decision:** [ADR-0005](../adr/0005-shared-energy-planning-climate.md)
 - **Repository ownership:** `pando85/battery-optimizer` for models, planning, history and evaluations; [`pando85/homelab`](https://github.com/pando85/homelab) for AppDaemon controls, HA entities, GitOps, manifests and deployment
@@ -285,9 +285,15 @@ Forecast interfaces should carry UTC slot IDs, kWh, quality and model/plan versi
 | **C6 — Demand forecast exchange** | battery-optimizer | Expose committed climate electric load to the battery forecaster; validate residual and historical reconciliation | No double counting; battery shadow savings/forecast regret improve on matched windows; no battery writes |
 | **C7 — Optional evolution** | both, new ADR as needed | Per-room refinements beyond C2, DHW optimization refinements, [flow-temperature calibration and optimization (C7-F)](climate-flow-calibration-optimization.md), setpoint-offset lever (needs a writer), cooling (needs humidity sources and a dew-point constraint), joint MPC, AppDaemon retirement | Separate evidence and safety/comfort decision per addition; C7-F has its own gate and must not invalidate the predeclared C2 heat-v1 gate |
 
-**Flow-temperature extension (C7-F):** [Dedicated calibration and guarded modulation plan](climate-flow-calibration-optimization.md) adds control-surface verification (F0), passive coverage (F1), supervised identification (F2), flow-response/COP model validation (F3), incremental offline/shadow evaluation (F4), separately approved actuation (F5), and drift monitoring (F6). F0/F1 may start immediately; automatic setpoint changes require explicit single-writer safety approval. C7-F is optional and must neither delay nor rewrite C2/C3/C5 acceptance; if native Panasonic weather compensation proves sufficient, do not add a flow writer.
+**Flow-temperature extension (C7-F):** [Dedicated calibration and guarded modulation plan](climate-flow-calibration-optimization.md) adds control-surface verification (F0), passive coverage (F1), supervised identification (F2), flow-response/COP model validation (F3), incremental offline/shadow evaluation (F4), separately approved actuation (F5), and drift monitoring (F6). F0, F1 and F3 do not depend on C2; F4 compares against the historical legacy baseline and native compensation (plus any later accepted permission policy) under its own preregistered gate. Automatic setpoint changes require explicit single-writer safety approval. C7-F is optional and must neither delay nor rewrite C2/C3/C5 acceptance or reuse the C2 heat-v1 gate; if native Panasonic weather compensation proves sufficient, do not add a flow writer.
 
-**Ordering:** C0 can begin independently in `homelab`; C1a and C2 come first and can run while legacy heating stays active. C1b and C3–C5 start only if the C2 gate passes. C3–C4 must precede any C5 actuation. C6 can start read-only before C5 but must distinguish hypothetical shadow schedules from committed ones. The battery Phase D commissioning/authorization is **independent** of C5. No timeline, energy savings percentage or thermal parameter is assumed.
+**Ordering:** C0 can begin independently in `homelab`; C1a and C2 came first and ran while legacy heating stayed active. C2 ended UNDETERMINED after its one predeclared iteration, which counts as no-go (see the [outcome](#c2-model-iteration-the-one-predeclared-iteration-config-version-2)): C1b and C3–C5 do not start as specified, and the C2 gate and its preregistration stay as committed. If a permission policy is ever accepted later, C3–C4 must still precede any C5 actuation. C6 can start read-only before C5 but must distinguish hypothetical shadow schedules from committed ones. The battery Phase D commissioning/authorization is **independent** of C5. No timeline, energy savings percentage or thermal parameter is assumed.
+
+**Next steps after the C2 outcome:**
+
+1. A model-free empirical analysis of the `min_hours` lever, the 10 h vs 15 h comfort and cost observed in 2025–26 (in progress offline).
+2. The C7-F F0 control-surface audit and F1 coverage report, which can start now.
+3. Any live trial of a changed heating rule needs its own design, agreed with the owner before any homelab change. **Proposed, not decided.**
 
 ### C0 scope (agreed after the owner's review)
 
@@ -451,9 +457,9 @@ figures stay in the private model directory.
 - **homelab — C0:** the agreed scope above (disable restores the heat mode, HA watchdog, retry re-check, nine-option mode map, numeric template sensors). Preserve current schedules by default.
 - **battery-optimizer — C1a:** offline extraction and a separate climate feature set from the existing Prometheus archive; model input audits for room, tank and HVAC electric/thermal power.
 - **battery-optimizer — C2:** offline first-order and two-state thermal models, COP fitted on electricity, test fixtures and the dual-objective gate, in the five PRs above; no runtime configuration or actuator.
-- **battery-optimizer — C3 (after the gate):** opt-in shadow planning and `GET /climate/plan`; prove battery shadow behavior unaffected.
-- **homelab — C4/C5:** explicit read-only plan consumption then a separately approved, reversible controlled heating rollout.
-- **future C7-F (parallel F0/F1 now, optional control later):** [flow-temperature coverage and identification plan](climate-flow-calibration-optimization.md); isolate its held-out models and safety gate from the predeclared C2 permission-only decision.
+- **battery-optimizer — C3 (only after a passed gate; not started, C2 was UNDETERMINED):** opt-in shadow planning and `GET /climate/plan`; prove battery shadow behavior unaffected.
+- **homelab — C4/C5 (same condition):** explicit read-only plan consumption then a separately approved, reversible controlled heating rollout.
+- **now, see the next steps in the ordering above:** the `min_hours` analysis, then C7-F F0/F1 ([flow-temperature coverage and identification plan](climate-flow-calibration-optimization.md)), keeping its held-out models and safety gate separate from the predeclared C2 permission-only decision. A live heating-rule trial is proposed only.
 
 ## 7. Validation, metrics and non-negotiable safety
 
