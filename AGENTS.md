@@ -28,7 +28,8 @@ just release           # cut a release (see the release skill)
 
 - `src/battery_optimizer/`: the package and the `battery-optimizer` CLI (`cli.py`).
 - `tests/`: pytest suite; `hack/`: one-off analysis scripts; `config/tariff.yaml`: tariff config.
-- `docs/adr/`: architecture decision records; `docs/planning/`: plans and progress notes.
+- `docs/adr/`: architecture decision records; `docs/planning/`: plans and progress notes;
+  `docs/components/`: per-component calibration records and the regime log.
 - `.ci/`, `Dockerfile`, `.github/`: release script, image, workflows.
 
 ## Rules
@@ -45,6 +46,9 @@ just release           # cut a release (see the release skill)
 - Never edit `CHANGELOG.md` by hand and never create tags: `just release` and CI do it.
   Read `.opencode/skills/release/SKILL.md` before any release work.
 - Behavioral changes need tests. Keep the smallest correct diff.
+- Component records: a PR that changes a component's behaviour or calibration, or reflects a plant or
+  control change, updates its page in `docs/components/` and the regime log, then either runs the page's
+  recalibration or marks the dependent components `stale` (see `docs/components/README.md`).
 
 ## Privacy and safety
 

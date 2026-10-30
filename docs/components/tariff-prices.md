@@ -1,0 +1,57 @@
+# Tariff and prices (PVPC 2.0TD, price outlook)
+
+## Purpose and owner
+
+The price of each slot and the tariff terms around it. Owner: this repository (`config/tariff.yaml`,
+`config.py`, `cost.py`, `service/pvpc.py`, `price_outlook.py`, `omie_outlook.py`). The price source is the
+Home Assistant PVPC sensor, fed by the homelab deployment. Roadmap: [Price Outlook](../planning/components/price-outlook.md).
+
+## Interfaces
+
+- **In:** the archived realised PVPC per hour (EUR/kWh, tolls and charges included, **taxes excluded**),
+  published next-day prices from about 20:15 local, optionally OMIE day-ahead for an estimate at 14:00.
+- **Out:** `price_eur_per_kwh` per slot with `price_quality`; tariff period labels; the pre-tax cost basis.
+- **Consumers:** [battery-optimizer](battery-optimizer.md), [boost-mode](boost-mode.md) (its threshold must
+  use the same pre-tax basis), and every `dataset_id` (the tariff file is hashed into it).
+
+## Calibrated on
+
+- Realised PVPC from 2024-01-01 to 2026-10-01: about 98.8% of intervals measured, the rest ambiguous,
+  forward-filled or missing and masked as unusable (dataset `cdd448abb006`).
+- Period rules (weekday: valle 00 to 08, then 08 to 10, 10 to 14, 14 to 18, 18 to 22, 22 to 24; Saturday
+  and Sunday all valle) are **labels only**: no result takes its price from the YAML.
+- Price outlooks evaluated on the legacy history: `exact`, `published_only`, `persistence`, and the OMIE
+  `omie_period` estimate, which passed its gate GC ([plan](../planning/price-outlook-improvement-plan.md)).
+
+## Assumptions
+
+- **Taxes unconfirmed** (`iee_pct`, `iva_pct` are null): every reported figure is pre-tax and
+  `effective_prices` refuses the taxed basis. A uniform tax factor would not change the argmin.
+- **Holidays missing** (`holidays: []`): national and regional holidays are treated as weekdays, which
+  overstates the peak share.
+- Published equals realised price (owner-asserted, not verified); no export credit, no standing or power
+  charges are modelled.
+- The service never forecasts unpublished prices; its horizon ends at the last published slot.
+
+## Invalidated when
+
+- The supply contract or tariff changes (not 2.0TD, new period hours, different pass-through).
+- Taxes are confirmed (reported figures change basis) or a non-uniform term (standing or power charge) is
+  added to the objective.
+- Holidays are populated (period labels and `dataset_id` change); any other edit of `config/tariff.yaml`.
+- The PVPC sensor source or definition changes; the REE publication time moves; OMIE access changes.
+
+## Recalibrate by
+
+1. Read taxes from a verified invoice, fill `taxes` (with `valid_from` and source) and `holidays`
+   (national plus the regional subdivision, as the `holidays` package lists them) in `config/tariff.yaml`.
+2. Rebuild: `uv run battery-optimizer build ...`, record the supersession of the previous `dataset_id`
+   ([progress](../planning/energy-baseline-progress.md)), then re-run `benchmark` ([benchmark](../benchmark.md)).
+3. Acceptance: taxed cost no longer raises `TaxesUnconfirmedError`; the policies' argmin is unchanged for a
+   uniform factor; on a sampled holiday the slots take the Sunday period. For the outlook, re-run
+   `price-eval` before trusting `omie_period` after any OMIE or publication change.
+
+## Status
+
+**provisional** (2026-10-30): taxes unconfirmed and holidays missing; both change reported figures, not
+the dispatch ranking.
