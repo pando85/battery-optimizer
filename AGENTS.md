@@ -4,6 +4,11 @@ Python toolkit for household battery optimisation: Prometheus / Home Assistant e
 build and battery MPC benchmarks. This file is the entry point for coding agents. Detailed workflows
 live in `.opencode/skills/` (also exposed to Claude Code through the `.claude/skills` symlink).
 
+The GitHub repository is `pando85/home-energy-optimizer` (created as `pando85/battery-optimizer`).
+The distribution, `battery_optimizer` package, `battery-optimizer` CLI, `BATTERY_OPTIMIZER_*`
+variables, metrics and the `ghcr.io/pando85/battery-optimizer` image keep the old name until the
+staged rename in `docs/planning/climate-optimizer-implementation.md`.
+
 ## Essential commands
 
 Recipes live in the `justfile` ([just](https://just.systems/)). Local uv may be stale: run

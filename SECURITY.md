@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please use GitHub private vulnerability reporting:
-<https://github.com/pando85/battery-optimizer/security/advisories/new>
+<https://github.com/pando85/home-energy-optimizer/security/advisories/new>
 
 Do not open a public issue for a vulnerability. You can expect an acknowledgement within a few
 days. Only the latest release is supported.

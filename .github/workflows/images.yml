@@ -16,7 +16,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  IMAGE: ghcr.io/${{ github.repository }}
+  # Not ghcr.io/${{ github.repository }}: the repository was renamed to home-energy-optimizer, but
+  # the image keeps its name until the staged OCI rename (homelab pins it by digest).
+  IMAGE: ghcr.io/pando85/battery-optimizer
 
 jobs:
   # Pull requests: build (amd64, not pushed) and smoke-test.

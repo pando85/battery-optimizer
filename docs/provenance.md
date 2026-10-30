@@ -1,6 +1,6 @@
 # Provenance of the homelab extraction
 
-This repository (`pando85/battery-optimizer`) began life as the `scripts/energy-baseline/` Python package
+This repository (`pando85/home-energy-optimizer`, created as `pando85/battery-optimizer`) began life as the `scripts/energy-baseline/` Python package
 inside [`pando85/homelab`](https://github.com/pando85/homelab). This page records exactly what was moved,
 what changed, how to relate old identities to new ones, and what could not be preserved.
 
