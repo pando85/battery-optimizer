@@ -32,10 +32,15 @@ Home Assistant PVPC sensor, fed by the homelab deployment. Roadmap: [Price Outlo
 - Published equals realised price (owner-asserted, not verified); no export credit, no standing or power
   charges are modelled.
 - The service never forecasts unpublished prices; its horizon ends at the last published slot.
+- **Hard constraint (owner-confirmed 2026-10-30):** the 5.0 kW contracted import limit is enforced by the
+  smart meter, which cuts supply on overload, and this has happened. It is not a cost term and must not be
+  traded against price. Whether the trip is on the 15-minute average or on sustained instantaneous load
+  is still unverified; until it is, treat the model's averaged constraint as insufficient.
 
 ## Invalidated when
 
-- The supply contract or tariff changes (not 2.0TD, new period hours, different pass-through).
+- The supply contract or tariff changes (not 2.0TD, new period hours, different pass-through), or the
+  contracted power changes (the meter cut-off moves with it).
 - Taxes are confirmed (reported figures change basis) or a non-uniform term (standing or power charge) is
   added to the objective.
 - Holidays are populated (period labels and `dataset_id` change); any other edit of `config/tariff.yaml`.

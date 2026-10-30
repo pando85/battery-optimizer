@@ -30,10 +30,14 @@ by this optimizer, under a separate ADR; the shadow phase has no writer.
 ## Assumptions
 
 - Load is exogenous. The decoupled design keeps the objective unchanged; only price-driven heat-pump
-  planning and a joint MPC are dropped (ADR-0006).
+  planning and a joint MPC are dropped ([ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md)).
 - The horizon ends at the last published price slot; there is no unpublished-price forecast live.
-- Charge is limited only through forecast load (`charge <= limit * h - forecast load`); load that is not
-  in the forecast (boost, hot-water booster) is invisible to that constraint.
+- **Hard constraint (owner-confirmed 2026-10-30):** the 5.0 kW import limit is enforced by the smart
+  meter, which cuts supply on overload; this has happened. A trip is a safety and availability failure,
+  never an acceptable cost trade-off.
+- Charge is limited only through forecast load (`charge <= limit * h - forecast load`) on a 15-minute
+  average with no margin; load that is not in the forecast (boost, hot-water booster) is invisible to that
+  constraint. At go-live the real-time grid-target cap below the limit is therefore **required**, not optional.
 - Throughput cost 0.0, so marginal cycles that merely clear the 0.80 round trip are taken
   (about 1.2 equivalent full cycles per winter day in the replay).
 - Omnibattery's own price features will be off, so this is the only battery price reactor.
@@ -45,6 +49,8 @@ by this optimizer, under a separate ADR; the shadow phase has no writer.
 - The load forecast changes regime (comfort schedule, boost): re-check floor-hit share and clipping.
 - At go-live: measured SOC replaces simulated SOC; the charge adapter caps the grid target below the
   import limit; a second price-reactive writer appears.
+- The contracted power or the meter's trip behaviour changes, or a meter cut-off happens with the battery
+  charging (treat as a failed acceptance and review the margin).
 
 ## Recalibrate by
 

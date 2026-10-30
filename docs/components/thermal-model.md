@@ -5,7 +5,7 @@
 Predicts room temperature from delivered heat and outdoor temperature (model A, first order; model B,
 air plus slab) and the heat response to a heating permission, to plan heating against price. Owner: this
 repository (`climate/thermal.py`, `plant.py`, `fit.py`, the `climate-fit` command). Its price-driven use
-was dropped by the decoupling decision (ADR-0006); what remains is diagnostic and, possibly, warm-up-rate
+was dropped by the decoupling decision ([ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md)); what remains is diagnostic and, possibly, warm-up-rate
 learning for optimum start.
 
 ## Interfaces

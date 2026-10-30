@@ -36,7 +36,7 @@ Not fitted: the rules and `min_hours` were chosen by the owner. What exists is t
 - The pump runs a fixed direct water target; the stored heating curve is inactive
   ([C7-F](../planning/climate-flow-calibration-optimization.md)).
 - Setpoints are manual and high enough that comfort-room valves stay open.
-- The comfort schedule (ADR-0006: hall-kitchen at least 23.5 degC from 12:00 on weekdays and from 09:00
+- The comfort schedule ([ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md): hall-kitchen at least 23.5 degC from 12:00 on weekdays and from 09:00
   at weekends, all rooms at least 21 degC) can be met by optimum start with the fewest kWh. Untested:
   the schedule shape was never replayed.
 

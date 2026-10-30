@@ -8,8 +8,7 @@ roadmaps stay in [`planning/components/`](../planning/components/) and the archi
 [architecture](../architecture.md#planning-components).
 
 The reason in one sentence: the battery optimizer was validated on load that contains the legacy
-cheapest-hours heat-pump behaviour, so once the heat pump runs a comfort schedule (see ADR-0006 in
-[`adr/`](../adr/)) every result that depends on that load is stale until it is recalibrated.
+cheapest-hours heat-pump behaviour, so once the heat pump runs a comfort schedule (see [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md)) every result that depends on that load is stale until it is recalibrated.
 
 ## How to use these pages
 
@@ -98,7 +97,7 @@ flowchart LR
 |---|---|---|---|
 | [data-pipeline](data-pipeline.md) | valid until battery go-live | 2026-10-30 | Net grid is stored as gross while no battery telemetry is registered; blocks post-commissioning data |
 | [outdoor-temperature](outdoor-temperature.md) | valid | 2026-10-30 | Debiased house sensor, fused series only fills long gaps |
-| [heat-pump-controller](heat-pump-controller.md) | valid (legacy), being replaced | 2026-10-30 | Cheapest-hours rule is live; comfort schedule is next (ADR-0006) |
+| [heat-pump-controller](heat-pump-controller.md) | valid (legacy), being replaced | 2026-10-30 | Cheapest-hours rule is live; comfort schedule is next ([ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md)) |
 | [cop-model](cop-model.md) | provisional | 2026-10-30 | Daily error passes, season error fails; trained on 26 to 28 degC water only |
 | [thermal-model](thermal-model.md) | parked | 2026-10-30 | C2 UNDETERMINED, no model accepted |
 | [hp-consumption-forecast](hp-consumption-forecast.md) | planned (LF-1 stale on rule retirement) | 2026-10-30 | Interface specified, not built; LF-1 replays the legacy rule |

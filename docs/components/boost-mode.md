@@ -4,7 +4,7 @@
 
 In very cheap hours, heat the slab and the hot-water tank beyond the comfort need (a thermal soak), as the
 only price-reactive behaviour left on the heat-pump side. Rare in winter, frequent in April to October on
-weekends around midday. Decided in ADR-0006 (in [`adr/`](../adr/)); **owner: the homelab repository**
+weekends around midday. Decided in [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md); **owner: the homelab repository**
 (AppDaemon), with the battery side read-only. Not built.
 
 ## Interfaces

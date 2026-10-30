@@ -30,7 +30,7 @@ is no telemetry. Confirmed from specification or contract: capacity 5.12 kWh nam
 | Initial SOC | 0.20 | Floor, so no free stored energy |
 | Idle draw | 0, not modelled | `battery.py`; unmeasured |
 | Wear / throughput cost | 0.0 EUR/kWh | Roadmap keeps 0 until substantiated; **not sensible for a live planner** |
-| Import limit | 5.0 kW, 15-minute average, no margin | Contract; whether enforcement is the 15-minute average or an instantaneous trip is unverified |
+| Import limit | 5.0 kW, 15-minute average, no margin | Contract; enforced by the smart meter, which cuts supply on overload (owner-confirmed 2026-10-30, has happened); whether it trips on the 15-minute average or on instantaneous load is unverified |
 | Export | none, no credit | Invariant of the kernel; no PV |
 
 Evidence: [`config/tariff.yaml`](../../config/tariff.yaml), [benchmark](../benchmark.md), [ADR-0001](../adr/0001-home-battery-economic-dispatch.md).

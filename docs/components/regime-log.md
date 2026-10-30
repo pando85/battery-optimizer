@@ -14,6 +14,7 @@ How the dates were derived (2026-10-30), so they can be re-checked:
   `DHW_RULE_VERSIONS`), which mirror the homelab commits named there.
 - **doc**: the [climate plan](../planning/climate-optimizer-implementation.md) and the homelab page
   `docs/user-guide/heat-pump-water-temperature.md` (audit of 2026-10-30).
+- **git**: the homelab commit history (read by the coordinator, commit ids named in the row).
 - **unverified**: no evidence in this repository; the entry says which bounds are known.
 
 Seasons are those of [`config/climate.yaml`](../../config/climate.yaml): S1 2023-11-08 to 2024-04-30,
@@ -39,9 +40,9 @@ S2 2024-10-01 to 2025-04-30, S3 2025-10-01 to 2026-04-30.
 | 2026-04-07/08 | `min_hours` 15 -> 10; rule disabled from 2026-04-08, enabled again 2026-04-22 (last day in the feature set: 2026-04-30) | data | heat-pump-controller |
 | 2026-04-28 | `climate_control@e734f5e9`: history window 10 -> 7 days with retries | code | heat-pump-controller |
 | 2026-09-05 | `climate_control@5af36d49` and `dhw_control@5af36d49`: negative prices accepted | code | heat-pump-controller |
-| 2026-10-xx | C0 AppDaemon fixes (homelab): the enable toggle cancels timers and restores the heat mode, a heartbeat watchdog restores it after 15 minutes, the price-retry loop re-checks the toggle, all nine heat modes map to `SetOperationMode`, numeric sensors for operating mode, defrost and 3-way valve. Legacy hour selection unchanged. **Merge and deploy date unverified** (homelab files last modified 2026-10-30) | doc | heat-pump-controller, data-pipeline |
+| 2026-10-30 | C0 AppDaemon fixes (homelab), committed and pushed to homelab master between about 16:37 and 16:45 +01:00 (commits `9566b7ad0` to `23611caa7`); ArgoCD deploys from GitHub, so deployed the same day: the enable toggle cancels timers and restores the heat mode, a heartbeat watchdog restores it after 15 minutes, the price-retry loop re-checks the toggle, all nine heat modes map to `SetOperationMode`, numeric sensors for operating mode, defrost and 3-way valve. Legacy hour selection unchanged. Date verified from homelab git | git | heat-pump-controller, data-pipeline |
 | 2026-10-30 | Template room-temperature sensors and `hass_climate_action` (real valve demand) start to exist; earlier demand must be inferred. Pump verified in direct mode, water target 26 degC, space heating off (hot water only) | doc | data-pipeline, thermal-model |
-| 2026-10-30 | Decoupled design agreed (ADR-0006): the heat pump does comfort with the fewest kWh and ignores price, the battery does price arbitrage | doc | all |
+| 2026-10-30 | Decoupled design agreed ([ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md)): the heat pump does comfort with the fewest kWh and ignores price, the battery does price arbitrage | doc | all |
 
 ## Planned (not yet real: dates to be filled in)
 

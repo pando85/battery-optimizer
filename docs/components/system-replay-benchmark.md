@@ -14,7 +14,7 @@ A against efficiency-first B) crossed with the simulated battery. Owner: this re
 - **Out:** private `report.json` / `report.md` and one benchmark run per scenario under
   `<store>/analysis/v1/system-sim/<run-id>/`; benchmark runs under the dataset. Relative figures only
   enter git ([system replay](../planning/system-replay.md), [benchmark](../benchmark.md)).
-- **Consumers:** the decisions in ADR-0003, ADR-0004 and ADR-0006; [battery-optimizer](battery-optimizer.md).
+- **Consumers:** the decisions in ADR-0003, ADR-0004 and [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md); [battery-optimizer](battery-optimizer.md).
 
 ## Calibrated on
 
