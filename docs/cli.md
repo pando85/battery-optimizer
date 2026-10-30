@@ -13,6 +13,7 @@ The modules that have no CLI surface are described in [Architecture](architectur
 | `build`        | **functional** | Build 15-min analysis dataset                  |
 | `build-features` | **functional** | Build the slot-aligned sub-load (or, with `--signal-set climate`, climate) feature table, apart from the canonical dataset |
 | `decompose-load` | **functional** | Private report: share of load and of LF-0 error per sub-load |
+| `climate-fit`  | **functional** | Private: fit and validate the climate thermal models and heat response per fold (C2) |
 | `forecast-eval` | **functional** | Pre-registered load-forecaster evaluation: accuracy and paired EUR against LF-0 |
 | `price-eval`   | **functional** | Pre-registered price-outlook evaluation: paired EUR against `exact` and `published_only` |
 | `benchmark`    | **functional** | Run policy benchmarks on a dataset             |
@@ -274,6 +275,37 @@ the residual, runs LF-0 (28-day trailing mean) on the main load and on every com
 common mask, and reports each component's error, its share of the error variance and its
 price-weighted error, overall and for the top price tercile. It also replays the AppDaemon climate
 and DHW rules on the day's prices to show how much heat-pump energy they explain.
+
+## `climate-fit`
+
+```bash
+uv run battery-optimizer climate-fit \
+  --feature-set <climate feature set id> \
+  --dataset ~/data/energy-baseline/analysis/v1/<dataset_id>
+```
+
+Fits the C2 thermal models (first-order A and slab + air B), their observers and heat responses
+and the compressor-starts model on every fold of [`config/climate.yaml`](../config/climate.yaml)
+(`--climate-config` to use another file), validates each fold on its test season and records the
+acceptance verdict of the [C2 design](planning/climate-optimizer-implementation.md#c2-design-and-predeclared-gate).
+It reads the climate feature set, the dataset's PVPC prices (for the replayed legacy permission `u`)
+and the private site file `<data_dir>/climate/site.yaml`; it writes nothing else and no runtime
+or actuator is touched.
+
+Output: `<data_dir>/analysis/v1/climate-models/<model_id>/` with `model.json` (parameters per fold
+and model, physical reading, fit diagnostics, observer, response, room offsets and starts model),
+`validation.json` (Q-driven and u-driven forecast errors, daily energy, the legacy replay's
+degree-hours, every acceptance criterion with its value and status, the A vs B selection) and
+`validation.md`. `model_id` is the SHA-256 of the feature-set id, the dataset id, the fold
+windows, the code version, the config hash and the site-file hash. The files are written
+atomically and never overwritten: the same id with different bytes is refused. The data dir must
+lie outside a git tree. The output holds private figures: it stays in the data dir.
+
+The command prints the directory and the verdict: `ACCEPTED` (with the criteria still pending, see
+below) or `UNDETERMINED` when no model passes. The legacy-replay electricity and cost criteria need
+the COP model and the policy simulator (C2 PRs 2 and 4) and are reported as `pending`; the
+model-iteration budget of the plan is never used by the command itself. See
+[Architecture](architecture.md#climate-subpackage-climate) for the method.
 
 ## `forecast-eval`
 

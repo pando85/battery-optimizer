@@ -69,6 +69,7 @@ __all__ = [
     "load_site",
     "room_offsets",
     "solar_proxy",
+    "steady_circulation",
 ]
 
 SLOT_SECONDS = 900
@@ -341,6 +342,24 @@ def room_offsets(
             if sel.any():
                 out[i, hour] = float(np.median(diff[sel]))
     return out
+
+
+def steady_circulation(
+    circulating: np.ndarray, min_minutes: float, step_minutes: float = 15.0
+) -> np.ndarray:
+    """Slots at least *min_minutes* into a circulation run, guaranteed at the slot's start.
+
+    A slot with ``k`` consecutive circulating slots before it has been running for at least
+    ``k * step_minutes`` when it begins (the run may have started earlier inside the first slot),
+    so it qualifies when ``k * step_minutes >= min_minutes``.
+    """
+    need = max(int(np.ceil(min_minutes / step_minutes)), 0)
+    steady = np.asarray(circulating, dtype=bool).copy()
+    for k in range(1, need + 1):
+        before = np.zeros(steady.size, dtype=bool)
+        before[k:] = circulating[:-k]
+        steady &= before
+    return steady
 
 
 def debias_outdoor(

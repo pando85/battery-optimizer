@@ -44,6 +44,7 @@ from battery_optimizer.climate.data import (  # noqa: E402
     ROOMS,
     ClimateData,
     load_climate_data,
+    steady_circulation,
 )
 from battery_optimizer.extract_prom import ENTITY_SPECS  # noqa: E402
 from battery_optimizer.features import (  # noqa: E402
@@ -276,24 +277,6 @@ def diagnostic_train(d: ClimateData) -> np.ndarray:
     use T_out must not lose the slots in which the compressor ran)."""
     drop = [v for k, v in d.drop.items() if k != "outdoor_unknown"]
     return ~np.logical_or.reduce(drop)
-
-
-def steady_circulation(
-    circulating: np.ndarray, min_minutes: float, step_minutes: float = 15.0
-) -> np.ndarray:
-    """Slots at least *min_minutes* into a circulation run, guaranteed at the slot's start.
-
-    A slot with ``k`` consecutive circulating slots before it has been running for at least
-    ``k * step_minutes`` when it begins (the run may have started earlier inside the first slot),
-    so it qualifies when ``k * step_minutes >= min_minutes``.
-    """
-    need = max(int(np.ceil(min_minutes / step_minutes)), 0)
-    steady = np.asarray(circulating, dtype=bool).copy()
-    for k in range(1, need + 1):
-        before = np.zeros(steady.size, dtype=bool)
-        before[k:] = circulating[:-k]
-        steady &= before
-    return steady
 
 
 def return_temperature_proxy(d: ClimateData, min_flow: float, min_minutes: float) -> dict[str, Any]:
