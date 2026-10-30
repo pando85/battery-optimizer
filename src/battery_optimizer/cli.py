@@ -293,6 +293,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--window-days", type=int, default=28, help="LF-0 trailing window in local days (28)"
     )
 
+    # -- climate-fit ------------------------------------------------------
+    p_cfit = subs.add_parser(
+        "climate-fit",
+        help="Private: fit and validate the thermal models and heat response per fold (C2)",
+    )
+    p_cfit.add_argument(
+        "--data-dir",
+        default=None,
+        help="Data directory (default: $BATTERY_OPTIMIZER_DATA_DIR or ~/data/energy-baseline)",
+    )
+    p_cfit.add_argument(
+        "--feature-set", required=True, help="Climate feature set id (or a unique id prefix)"
+    )
+    p_cfit.add_argument(
+        "--dataset", required=True, help="Canonical dataset directory (PVPC prices for u)"
+    )
+    p_cfit.add_argument(
+        "--climate-config",
+        default="config/climate.yaml",
+        help="Climate configuration (default: config/climate.yaml)",
+    )
+    p_cfit.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
+
     # -- forecast-eval ----------------------------------------------------
     _add_forecast_eval_parser(subs)
 
@@ -1110,6 +1133,25 @@ def cmd_decompose_load(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_climate_fit(args: argparse.Namespace) -> int:
+    """Fit, validate and write a climate model directory into the private data dir."""
+    from battery_optimizer.climate import fit
+
+    out = fit.run_climate_fit(
+        feature_set=args.feature_set,
+        dataset=args.dataset,
+        config_path=args.climate_config,
+        data_dir=args.data_dir,
+    )
+    selection = json.loads((out / "validation.json").read_text())["selection"]
+    print(f"climate-fit: model directory: {out}")
+    print(
+        f"climate-fit: verdict {selection['verdict']} "
+        f"(selected model: {selection['selected'] or 'none'})"
+    )
+    return 0
+
+
 def cmd_forecast_eval(args: argparse.Namespace) -> int:
     """Run a pre-registered load-forecaster evaluation into the private data dir."""
     from battery_optimizer import forecast_eval
@@ -1616,6 +1658,7 @@ _HANDLERS = {
     "build": cmd_build,
     "build-features": cmd_build_features,
     "decompose-load": cmd_decompose_load,
+    "climate-fit": cmd_climate_fit,
     "forecast-eval": cmd_forecast_eval,
     "price-eval": cmd_price_eval,
     "benchmark": cmd_benchmark,

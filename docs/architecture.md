@@ -102,8 +102,8 @@ These have no CLI surface (or `hack/` only), deliberately:
   never writes and is not a `build` input.
 - `replay_runtime.py` — replay-only asyncio dispatch runtime with a recording sink. No writer,
   no actuation, no HA adapter, no wall clock. See [Replay runtime](#replay-runtime-replay_runtimepy).
-- `climate/` — offline data layer and heat-pump electricity model of the climate optimizer (C2). See
-  [Climate subpackage](#climate-subpackage-climate).
+- `climate/` — offline data layer, heat-pump electricity model and thermal models of the climate
+  optimizer (C2). See [Climate subpackage](#climate-subpackage-climate).
 
 ## Dispatch intent contract (`dispatch.py`)
 
@@ -136,7 +136,8 @@ Demo: `python -m battery_optimizer.hack.replay_runtime_demo`. See module docstri
 
 ## Climate subpackage (`climate/`)
 
-**Status: C2 PR 1 — configuration, data loader and audit; no model, no runtime, no actuation.** The
+**Status: C2 PRs 1 to 3 — configuration, data loader, audit, heat-pump electricity (COP) model,
+thermal models, heat response and `climate-fit`; no policy, no runtime, no actuation.** The
 offline half of the [climate optimizer plan](planning/climate-optimizer-implementation.md#c2-design-and-predeclared-gate).
 It reads the climate feature set (`build-features --signal-set climate`) and the PVPC prices of a
 canonical dataset, and never writes into either.
@@ -161,6 +162,43 @@ canonical dataset, and never writes into either.
 - The site coordinates (and an optional always-open valve share `phi`) are read from
   `<data_dir>/climate/site.yaml` (`latitude`, `longitude`, optional `phi`). The file is private,
   never committed, and its hash is recorded with the data.
+- `thermal.py`: model A, first order (`C dT/dt = Q + UA (T_out - T) + q0 + g_s S`, with
+  `C = tau UA`), and model B, slab + air (`C_a`, `C_s`, coupling `k`), on the input
+  `[Q, T_out (de-biased), clear-sky proxy, 1]` per slot, discretised exactly under a zero-order
+  hold (`scipy.linalg.expm`, 900 s). A slot's reading is compared with the state at the end of the
+  slot. The fit is bounded simulation-error least squares over segments: runs of slots with known
+  inputs inside 48 h windows from local midnight, started from the measured air temperature of the
+  slot before; only slots the training filters keep are scored. B's initial slab temperature per
+  segment is projected out in closed form, and the return temperature in steady circulation
+  (`data.steady_circulation`) is its second measurement `T_s + b_ret`, weighted by its own residual
+  scale after a first pass. A parameter on a bound of its search box (the envelope where it has
+  one), B's `tau = (C_a + C_s) / UA` outside the envelope, or a relative standard error above 0.5
+  from the Jacobian at the optimum (not identifiable) fails the fit. A steady-state Kalman filter
+  (`solve_discrete_are`, thermostat noise 0.05 K, process noise from the training one-step errors)
+  gives the state at forecast origins; across a slot whose outdoor temperature is unknown but whose
+  heat is known it carries on with the measured air temperature (B's slab equation needs only `Q`
+  and `T_a`), otherwise it restarts.
+- `plant.py`: the heat response to the permission `u` (A: `c0 + c1 (T_ref - T_out) + c2
+  first_hour_of_block`; B: `clip(H_e (T_flow_target - T_s), 0, Q_max(T_out))` with the measured
+  flow target, since the site has no heating curve), both times `u (1 - dhw)` and the valve cap
+  `phi + (1 - phi) open` (`open`: share of comfort rooms below setpoint minus
+  `model.response.plant_valve_cap_margin_k`, room temperature = `T_air` + the room's hour offset);
+  the closed-loop u-driven simulation; the starts model
+  `starts/day = alpha blocks + beta hours_on + gamma hours_on T_out`.
+- `fit.py` and the `climate-fit` command ([CLI](cli.md#climate-fit)): per fold, room offsets,
+  thermal fits, observers, responses (permitted non-DHW training slots, measured valve cap; B
+  reads the observer's slab state) and the starts model use only the fold's training days (training
+  seasons, fit months), so nothing held out leaks. Validation on the test season's gate months:
+  forecasts from 00/06/12/18 local, 24 h open loop, Q-driven and u-driven, RMSE and bias at 1, 6,
+  12 and 24 h against persistence and diurnal persistence on common pairs, stopping at the first
+  unknown input; u-driven daily thermal energy from each day's 00 origin (MAPE on days above
+  1 kWh, season and `min_hours`-regime bias); the legacy replay's degree-hours below 22 °C over
+  episodes of consecutive simulable days; the starts model on measured hours. Acceptance on the
+  fold that tests S3, each criterion with value and status (the legacy-replay electricity and cost
+  criteria are `pending` until the COP model and the simulator exist; fold stability is
+  `|a - b| / min(|a|, |b|)` over the thermal parameters except `b_ret`), selection (B only if it
+  beats A by 10% Q-driven RMSE at 12 h and 24 h; an accepted model only) and the verdict ACCEPTED
+  or UNDETERMINED.
 - `hack/climate_audit.py` (read-only) writes `report.json` and `report.md` into
   `<data_dir>/analysis/v1/climate-audit/<feature set>-<config>[-name]/`: thermostat resolution, gaps,
   counter quantization, the return temperature as a slab proxy, the heating curve, the legacy-mask
