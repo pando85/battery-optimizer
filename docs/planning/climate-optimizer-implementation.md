@@ -1,6 +1,6 @@
 # Climate optimizer: shared-runtime architecture and phased implementation plan
 
-- **Status:** Proposed (documentation only; no application change or permission to actuate). Amended 2026-10-30 with the plant topology, data audit and the C2 economic gate
+- **Status:** Proposed (documentation only; no application change or permission to actuate). Amended 2026-10-30 with the plant topology, data audit, the C2 design and its predeclared gate
 - **Date:** 2026-10-30
 - **Architecture decision:** [ADR-0005](../adr/0005-shared-energy-planning-climate.md)
 - **Repository ownership:** `pando85/battery-optimizer` for models, planning, history and evaluations; [`pando85/homelab`](https://github.com/pando85/homelab) for AppDaemon controls, HA entities, GitOps, manifests and deployment
@@ -160,7 +160,7 @@ T_air[t+1]  = T_air[t]  + dt/C_air  * (k*(T_slab[t]-T_air[t]) - UA*(T_air[t]-T_o
 T_slab[t+1] = T_slab[t] + dt/C_slab * (Q_heat[t] - k*(T_slab[t]-T_air[t]))
 ~~~
 
-C2 compares both on held-out data; the two-state model is not deferred. Learn/estimate `UA` (heat-loss coefficient), `C` (effective capacity/time constant) and bounded passive gain from filtered heating/coasting intervals. Distinguish heat delivered by the machine from electricity consumed; COP is a function of ambient/flow temperature and operating conditions, not a universal constant. Compare a simple temperature-conditioned COP baseline with a fitted model, rejecting implausible values.
+C2 compares both on held-out data (see [C2 design](#c2-design-and-predeclared-gate)); the two-state model is not deferred. Learn/estimate `UA` (heat-loss coefficient), `C` (effective capacity/time constant) and bounded passive gain from filtered heating/coasting intervals. Distinguish heat delivered by the machine from electricity consumed; COP is a function of ambient/flow temperature and operating conditions, not a universal constant. Compare a simple temperature-conditioned COP baseline with a fitted model, rejecting implausible values.
 
 DHW uses a **different** tank-loss/draw model and demand windows; a household draw is not a building heat-loss observation. Pump-side safety and legionella cycles remain authoritative. Cooling is a later stage (C7) with its own model. Contracts and C1a extraction are mode-aware and already extract cooling power and energy. Underfloor cooling needs a dew-point/condensation constraint, so **room humidity sources are a prerequisite** for cooling.
 
@@ -168,7 +168,7 @@ Models must be versioned, bounded, replayable and persisted on the existing PVC 
 
 ### 3.3 Optimization and solver behavior
 
-The decision variable is the **space-heating permission schedule** `u[t]` per 15-minute slot (`Heat+DHW` vs `DHW`) plus the DHW force, with minimum run/rest times. Delivered heat is a **modelled response** to `u[t]` (pump curve, room valves, slab state), not a free `Q_heat[t]`. A thermostat-setpoint offset within the comfort band is a candidate later lever; it needs another writer, so it is evaluated only as an offline counterfactual in C2.
+The decision variable is the **space-heating permission schedule** `u[t]` per 15-minute slot (`Heat+DHW` vs `DHW`) plus the DHW force, with minimum run/rest times. Delivered heat is a **modelled response** to `u[t]` (pump curve, room valves, slab state), not a free `Q_heat[t]`. A thermostat-setpoint offset within the comfort band is a candidate later lever; it needs another writer, so C2 reports it as an offline counterfactual without gating on it; it feeds C7.
 
 Optimize a 24–48 h lookahead on the existing 15-minute grid, bounded by actual **published** prices and reliable forecast coverage; unknown later prices must be labeled as estimates with an uncertainty policy, never silently treated as known. A terminal heat-storage value/penalty must prevent artificially cheap end-of-horizon cooling.
 
@@ -277,7 +277,7 @@ Forecast interfaces should carry UTC slot IDs, kWh, quality and model/plan versi
 |---|---|---|---|
 | **C0 — Correctness audit and stabilization** | homelab | The agreed scope below (disable restores the heat mode, HA watchdog, retry re-check, full heat-mode map, numeric sensors); preserve existing user-facing toggles | Tests cover disable, the watchdog (stale heartbeat while enabled and `DHW`), the retry loop re-checking the toggle and the nine-option mode map |
 | **C1a — Offline extraction and climate feature set** | battery-optimizer + homelab configuration | Map verified room, tank, compressor, power and weather data (mode-aware, including cooling power/energy) into extraction and a **separate climate feature set**; quality report; homelab numeric template sensors for operating mode, defrost and 3-way valve (C0 homelab work); no control writes | Enough measured history and documented gaps to fit a model without inventing data; `dataset_id` and existing feature-set ids unchanged; battery baseline regression-free |
-| **C2 — Thermal and DHW identification, economic gate** | battery-optimizer | Pure model(s) (first-order and two-state slab+air), fitting, safe parameter envelopes, recorded versions and chronological validation; COP derived from energy; economic go/no-go gate (below) | Held-out trajectory error and bias outperform a defined simple/persistence baseline; bad sensors trigger model fallback; gate result recorded |
+| **C2 — Thermal identification, COP and dual-objective gate** | battery-optimizer | Pure models (first-order and two-state slab+air), fitting, safe parameter envelopes, recorded versions and chronological validation; COP fitted on electricity; policy simulator and the go/no-go gate ([design](#c2-design-and-predeclared-gate)); DHW stays fixed | Model acceptance criteria met on the held-out season (otherwise UNDETERMINED, treated as no-go); bad sensors trigger model fallback; gate verdict recorded with its preregistration |
 | **C1b — Live climate observer** | battery-optimizer | Live climate observer in `serve` behind a feature flag, read-only; deferred until C3 and only after the C2 gate passes | Existing battery runtime unaffected; freshness and quality metrics |
 | **C3 — Climate shadow planner** | battery-optimizer | After the C2 gate: temperature-aware heuristic then climate MPC, versioned plan, read-only GET, shadow metrics, executor not connected | Deterministic, physically feasible plans, bounded solve latency, no interference with existing battery runtime |
 | **C4 — Evaluation and plan handoff** | battery-optimizer, then homelab | Compare cheap-hours, comfort-rule and MPC using identical historical decision-time inputs; add AppDaemon **shadow** plan reader and telemetry | Comfort, model-cost and cycling comparisons recorded; shadow reads cannot actuate; tested expires/parse errors |
@@ -312,23 +312,101 @@ Comfort awareness (a temperature guard) is deferred to C3.
 
 Any change to which hours the legacy policy selects is a versioned policy change and needs a matching `structured_forecast.py` replay update. Every AppDaemon ConfigMap change restarts AppDaemon (reloader), so C0 merges are actuation events until restart handling is fixed.
 
-### C2 economic go/no-go gate
+### C2 design and predeclared gate
 
-At the end of C2, on historical decision-time inputs, compare:
+Agreed with the owner on 2026-10-30. Everything is expressed in %, Kh (degree-hours) and starts, so no private money threshold is committed.
 
-| Policy | Role |
+**Owner decisions**
+
+- **Dual objective:** the same money for more comfort, or the same comfort for about 10% less money. Either wins.
+- **Comfort floor:** "no worse than legacy"; 22 °C is the target. A saving bought with a colder house does not count.
+- **DHW fixed:** it keeps its historical schedule in every policy. C2 optimizes space heating only.
+- **Setpoint-offset lever:** reported, not gated. It feeds C7.
+
+**Data facts behind the design (qualitative on purpose)**
+
+- Legacy cheap-hours already buys heating well below the day-mean price, and a crude same-day perfect-packing ceiling leaves little cost headroom. Comfort at equal cost is therefore a first-class outcome.
+- Legacy already runs below 22 °C in cold weather, with thermostat setpoints held above the target.
+- Heat is delivered in only part of the permitted hours: within permission the pump's own control sets the heat, so it is modelled as a response to `u`.
+- `min_hours` took four values in season S3 (6, 8, 10, 15): a natural experiment on the lever, used for validation.
+- The forecast archive starts on 2026-10-25 and there is no irradiance sensor: weather is persistence and solar is a clear-sky proxy.
+
+#### Models
+
+- **`T_air`:** mean of the comfort rooms with per-room offsets by local hour (training medians). Office A is excluded; per-room dynamics are C7.
+- **Inputs per 15-minute slot:** `Q_heat` (power-integrated thermal output; the energy counter is the daily cross-check, flow x dT a diagnostic only), `T_out`, `S` (clear-sky proxy: sin+ of the solar elevation, site coordinates from private config in the data dir) and the internal gain `q0` (servers power becomes an input only if its variance is material).
+- **Model A, first order:** `C dT/dt = Q + UA (T_out - T) + q0 + g_s S`.
+- **Model B, slab + air:** `C_a dT_a = k (T_s - T_a) + UA (T_out - T_a) + q0 + g_s S`, `C_s dT_s = Q - k (T_s - T_a)`. The return temperature during steady circulation (flow above about 5 L/min, at least 10 min into a run, no DHW) is a second, noisy slab measurement, `y2 = T_s + b_ret`, which gives B its identifiability.
+- **Discretization and fit:** exact ZOH (`scipy.linalg.expm`, dt = 900 s); bounded simulation-error least squares over 48 h windows from local midnight (B gets a per-window initial `T_s` as a nuisance parameter); a steady-state Kalman observer supplies the state at forecast origins.
+- **Parameter envelope:** tau = C/UA in [10, 500] h, UA in [0.03, 0.5] kW/K, `C_s` in [2, 60] kWh/K, k in [0.1, 3] kW/K, `q0` in [0, 3] kW. A parameter on a bound means the fit failed.
+- **Training filters:** drop slots with unknown-quality inputs, window-open events (a room falls more than 0.5 K in 15 minutes), slots where at least two comfort rooms are at or above setpoint (valves probably shut), the February 2026 thermostat outage and cooling slots.
+- **Heat response to `u`** (`plant.py`): B: `Q = u (1 - dhw) clip(H_e (T_sup(T_out) - T_s), 0, Q_max(T_out))`, with the heating curve `T_sup` fitted from the flow target against `T_out`. A: `Q = u (1 - dhw) (c0 + c1 (T_ref - T_out) + c2 first_hour_of_block)`. Both are capped by the valves: `Q x (phi + (1 - phi) open)`, `open = T_air < sp - 0.25`, where `phi` is the always-open share (bathrooms, corridor), default 0.3 until floor areas are supplied. Historical `u` comes from `structured_forecast.replay_mask_for_day`; days with the climate rule disabled are excluded.
+- **Dependencies:** numpy, scipy and pyarrow only; no new dependency, no pandas.
+
+#### Validation and model acceptance
+
+- **Seasons:** S1 = 2023-11-08..2024-04-30 (train only); S2 = 2024-10..2025-04 (train, secondary test); S3 = 2025-10..2026-04 (held-out test and primary gate period); 2026-10 onward is untouched and reserved for C4. Fit on October-April; the gate and headline metrics use November-March.
+- **Folds:** fit S1, test S2; fit S1+S2, test S3.
+- **Forecasts:** origins at 00, 06, 12 and 18 local, observer state, 24 h open loop on measured `T_out`. RMSE and bias at 1, 6, 12 and 24 h in two modes: Q-driven (measured `Q`) and u-driven (replayed `u` through the response model), against persistence and diurnal persistence.
+- **Acceptance** (committed in `config/climate.yaml` before any results):
+  - Q-driven RMSE on S3 at most 0.30 K at 6 h, 0.40 K at 12 h, 0.50 K at 24 h; |bias| at 24 h at most 0.15 K; at least 15% better than the better baseline at 12 h and 24 h.
+  - u-driven RMSE at 24 h at most 0.60 K; daily thermal-energy MAPE at most 15% with season bias at most 5%.
+  - u-driven bias within each S3 `min_hours` regime at most 10% (the lever-response test).
+  - Legacy replay fidelity on S3: simulated legacy electricity and cost within 5% of realized; Kh below 22 °C within 25% or 10 Kh.
+  - Parameters inside the envelope and each within 30% between the folds.
+- **Selection:** use B only if it beats A by at least 10% RMSE at 12 h and 24 h. If neither model is accepted the verdict is UNDETERMINED and counts as no-go; one predeclared model iteration is allowed.
+
+#### COP model
+
+- Fit electricity, not COP, on hourly heat-mode hours without DHW: `E_el = Q (a + b (T_flow - T_out) + c max(0, 5 - T_out)) + d starts + e hours_on`. WLS weighted by `Q`; exclude `Q` < 0.1 kWh and implied COP outside [1, 9].
+- Baseline: a COP table binned by `T_out` in 2 K steps; if the regression loses to the table, use the table.
+- Validation on S3 given measured `Q`: daily electricity MAPE at most 8%, season error at most 3%.
+
+#### Policies and simulator
+
+Every policy, legacy included, runs through the same model (thermal, response, valve cap, COP, starts). Episodes are maximal runs of eligible days from the same observed state; stored heat left at the end is valued at legacy's mean cost per thermal kWh, by the same rule for all policies. Cost is the PVPC price times modelled heating electricity, pre-tax, on the HeishaMon basis, with a sensitivity scaled by the channel-2 ratio. The battery is ignored.
+
+1. **Legacy:** replay `climate_control` as of each date (rule version, enable flag, `min_hours`).
+2. **Temperature-aware heuristic:** hourly decisions at :00, at least 1 h on and 1 h off, horizon to the end of published prices (at most 24 h), `T_out` by persistence, effective cost = price / COP(`T_out`). Start from `u` = 0; while the predicted minimum `T_air` before the end of the horizon is below 22 + `m`, switch on the cheapest remaining hour before the first violation; never heat when the prediction is above 28; execute the first hour and repeat. The single tunable `m` is fixed on S2 with the fold-1 model, giving two variants: `m_cost` (smallest `m` whose S2 comfort is no worse than legacy) and `m_comfort` (largest `m` whose S2 cost is at most legacy). Both are frozen in the preregistration before S3 is run.
+3. **Perfect foresight (diagnostic only):** a daily MILP (`scipy.optimize.milp`) with realized prices and `T_out`, end state at least legacy's, `Q` continuous in [0, `u` `Q_max`], at most 4 blocks per day. If its saving is below the cost threshold and its comfort gain below the comfort threshold, no permission policy can pass: a clean stop.
+
+Levers: **permission** is gated. **Permission plus setpoint offset** (setpoint min(28, sp + 2) in chosen hours, perfect foresight without the valve cap) is reported only.
+
+#### Gate (heat-v1, permission lever, S3, primary model)
+
+GO if all hard rows hold and at least one of conditions C or K holds.
+
+- **Hard rows:** 0 Kh above 28 °C; modelled mean starts per day at most 1.10 x simulated legacy, no modelled day above 30 starts and at most 4 permission blocks per day; the planner/plant mismatch run keeps the sign of the passing condition; the model is accepted.
+- **C, cost (`m_cost`):** heating electricity cost at least 10% below simulated legacy; bootstrap 95% lower bound of the saving above 0 and the saving larger than the legacy replay cost error; comfort no worse than legacy, i.e. Kh below 22 °C per comfort room at most legacy + 5 Kh per season and worst excursion at least min(legacy worst, 21.5 °C).
+- **K, comfort at the same money (`m_comfort`):** Kh below 22 °C summed over the comfort rooms at least 25% below simulated legacy; bootstrap 95% lower bound of the reduction above 0 and the reduction larger than the legacy replay Kh error; cost no higher than legacy, i.e. point delta at most 0 and bootstrap 95% upper bound at most +3%.
+
+Otherwise NO-GO, or UNDETERMINED if the model is not accepted. C1b, C3, C4 and C5 start only on GO.
+
+**Model-error bounds:** paired simulated differences; a saving or comfort gain only counts above the legacy replay error; the `min_hours` regime test; the mismatch run (plan with one accepted model or fold, simulate with the other); an out-of-distribution share report with a warning above 10%.
+
+**Statistics:** S3 November-March is primary and S2 is reported. The same day mask for every policy, paired daily differences and a 7-day block bootstrap (`forecast_eval.block_bootstrap`) with a preregistered seed. The saving is decomposed into a volume effect and timing plus COP.
+
+#### Code layout and PR order
+
+- **Package:** new `src/battery_optimizer/climate/` with `data.py`, `cop.py`, `thermal.py`, `plant.py`, `policies.py` and `gate.py`; data audit in `hack/climate_audit.py`.
+- **Config:** committed `config/climate.yaml` holds the heat-v1 comfort band (22-28 °C, rooms), filters, parameter envelope, acceptance criteria and gate thresholds. Site coordinates and `phi` live in a private YAML in the data dir, whose hash is recorded.
+- **CLI:** `climate-fit` writes `<data_dir>/analysis/v1/climate-models/<model_id>/` (`model.json`, `validation.json`, `validation.md`; `model_id` = sha256 of feature-set id, dataset id, windows, code version and config hash). `climate-gate` writes `<dataset>/climate-gate/<name>-<ts>/` (`preregistration.json` before any policy runs, `daily.parquet`, `summary.json`, `summary.md`) with the verdict.
+- **Lineage:** C2 reads only; `dataset_id` and existing feature-set ids do not change.
+
+| PR | Deliverable |
 |---|---|
-| Legacy cheap-hours policy | Baseline |
-| Temperature-aware heuristic | Candidate |
-| Perfect-foresight upper bound | Diagnostic only, labelled as such |
-
-Run each under both levers: **permission only**, and **permission plus setpoint offset** (offline counterfactual). Comfort uses the versioned band, recorded with every result. Pass thresholds are predeclared before running, from observed baseline performance; they are not set in this document. C1b, C3, C4 and C5 start only if the gate passes.
+| 0 (operational, not a PR) | After C1a merges, extract and build the climate set for 2023-11-07..2026-05-01 |
+| 1 | `data.py`, `config/climate.yaml` and the audit: thermostat resolution, gaps, counter quantization, the return-temperature slab proxy, the heating curve, the legacy-mask hit rate, the channel-2 ratio and whether the outdoor sensor sees sun |
+| 2 | `cop.py` |
+| 3 | `thermal.py`, `plant.py` and `climate-fit`, with synthetic-house identifiability tests |
+| 4 | `policies.py`: simulator, heuristic, perfect-foresight MILP, setpoint variant and mismatch run |
+| 5 | `gate.py`, `climate-gate` and docs, reusing the `forecast_eval` preregistration and bootstrap |
 
 ### Recommended first implementation PRs
 
 - **homelab — C0:** the agreed scope above (disable restores the heat mode, HA watchdog, retry re-check, nine-option mode map, numeric template sensors). Preserve current schedules by default.
 - **battery-optimizer — C1a:** offline extraction and a separate climate feature set from the existing Prometheus archive; model input audits for room, tank and HVAC electric/thermal power.
-- **battery-optimizer — C2:** offline first-order and two-state thermal models, COP derived from energy, test fixtures and the economic gate; no runtime configuration or actuator.
+- **battery-optimizer — C2:** offline first-order and two-state thermal models, COP fitted on electricity, test fixtures and the dual-objective gate, in the five PRs above; no runtime configuration or actuator.
 - **battery-optimizer — C3 (after the gate):** opt-in shadow planning and `GET /climate/plan`; prove battery shadow behavior unaffected.
 - **homelab — C4/C5:** explicit read-only plan consumption then a separately approved, reversible controlled heating rollout.
 
@@ -371,12 +449,14 @@ The architecture is ready for implementation when this document and ADR are revi
 - [x] Actual HeishaMon and thermostat sensor IDs (see the audit).
 - [ ] Agreement between HeishaMon energy and the Shelly EM aerothermal branch, including idle/DHW. Partially answered: channel 2 reads a median 1.28x HeishaMon; reconcile in C1/C2.
 - [x] Panasonic operating mode and room sensor configuration (permission `Heat+DHW` vs `DHW`; thermostat climate metrics).
-- [ ] Manufacturer-safe cycling bounds and native frost/hygiene behavior.
+- [ ] Manufacturer-safe cycling bounds and native frost/hygiene behavior. Non-blocking for C2: the gate uses starts relative to simulated legacy until the compressor start limit is known.
 - [x] Initial heat mode comfort band: minimum 22 °C, maximum 28 °C, as versioned configuration (per room, optionally per time of day).
 - [ ] DHW comfort bands and holiday semantics. Disable semantics are decided (C0 scope: the toggle is the manual override and restores the heat mode); manual/holiday behavior of the future executor stays open.
 - [ ] Whether battery-optimizer's current deployment can accommodate thermal-data ingestion and solves without interrupting existing slots/archival.
 - [ ] Source of reliable historical weather forecasts (existing `weather.forecast_home` archive and limits) and price snapshots for causal replay.
-- [ ] C2 gate thresholds, predeclared before the gate is run.
+- [x] C2 design, comfort floor and dual-objective gate (see [C2 design](#c2-design-and-predeclared-gate)). The numeric thresholds are committed in `config/climate.yaml` before any result, and the heuristic margins are frozen in the preregistration before S3 is run.
+- [ ] Floor areas of the always-open zones (`phi`); non-blocking, defaults to 0.3.
+- [ ] Data risks for the C2 models (thermostat resolution, a sun-exposed outdoor sensor, a poor return-temperature slab proxy); non-blocking, the PR 1 audit decides them first.
 - [ ] Measurable pilot/rollback criteria agreed before the first active heating plan.
 
 **Completion definition:** the user can compare a causal, reproducible cheap-hours baseline with temperature-aware and MPC forecasts; the climate planner runs read-only on the existing service; AppDaemon executes only explicitly authorized, current and verified plans; DHW and heating share one command owner; battery planning consumes climate demand without double counting; and any upstream failure has a tested comfort-preserving fallback. Removing AppDaemon or enabling battery hardware dispatch is **not** required for this plan to be complete.
