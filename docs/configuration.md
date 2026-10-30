@@ -55,6 +55,10 @@ mode 0700. Re-pulling is safe: parts and manifests are immutable, the service's 
 refreshed, and files that exist only locally (your own analysis runs) are kept. The cluster store has
 no OMIE prices; run `extract --source omie` against the copy before anything that needs them.
 
+**Climate site file.** The climate loader reads the site coordinates from
+`<data dir>/climate/site.yaml` (`latitude`, `longitude`, optional `phi`, the always-open valve share).
+It is private, stays in the data dir and is never committed; `pull-store` does not touch it.
+
 **Code identity without git (container images).** Lineage records the commit via
 `git rev-parse HEAD`. Where git is unavailable, set `BATTERY_OPTIMIZER_GIT_SHA` at build time to a
 40-character lowercase commit SHA (optionally suffixed `-dirty`); it is used only when git cannot

@@ -102,6 +102,8 @@ These have no CLI surface (or `hack/` only), deliberately:
   never writes and is not a `build` input.
 - `replay_runtime.py` — replay-only asyncio dispatch runtime with a recording sink. No writer,
   no actuation, no HA adapter, no wall clock. See [Replay runtime](#replay-runtime-replay_runtimepy).
+- `climate/` — offline data layer of the climate optimizer (C2). See
+  [Climate subpackage](#climate-subpackage-climate).
 
 ## Dispatch intent contract (`dispatch.py`)
 
@@ -131,6 +133,44 @@ See module docstring.
 **Status: complete — committed. NOT deployed, NOT a resident service, NO HA adapter, recording
 only.** Deterministic plan content; record ids are per-run random (`generation_id` is `uuid.uuid4()`). Caller-supplied time; recording-only sink; injectable planner.
 Demo: `python -m battery_optimizer.hack.replay_runtime_demo`. See module docstring.
+
+## Climate subpackage (`climate/`)
+
+**Status: C2 PR 1 — configuration, data loader and audit; no model, no runtime, no actuation.** The
+offline half of the [climate optimizer plan](planning/climate-optimizer-implementation.md#c2-design-and-predeclared-gate).
+It reads the climate feature set (`build-features --signal-set climate`) and the PVPC prices of a
+canonical dataset, and never writes into either.
+
+- `config.py` and [`config/climate.yaml`](../config/climate.yaml): the heat-v1 comfort band, training
+  filters, parameter envelope, model-acceptance criteria and gate thresholds, committed before any
+  model result exists. Loading is strict (unknown, missing or duplicated keys, wrong types and
+  inconsistent ranges are errors) and the file's SHA-256 identifies it in every result.
+- `data.py`: `load_climate_data` verifies the feature set through its manifest and returns
+  `ClimateData`, numpy arrays on the 15-minute UTC grid with a local-day partition (92 / 96 / 100
+  slots): `T_air` (comfort-room mean), `Q_heat` with its daily
+  cross-check against the energy counter, the DHW and cooling masks, the inferred valve state, the
+  clear-sky solar proxy, the legacy permission `u` replayed through
+  `structured_forecast.replay_mask_for_day` (decided 40 s into each local day) and one boolean per
+  training filter. `u` is `NaN` (and `u_known` false) on every day without a replayed schedule,
+  including disabled-rule days, which are excluded; u-driven code must use `u_known` only.
+  The Aquarea outdoor sensor reads low while the compressor runs, so the model's `t_out_debiased`
+  keeps only slots with the compressor off for at least 30 minutes and interpolates linearly across
+  running periods up to a configured cap (longer ones are unknown); raw `t_out` stays for
+  diagnostics. Per-room offsets are the function `room_offsets(..., mask)`, not a field, so a fold
+  fits them on its own training mask and nothing held out can leak.
+- The site coordinates (and an optional always-open valve share `phi`) are read from
+  `<data_dir>/climate/site.yaml` (`latitude`, `longitude`, optional `phi`). The file is private,
+  never committed, and its hash is recorded with the data.
+- `hack/climate_audit.py` (read-only) writes `report.json` and `report.md` into
+  `<data_dir>/analysis/v1/climate-audit/<feature set>-<config>[-name]/`: thermostat resolution, gaps,
+  counter quantization, the return temperature as a slab proxy, the heating curve, the legacy-mask
+  hit rate, the channel-2 ratio, the outdoor-sensor sun test, filter survival per season and the
+  `min_hours` regimes. The report holds private figures: it stays in the data dir.
+
+```bash
+uv run python hack/climate_audit.py --feature-set <climate feature set id> \
+    --dataset <data_dir>/analysis/v1/<dataset_id>
+```
 
 ## Shadow service (`service/`)
 
