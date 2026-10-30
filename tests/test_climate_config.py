@@ -46,6 +46,7 @@ def test_shipped_config_holds_the_plan_values():
     assert cfg.acceptance.q_driven.rmse_k == {6: 0.30, 12: 0.40, 24: 0.50}
     assert cfg.acceptance.q_driven.abs_bias_24h_k == 0.15
     assert cfg.acceptance.u_driven.rmse_24h_k == 0.60
+    assert cfg.acceptance.u_driven.regime_energy_bias == 0.10
     assert cfg.acceptance.parameters.fold_rel_diff == 0.30
     assert cfg.cop.daily_mape == 0.08 and cfg.cop.season_error == 0.03
     assert cfg.gate.cost.min_saving == 0.10

@@ -288,6 +288,7 @@ SCHEMA: Spec = section(
                         "daily_energy_mape": _FRACTION,
                         "season_energy_bias": _FRACTION,
                         "regime_energy_bias": _FRACTION,
+                        "regime_min_heating_days": integer(1, 366),
                     }
                 ),
                 "legacy_replay": section(

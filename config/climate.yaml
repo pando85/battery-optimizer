@@ -93,6 +93,7 @@ acceptance:
     daily_energy_mape: 0.15
     season_energy_bias: 0.05
     regime_energy_bias: 0.10 # within each min_hours regime of S3
+    regime_min_heating_days: 10 # a regime with fewer heating days in S3 gate months is reported, not tested
   legacy_replay: # simulated legacy against realized, season S3
     cost_rel_error: 0.05
     electricity_rel_error: 0.05
