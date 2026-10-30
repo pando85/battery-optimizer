@@ -38,7 +38,7 @@ def cfg(tmp_path_factory):
         ("window_days: 28", "window_days: 4"),
         ("max_gap_hours: 6.0", "max_gap_hours: 12.0"),  # the synthetic runs last up to 8 h
         ("refit_every_days: 7", "refit_every_days: 2"),
-        ("shrinkage: {A: null, B: null}", "shrinkage: {A: 100.0, B: 100.0}"),
+        ("shrinkage: {A: 1000000.0, B: 10000.0}", "shrinkage: {A: 100.0, B: 100.0}"),
         ("prior_until: 2024-12-31", "prior_until: 2025-01-12"),
         ("grid: [0, 1, 10, 100, 1000, 10000, 100000, 1000000]", "grid: [0, 100, 1000000]"),
     ):
@@ -269,9 +269,14 @@ def test_weekly_criterion_counts_bounds_and_fallbacks(cfg, result):
     assert not week.ok
 
 
-def test_climate_fit_refuses_an_unselected_shrinkage(house):
+def test_climate_fit_refuses_an_unselected_shrinkage(house, cfg, tmp_path):
+    text = cfg.path.read_text().replace(
+        "shrinkage: {A: 100.0, B: 100.0}", "shrinkage: {A: 100.0, B: null}"
+    )
+    path = tmp_path / "climate.yaml"
+    path.write_text(text)
     with pytest.raises(fit.ClimateFitError, match="not selected"):
-        fit.fit_and_validate(house, CONFIG, SITE)
+        fit.fit_and_validate(house, load_climate_config(path), SITE)
 
 
 def test_shrinkage_selection_reads_s2_only(cfg, house):

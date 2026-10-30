@@ -117,7 +117,9 @@ model:
   adaptive:
     window_days: 28
     refit_every_days: 7
-    shrinkage: {A: null, B: null} # chosen on S2 only (selection below), in its own commit
+    # chosen on S2 only by the selection below (hack/climate_shrinkage.py at commit 924bf92),
+    # committed before any held-out run
+    shrinkage: {A: 1000000.0, B: 10000.0}
     # Selection on S2 only: prior fit on the S2 fit-month days up to prior_until, weekly refits from
     # the next day through the S2 gate months; per model, the grid value with the lowest mean
     # Q-driven RMSE at acceptance.q_driven.gain_horizons_hours among the values whose weekly refits

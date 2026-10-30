@@ -54,6 +54,7 @@ def test_shipped_config_holds_the_plan_values():
     assert cfg.acceptance.parameters.weekly_refit_ok_share == 0.95
     assert (cfg.model.adaptive.window_days, cfg.model.adaptive.refit_every_days) == (28, 7)
     assert cfg.model.adaptive.selection.season == "S2"
+    assert dict(cfg.model.adaptive.shrinkage) == {"A": 1e6, "B": 1e4}
     assert cfg.signals.t_out_source == "debiased" and cfg.signals.t_out_fill_unknown_from_fused
     assert cfg.cop.model == "lift_table" and cfg.cop.lift_bin_k == 2.0
     assert cfg.cop.daily_mape == 0.08 and cfg.cop.season_error == 0.03
