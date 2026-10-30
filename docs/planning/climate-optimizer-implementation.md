@@ -297,6 +297,7 @@ Forecast interfaces should carry UTC slot IDs, kWh, quality and model/plan versi
 3. **C7-F F0/F1:** the control-surface audit (starting from the Prometheus finding that the pump runs a fixed direct water target with an inactive curve) and the coverage report can start now.
 4. **Joint field trial (C7-F F2): agreed in principle.** A model-free, preregistered trial of permitted heating hours and water temperature (fixed target vs native curve) against current operation, run this winter. Its arms and preregistration are still to be agreed with the owner, and the small homelab change (manual or calendar) is agreed separately, before any homelab change. **Proposed, not decided.** Its varied data also feeds later model identification.
 5. **Separate gates, not an automatic retry:** no tuning of the original v2 thresholds or reuse of S3 as an untouched confirmation. A new predeclared evaluation must rely on genuinely held-out/prospective data and be accepted before C3; C4/C5 and physical authorization remain separate.
+6. **Whole-system replay (offline, read-only):** the [system replay](system-replay.md) (`hack/system_sim.py`) transfers the 15 h days empirically, with no thermal model, to compare the legacy heat-pump control with an efficiency-first one, each with and without the simulated battery. The battery's value was nearly independent of the heat-pump regime, and the comfort side of the efficiency-first regime remains an association that the C7-F field trial must confirm.
 
 ### C0 scope (agreed after the owner's review)
 
