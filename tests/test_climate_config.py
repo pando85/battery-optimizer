@@ -30,7 +30,7 @@ def _write(tmp_path: Path, raw: dict[str, Any]) -> Path:
 
 def test_shipped_config_holds_the_plan_values():
     cfg = load_climate_config(SHIPPED)
-    assert cfg.config_version == 1
+    assert cfg.config_version == 2
     assert (cfg.comfort.band, cfg.comfort.low_c, cfg.comfort.high_c) == ("heat-v1", 22.0, 28.0)
     assert cfg.comfort.rooms == ("bedroom", "hall_kitchen", "office_t")
     assert cfg.comfort.excluded_rooms == ("office_a",)
@@ -47,7 +47,16 @@ def test_shipped_config_holds_the_plan_values():
     assert cfg.acceptance.q_driven.abs_bias_24h_k == 0.15
     assert cfg.acceptance.u_driven.rmse_24h_k == 0.60
     assert cfg.acceptance.u_driven.regime_energy_bias == 0.10
-    assert cfg.acceptance.parameters.fold_rel_diff == 0.30
+    # the predeclared model iteration (config version 2)
+    assert cfg.seasons.training_excluded == ("S1",)
+    assert [(f.train, f.test) for f in cfg.folds] == [(("S2",), "S3")]
+    assert cfg.acceptance.q_driven.min_gain_vs_baseline == 0.0
+    assert cfg.acceptance.parameters.weekly_refit_ok_share == 0.95
+    assert (cfg.model.adaptive.window_days, cfg.model.adaptive.refit_every_days) == (28, 7)
+    assert cfg.model.adaptive.selection.season == "S2"
+    assert dict(cfg.model.adaptive.shrinkage) == {"A": 1e6, "B": 1e4}
+    assert cfg.signals.t_out_source == "debiased" and cfg.signals.t_out_fill_unknown_from_fused
+    assert cfg.cop.model == "lift_table" and cfg.cop.lift_bin_k == 2.0
     assert cfg.cop.daily_mape == 0.08 and cfg.cop.season_error == 0.03
     assert cfg.gate.cost.min_saving == 0.10
     assert cfg.gate.comfort.min_kh_reduction == 0.25
@@ -131,13 +140,17 @@ def _mutations() -> list[tuple[str, Any]]:
         ("room in both lists", put(["bedroom", "hall_kitchen", "office_a"], "comfort", "rooms")),
         ("room dropped", put(["bedroom"], "comfort", "rooms")),
         ("gate band differs", put("heat-v2", "gate", "band")),
-        ("version", put(2, "config_version")),
+        ("version", put(1, "config_version")),
         ("string for bool", put("yes", "filters", "drop_cooling_slots")),
         ("overlapping seasons", put({"start": "2024-04-01", "end": "2025-04-30"}, "seasons", "S2")),
         ("season reversed", put({"start": "2024-04-30", "end": "2024-04-01"}, "seasons", "S2")),
         ("reserved before S3 end", put("2026-01-01", "seasons", "reserved_from")),
         ("gate months not in fit months", put([5], "seasons", "gate_months")),
-        ("fold tests on its training season", put({"train": ["S1"], "test": "S1"}, "folds", 0)),
+        ("fold tests on its training season", put({"train": ["S2"], "test": "S2"}, "folds", 0)),
+        ("fold trains on S1", put({"train": ["S1", "S2"], "test": "S3"}, "folds", 0)),
+        ("shrinkage selected on S3", put("S3", "model", "adaptive", "selection", "season")),
+        ("negative shrinkage", put(-1.0, "model", "adaptive", "shrinkage", "A")),
+        ("unknown COP model", put("curve", "cop", "model")),
         ("bad date", put("not-a-date", "seasons", "S1", "start")),
         ("rmse horizons", put({6: 0.3, 12: 0.4}, "acceptance", "q_driven", "rmse_k")),
         ("blocks disagree", put(5, "gate", "hard", "max_blocks_per_day")),

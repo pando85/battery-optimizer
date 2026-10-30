@@ -28,7 +28,7 @@ __all__ = [
     "load_climate_config",
 ]
 
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 KNOWN_ROOMS = ("bedroom", "hall_kitchen", "office_t", "office_a")
 
 
@@ -173,6 +173,15 @@ def seq(item: Spec, *, min_len: int = 0, unique: bool = False) -> Spec:
     return check
 
 
+def optional(spec: Spec) -> Spec:
+    """*spec*, or ``null`` (a value not chosen yet: the code that needs it refuses to run)."""
+
+    def check(value: Any, path: str) -> Any:
+        return None if value is None else spec(value, path)
+
+    return check
+
+
 def bounds(lo: float, hi: float) -> Spec:
     """A ``[low, high]`` pair with ``low < high``, both inside ``[lo, hi]``."""
     one = num(lo, hi)
@@ -243,6 +252,7 @@ SCHEMA: Spec = section(
                 "fit_months": seq(integer(1, 12), min_len=1, unique=True),
                 "gate_months": seq(integer(1, 12), min_len=1, unique=True),
                 "reserved_from": day,
+                "training_excluded": seq(text("S1", "S2", "S3"), unique=True),
             }
         ),
         "folds": seq(
@@ -269,6 +279,7 @@ SCHEMA: Spec = section(
                 ),
                 "counter_check": section({"min_daily_kwh": _POSITIVE}),
                 "t_out_source": text("debiased", "fused"),
+                "t_out_fill_unknown_from_fused": boolean,
                 "t_out_fused": section(
                     {
                         "max_ref_gap_hours": num(0.25, 12.0),
@@ -310,6 +321,22 @@ SCHEMA: Spec = section(
                     {"phi_default": _FRACTION, "plant_valve_cap_margin_k": num(0.0, 5.0)}
                 ),
                 "selection": section({"b_min_rmse_gain": _FRACTION, "horizons_hours": _HOURS}),
+                "adaptive": section(
+                    {
+                        "window_days": integer(1, 366),
+                        "refit_every_days": integer(1, 366),
+                        "shrinkage": section(
+                            {"A": optional(num(0.0, 1e12)), "B": optional(num(0.0, 1e12))}
+                        ),
+                        "selection": section(
+                            {
+                                "season": text("S1", "S2", "S3"),
+                                "prior_until": day,
+                                "grid": seq(num(0.0, 1e12), min_len=2, unique=True),
+                            }
+                        ),
+                    }
+                ),
             }
         ),
         "acceptance": section(
@@ -339,7 +366,7 @@ SCHEMA: Spec = section(
                         "kh_below_low_abs_error": _POSITIVE,
                     }
                 ),
-                "parameters": section({"fold_rel_diff": _FRACTION}),
+                "parameters": section({"weekly_refit_ok_share": _FRACTION}),
                 "max_iterations": const(1),
             }
         ),
@@ -348,6 +375,8 @@ SCHEMA: Spec = section(
                 "min_q_kwh": _POSITIVE,
                 "cop_range": bounds(0.0, 20.0),
                 "table_bin_k": _POSITIVE,
+                "lift_bin_k": _POSITIVE,
+                "model": text("regression", "table", "lift_table"),
                 "defrost_knee_c": num(-30, 30),
                 "daily_mape": _FRACTION,
                 "season_error": _FRACTION,
@@ -436,9 +465,16 @@ def _cross_checks(cfg: Section) -> None:
         raise _fail("seasons.reserved_from", "must be after the end of S3")
     if not set(cfg.seasons.gate_months) <= set(cfg.seasons.fit_months):
         raise _fail("seasons.gate_months", "must be a subset of fit_months")
+    excluded = set(cfg.seasons.training_excluded)
     for i, fold in enumerate(cfg.folds):
         if fold.test in fold.train:
             raise _fail(f"folds[{i}]", "the test season is also a training season")
+        if excluded & set(fold.train):
+            raise _fail(f"folds[{i}]", "trains on a season in seasons.training_excluded")
+    adaptive = cfg.model.adaptive
+    sel = adaptive.selection
+    if sel.season == "S3" or sel.season in excluded:
+        raise _fail("model.adaptive.selection.season", "must be a training season, never S3")
     for i, w in enumerate(cfg.filters.thermostat_outage.windows):
         if w.start > w.end:
             raise _fail(f"filters.thermostat_outage.windows[{i}]", "start is after end")

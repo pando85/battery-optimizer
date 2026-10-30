@@ -136,8 +136,9 @@ Demo: `python -m battery_optimizer.hack.replay_runtime_demo`. See module docstri
 
 ## Climate subpackage (`climate/`)
 
-**Status: C2 PRs 1 to 3 — configuration, data loader, audit, heat-pump electricity (COP) model,
-thermal models, heat response and `climate-fit`; no policy, no runtime, no actuation.** The
+**Status: C2 PRs 1 to 3 and the model iteration — configuration, data loader, audit, heat-pump
+electricity (COP) model, thermal models with causal weekly refits, heat response and `climate-fit`;
+no policy, no runtime, no actuation.** The
 offline half of the [climate optimizer plan](planning/climate-optimizer-implementation.md#c2-design-and-predeclared-gate).
 It reads the climate feature set (`build-features --signal-set climate`) and the PVPC prices of a
 canonical dataset, and never writes into either.
@@ -164,11 +165,14 @@ canonical dataset, and never writes into either.
   never committed, and its hash is recorded with the data.
 - `thermal.py`: model A, first order (`C dT/dt = Q + UA (T_out - T) + q0 + g_s S`, with
   `C = tau UA`), and model B, slab + air (`C_a`, `C_s`, coupling `k`), on the input
-  `[Q, T_out (de-biased), clear-sky proxy, 1]` per slot, discretised exactly under a zero-order
+  `[Q, T_out (t_out_model), clear-sky proxy, 1]` per slot, discretised exactly under a zero-order
   hold (`scipy.linalg.expm`, 900 s). A slot's reading is compared with the state at the end of the
   slot. The fit is bounded simulation-error least squares over segments: runs of slots with known
   inputs inside 48 h windows from local midnight, started from the measured air temperature of the
-  slot before; only slots the training filters keep are scored. B's initial slab temperature per
+  slot before; every slot with a valid air temperature is scored (`fit.valid_air`: not unknown
+  quality, open window, thermostat outage or cooling; valve-shut and rule-disabled slots are plant
+  states whose heat drives the simulation, so they are scored too). With a prior and a shrinkage
+  `lambda` the cost adds `lambda * sum(((p - p_prior) / box width)^2)`. B's initial slab temperature per
   segment is projected out in closed form, and the return temperature in steady circulation
   (`data.steady_circulation`) is its second measurement `T_s + b_ret`, weighted by its own residual
   scale after a first pass. A parameter on a bound of its search box (the envelope where it has
@@ -186,19 +190,25 @@ canonical dataset, and never writes into either.
   the closed-loop u-driven simulation; the starts model
   `starts/day = alpha blocks + beta hours_on + gamma hours_on T_out`.
 - `fit.py` and the `climate-fit` command ([CLI](cli.md#climate-fit)): per fold, room offsets,
-  thermal fits, observers, responses (permitted non-DHW training slots, measured valve cap; B
+  prior thermal fits, observers, responses (permitted non-DHW training slots, measured valve cap; B
   reads the observer's slab state) and the starts model use only the fold's training days (training
-  seasons, fit months), so nothing held out leaks. Validation on the test season's gate months:
+  seasons, fit months; `seasons.training_excluded` never trains), so nothing held out leaks. Weekly
+  refits (`model.adaptive`): from the first test gate-month day, every `refit_every_days`, the
+  thermal parameters are refitted on the fit-month days of the trailing `window_days` before the
+  origin, starting from and shrunk toward the prior; the week's observer starts at the window, so
+  everything at an origin uses data before it only. `select_shrinkage` picks `lambda` per model on
+  S2 only (`hack/climate_shrinkage.py`). Validation on the test season's gate months:
   forecasts from 00/06/12/18 local, 24 h open loop, Q-driven and u-driven, RMSE and bias at 1, 6,
   12 and 24 h against persistence and diurnal persistence on common pairs, stopping at the first
   unknown input; u-driven daily thermal energy from each day's 00 origin (MAPE on days above
-  1 kWh, season and `min_hours`-regime bias); the legacy replay's degree-hours below 22 °C over
-  episodes of consecutive simulable days; the starts model on measured hours. Acceptance on the
-  fold that tests S3, each criterion with value and status (the legacy-replay electricity and cost
-  criteria are `pending` until the COP model and the simulator exist; fold stability is
-  `|a - b| / min(|a|, |b|)` over the thermal parameters except `b_ret`), selection (B only if it
-  beats A by 10% Q-driven RMSE at 12 h and 24 h; an accepted model only) and the verdict ACCEPTED
-  or UNDETERMINED.
+  1 kWh, season and `min_hours`-regime bias); the legacy replay over episodes of consecutive
+  simulable days (parameters switch at the week boundaries): degree-hours below 22 °C, and the
+  simulated heat's electricity through the COP model (lift from the flow target) and its PVPC cost
+  against the realized; the starts model on measured hours. Acceptance on the fold that tests S3,
+  each criterion with value and status (including the COP limits and the share of weekly refits
+  with every parameter inside the envelope and none on a bound), selection (B only if it beats A by
+  10% Q-driven RMSE at 12 h and 24 h; an accepted model only) and the verdict ACCEPTED or
+  UNDETERMINED.
 - `hack/climate_audit.py` (read-only) writes `report.json` and `report.md` into
   `<data_dir>/analysis/v1/climate-audit/<feature set>-<config>[-name]/`: thermostat resolution, gaps,
   counter quantization, the return temperature as a slab proxy, the heating curve, the legacy-mask
@@ -212,21 +222,23 @@ uv run python hack/climate_audit.py --feature-set <climate feature set id> \
 
 **C2 PR 2: heat-pump electricity (`cop.py`).** Fits electricity, not COP, on hourly heat-mode hours
 without hot water: `E_el = Q (a + b (T_flow - T_out) + c max(0, knee - T_out)) + d starts + e hours_on`
-by WLS weighted by `Q`, with the measured flow temperature and `t_out_debiased` (hours without it are
+by WLS weighted by `Q`, with the measured flow temperature and `t_out_model` (hours without it are
 dropped). `starts` is the compressor-starts counter delta; `hours_on` counts the 15-minute slots with a
 compressor frequency above zero, so it is a quarter-hour upper bound of the true on-time. Hours below
 `cop.min_q_kwh` or with an implied COP outside `cop.cop_range` are excluded, and the exclusion counts
-are reported. The baseline is a COP table in `cop.table_bin_k` bins of `T_out` (a bin needs 10 training
-hours, a sparser one reads the nearest bin). Fold 1 fits S1 and tests S2, fold 2 fits S1+S2 and tests
-S3 (fit months for fitting, gate months for scoring), given the measured `Q`; a validation day needs 6
-eligible hours. Daily electricity MAPE and season error are checked against `cop.daily_mape` and
-`cop.season_error`. The model with the lower held-out daily MAPE is selected and the record says which
-(`selected`: `regression` or `table`); passing the limits is reported separately. The report adds the
+are reported. Beside it sit two COP tables: by `T_out` (`cop.table_bin_k` bins) and by the lift
+`T_flow - T_out` (`cop.lift_bin_k` bins), each bin needing 10 training hours (a sparser one reads the
+nearest bin). Each fold of the config fits its training seasons and tests the next (fit months for
+fitting, gate months for scoring), given the measured `Q`; a validation day needs 6 eligible hours.
+Daily electricity MAPE and season error are checked against `cop.daily_mape` and `cop.season_error`.
+The model is predeclared in `cop.model` (`lift_table` since the model iteration: the flow temperature
+changed by hand, which a `T_out` table cannot follow) and the candidate with the lowest held-out MAPE
+is reported beside it (`held_out_best`); passing the limits is reported separately. The report adds the
 `d` and `e` terms with plausible physical ranges (a flag, not a gate), the implied COP curve, the
 residuals by `T_out` bin and the DHW COP (information only).
 
 For the simulator, `predict_electricity(model, q, t_flow, t_out, starts, hours_on)` evaluates the
-selected model (the table reads only `q` and `t_out`) and `CopModel` is the versioned, hashable
+selected model (the `T_out` table reads only `q` and `t_out`, the lift table `q` and `t_flow - t_out`) and `CopModel` is the versioned, hashable
 parameter record (`model_id` is the SHA-256 of its canonical JSON, with the feature-set id and config
 hash). The flow target is a per-season constant, not a heating curve, which is harmless because the
 model reads the measured flow.
@@ -281,7 +293,9 @@ station, served keyless by Ogimet.
   `signals.t_out_source`, so a result keyed on it changes id when any input does. `t_out`,
   `t_out_debiased` and `t_out_fused` stay side by side; `t_out_model` is the one the models read,
   chosen by `signals.t_out_source` (`debiased` or `fused`, default `debiased`), and the
-  `outdoor_unknown` filter follows it.
+  `outdoor_unknown` filter follows it. With `signals.t_out_fill_unknown_from_fused` (owner decision
+  of the model iteration) the debiased series takes the fused value exactly where it is unknown and
+  the station reference is known; `ClimateData.t_out_filled` records those slots.
 - **Switch rule**, decided before any thermal result uses fused data: fused replaces debiased when its
   RMSE is lower than `t_out_debiased`'s interpolation on held-out trusted readings in S3. The test
   (`tout.leave_block_out`) hides blocks of 1 to 6 h of trusted readings and predicts them from

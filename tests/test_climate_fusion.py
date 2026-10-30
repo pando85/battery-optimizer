@@ -32,13 +32,16 @@ N_DAYS = 30
 CONFIG_TEXT = (REPO_ROOT / "config" / "climate.yaml").read_text()
 
 
-def _config(tmp_path: Path, *, source="debiased", fit_seasons="[S1, S2]"):
+def _config(tmp_path: Path, *, source="debiased", fit_seasons="[S1, S2]", fill=False):
     text = CONFIG_TEXT
     for name, (a, b) in {"S1": ("01", "10"), "S2": ("11", "20"), "S3": ("21", "30")}.items():
         old = next(line for line in text.splitlines() if line.startswith(f"  {name}: {{start"))
         text = text.replace(old, f"  {name}: {{start: 2025-12-{a}, end: 2025-12-{b}}}")
     text = text.replace("t_out_source: debiased", f"t_out_source: {source}")
     text = text.replace("fit_seasons: [S1, S2]", f"fit_seasons: {fit_seasons}")
+    old = "t_out_fill_unknown_from_fused: true"
+    assert old in text
+    text = text.replace(old, f"t_out_fill_unknown_from_fused: {str(fill).lower()}")
     path = tmp_path / "climate.yaml"
     path.write_text(text)
     return load_climate_config(path)
@@ -150,6 +153,32 @@ def test_fused_source_follows_into_the_outdoor_filter(tmp_path, starts):
     fused = _build(_config(tmp_path, source="fused"), raw, _station())
     assert debiased.drop["outdoor_unknown"][310] and not fused.drop["outdoor_unknown"][310]
     assert np.isfinite(fused.t_out_model[310]) and np.isnan(fused.t_out_debiased[310])
+
+
+def test_long_gap_fill_touches_only_the_unknown_debiased_slots(tmp_path, starts):
+    raw = _house(starts)
+    raw[300:340] = np.nan  # the house sensor is unknown, the station is not
+    freq = np.zeros(starts.size)
+    freq[1000:1040] = 40.0  # a 10 h compressor run: longer than the 6 h interpolation cap
+    table = make_table(starts, outdoor_temp_mean_c=raw, compressor_freq_mean=freq)
+    plain = build_climate_data(table, config=_config(tmp_path), site=SITE, station=_station())
+    filled = build_climate_data(
+        table, config=_config(tmp_path, fill=True), site=SITE, station=_station()
+    )
+    unknown = ~np.isfinite(plain.t_out_debiased)
+    assert unknown[310] and unknown[1020] and plain.t_out_filled is None
+    mask = filled.t_out_filled
+    assert np.array_equal(mask, unknown & filled.fusion.from_reference) and mask[[310, 1020]].all()
+    # every other slot keeps the debiased value bit for bit; the filled ones take the fused value
+    assert np.array_equal(filled.t_out_model[~mask], plain.t_out_debiased[~mask], equal_nan=True)
+    assert np.array_equal(filled.t_out_model[mask], filled.fusion.fused[mask])
+    assert np.array_equal(filled.t_out_debiased, plain.t_out_debiased, equal_nan=True)
+    assert not filled.drop["outdoor_unknown"][[310, 1020]].any()
+    assert plain.drop["outdoor_unknown"][[310, 1020]].all()
+    assert filled.input_sha256 != plain.input_sha256  # a different config: a different input id
+    # without a station there is nothing to fill from: the series stays debiased
+    alone = build_climate_data(table, config=_config(tmp_path, fill=True), site=SITE)
+    assert alone.t_out_filled is None and alone.t_out_model is alone.t_out_debiased
 
 
 def test_ids_follow_the_station_manifest(tmp_path, starts):

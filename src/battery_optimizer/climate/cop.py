@@ -7,16 +7,18 @@ aggregates of heat-mode hours without domestic hot water::
     E_el = Q * (a + b * (T_flow - T_out) + c * max(0, knee - T_out)) + d * starts + e * hours_on
 
 ``Q`` is the thermal output and ``E_el`` the electricity of the hour (kWh), ``T_flow`` the measured
-flow temperature, ``T_out`` the de-biased outdoor temperature (:mod:`climate.data`), ``starts`` the
-compressor starts in the hour and ``hours_on`` its on-time.  ``a`` is the electricity per heat
-unit with no lift, ``b`` the lift penalty, ``c`` the defrost penalty below the knee, ``d`` the cost
-of one start (kWh) and ``e`` the running overhead (kW).  The fit is weighted least squares with
-weight ``Q``.  There is no weather-compensated heating curve on this plant (the flow target is a
+flow temperature, ``T_out`` the model's outdoor temperature (``ClimateData.t_out_model``),
+``starts`` the compressor starts in the hour and ``hours_on`` its on-time. ``a`` is the electricity
+per heat unit with no lift, ``b`` the lift penalty, ``c`` the defrost penalty below the knee, ``d``
+the cost of one start (kWh) and ``e`` the running overhead (kW). The fit is weighted least squares
+with weight ``Q``. There is no weather-compensated heating curve on this plant (the flow target is a
 per-season constant), which is harmless here because the model reads the *measured* flow.
 
-The baseline is a COP table binned by ``T_out``.  Both are validated on the held-out season given
-the measured ``Q``; if the regression loses to the table the table is the model, and the record
-says so explicitly (:attr:`CopModel.selected`).
+Two tables sit beside it: the COP binned by ``T_out``, and the COP binned by the lift
+``T_flow - T_out`` (the flow temperature changed by hand between and within seasons, which a
+``T_out`` table cannot follow).  All three are validated on the held-out season given the measured
+``Q``; the model the simulator uses is predeclared in ``cop.model`` (:attr:`CopModel.selected`),
+and the candidate with the lowest held-out daily MAPE is reported beside it.
 
 Folds, thresholds, the knee and the acceptance limits come from ``config/climate.yaml``
 (``seasons``, ``folds``, ``cop``).  Fitting uses the fit months of the training seasons and
@@ -45,6 +47,7 @@ __all__ = [
     "CopModel",
     "HourlyRows",
     "fit_and_validate",
+    "fit_lift_table",
     "fit_regression",
     "fit_table",
     "hourly_rows",
@@ -54,9 +57,10 @@ __all__ = [
 ]
 
 #: Version of the model structure and of the parameter record; any change of either bumps it.
-COP_MODEL_VERSION = 1
+COP_MODEL_VERSION = 2
 
 COEFFICIENTS = ("a", "b", "c", "d", "e")
+CANDIDATES = ("regression", "table", "lift_table")
 
 #: A compressor-frequency slot mean above this is "on" (the counter data has small negative noise).
 ON_FREQUENCY_HZ = 0.0
@@ -139,7 +143,7 @@ def hourly_rows(data: ClimateData, config: ClimateConfig) -> HourlyRows:
 
     An hour is dropped when any of its four slots lacks a value the model needs (thermal output,
     electricity, hot-water, cooling and compressor columns, starts, the flow temperature while
-    heat flows, or the de-biased outdoor temperature), when hot water or cooling ran in it, or
+    heat flows, or the model's outdoor temperature), when hot water or cooling ran in it, or
     when its thermal output is below ``cop.min_q_kwh`` or its implied COP is outside
     ``cop.cop_range``.  Local time zones are whole hours from UTC, so a UTC hour is one local hour.
     """
@@ -155,7 +159,7 @@ def hourly_rows(data: ClimateData, config: ClimateConfig) -> HourlyRows:
     flow_slot = _hours(col["flow_temp_mean_c"], n_hours)
     freq_slot = _hours(col["compressor_freq_mean"], n_hours)
     starts_slot = _hours(col["compressor_starts_delta"], n_hours)
-    t_out_slot = _hours(data.t_out_debiased, n_hours)
+    t_out_slot = _hours(data.t_out_model, n_hours)
     dhw_inputs = [
         _hours(col[name], n_hours) for name in ("hp_dhw_kwh", "hp_dhw_out_kwh", "dhw_force_mean")
     ]
@@ -246,7 +250,7 @@ class CopModel:
     """
 
     version: int
-    selected: str  # "regression" or "table"
+    selected: str  # one of CANDIDATES
     coefficients: tuple[float, float, float, float, float]  # a, b, c, d, e
     knee_c: float
     table_bin_k: float
@@ -257,12 +261,17 @@ class CopModel:
     n_train_rows: int
     feature_set_id: str
     config_sha256: str
+    lift_bin_k: float = 2.0
+    #: ``(lower edge of the lift bin in K, COP, training hours)``, ascending, populated bins only.
+    lift_table: tuple[tuple[float, float, int], ...] = ()
 
     def __post_init__(self) -> None:
-        if self.selected not in ("regression", "table"):
-            raise CopError(f"selected must be 'regression' or 'table', not {self.selected!r}")
+        if self.selected not in CANDIDATES:
+            raise CopError(f"selected must be one of {list(CANDIDATES)}, not {self.selected!r}")
         if not self.table:
             raise CopError("the COP table is empty")
+        if self.selected == "lift_table" and not self.lift_table:
+            raise CopError("the lift table is empty")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -277,6 +286,8 @@ class CopModel:
             "n_train_rows": self.n_train_rows,
             "feature_set_id": self.feature_set_id,
             "config_sha256": self.config_sha256,
+            "lift_bin_k": self.lift_bin_k,
+            "lift_table": [list(row) for row in self.lift_table],
         }
 
     @classmethod
@@ -296,6 +307,8 @@ class CopModel:
             n_train_rows=int(raw["n_train_rows"]),
             feature_set_id=str(raw["feature_set_id"]),
             config_sha256=str(raw["config_sha256"]),
+            lift_bin_k=float(raw["lift_bin_k"]),
+            lift_table=tuple((float(lo), float(c), int(n)) for lo, c, n in raw["lift_table"]),
         )
 
     @property
@@ -307,19 +320,13 @@ class CopModel:
 
     def cop_table(self, t_out: np.ndarray | float) -> np.ndarray:
         """COP of the table at *t_out*; a bin without training hours takes the nearest bin."""
-        t = np.asarray(t_out, dtype=np.float64)
-        lo = np.array([row[0] for row in self.table])
-        cop = np.array([row[1] for row in self.table])
-        centre = lo + 0.5 * self.table_bin_k
-        flat = t.reshape(-1)
-        want = np.floor(flat / self.table_bin_k) * self.table_bin_k
-        pos = np.searchsorted(lo, want)
-        exact = (pos < lo.size) & (lo[np.clip(pos, 0, lo.size - 1)] == want)
-        nearest = np.abs(flat[:, None] - centre[None, :]).argmin(axis=1)
-        idx = np.where(exact, np.clip(pos, 0, lo.size - 1), nearest)
-        out = cop[idx]
-        out[~np.isfinite(flat)] = np.nan
-        return out.reshape(t.shape)
+        return _lookup(self.table, self.table_bin_k, t_out)
+
+    def cop_lift(self, lift: np.ndarray | float) -> np.ndarray:
+        """COP of the lift table at *lift* (``T_flow - T_out``), with the same nearest-bin rule."""
+        if not self.lift_table:
+            raise CopError("the model has no lift table")
+        return _lookup(self.lift_table, self.lift_bin_k, lift)
 
     def predict_regression(
         self,
@@ -342,6 +349,32 @@ class CopModel:
         )
         return q_ / self.cop_table(to)
 
+    def predict_lift_table(
+        self, q: np.ndarray | float, t_flow: np.ndarray | float, t_out: np.ndarray | float
+    ) -> np.ndarray:
+        q_, tf, to = np.broadcast_arrays(
+            *(np.asarray(x, dtype=np.float64) for x in (q, t_flow, t_out))
+        )
+        return q_ / self.cop_lift(tf - to)
+
+
+def _lookup(table: Sequence[tuple[float, float, int]], bin_k: float, x) -> np.ndarray:
+    """The table value of the bin holding *x*; a value in an unpopulated bin reads the bin whose
+    centre is nearest (a tie: the lower bin), ``NaN`` stays ``NaN``."""
+    t = np.asarray(x, dtype=np.float64)
+    lo = np.array([row[0] for row in table])
+    cop = np.array([row[1] for row in table])
+    centre = lo + 0.5 * bin_k
+    flat = t.reshape(-1)
+    want = np.floor(flat / bin_k) * bin_k
+    pos = np.searchsorted(lo, want)
+    exact = (pos < lo.size) & (lo[np.clip(pos, 0, lo.size - 1)] == want)
+    nearest = np.abs(flat[:, None] - centre[None, :]).argmin(axis=1)
+    idx = np.where(exact, np.clip(pos, 0, lo.size - 1), nearest)
+    out = cop[idx]
+    out[~np.isfinite(flat)] = np.nan
+    return out.reshape(t.shape)
+
 
 def predict_electricity(
     model: CopModel,
@@ -354,11 +387,14 @@ def predict_electricity(
     """Electricity (kWh) of the heat pump for *q* kWh of heat, as the selected model predicts it.
 
     The inputs broadcast together: *q* in kWh, *t_flow* and *t_out* in C, *starts* the compressor
-    starts and *hours_on* its on-time in hours, all over the same period.  The table model reads
-    only *q* and *t_out*.  The regression is clipped at zero.
+    starts and *hours_on* its on-time in hours, all over the same period.  The ``T_out`` table
+    reads only *q* and *t_out*, the lift table *q* and ``t_flow - t_out``.  The regression is
+    clipped at zero.
     """
     if model.selected == "table":
         return model.predict_table(q, t_out)
+    if model.selected == "lift_table":
+        return model.predict_lift_table(q, t_flow, t_out)
     return model.predict_regression(q, t_flow, t_out, starts, hours_on)
 
 
@@ -406,23 +442,35 @@ def fit_regression(rows: HourlyRows, knee_c: float) -> dict[str, Any]:
     }
 
 
-def fit_table(rows: HourlyRows, bin_k: float) -> tuple[tuple[float, float, int], ...]:
-    """The COP table: the heat-over-electricity ratio of the training hours of each ``T_out`` bin.
-
-    A bin needs :data:`MIN_BIN_ROWS` hours of its own to appear; a sparser one is left out and
-    its temperatures read the nearest populated bin.
-    """
+def _bin_table(
+    x: np.ndarray, rows: HourlyRows, bin_k: float, what: str
+) -> tuple[tuple[float, float, int], ...]:
     if rows.n == 0:
-        raise CopError("no training hours for the COP table")
-    lower = np.floor(rows.t_out / bin_k) * bin_k
+        raise CopError(f"no training hours for the COP {what} table")
+    lower = np.floor(x / bin_k) * bin_k
     table: list[tuple[float, float, int]] = []
     for lo in np.unique(lower):
         sel = lower == lo
         if int(sel.sum()) >= MIN_BIN_ROWS:
             table.append((float(lo), float(rows.q[sel].sum() / rows.e[sel].sum()), int(sel.sum())))
     if not table:
-        raise CopError(f"no T_out bin has {MIN_BIN_ROWS} training hours")
+        raise CopError(f"no {what} bin has {MIN_BIN_ROWS} training hours")
     return tuple(table)
+
+
+def fit_table(rows: HourlyRows, bin_k: float) -> tuple[tuple[float, float, int], ...]:
+    """The COP table: the heat-over-electricity ratio of the training hours of each ``T_out`` bin.
+
+    A bin needs :data:`MIN_BIN_ROWS` hours of its own to appear; a sparser one is left out and
+    its temperatures read the nearest populated bin.
+    """
+    return _bin_table(rows.t_out, rows, bin_k, "T_out")
+
+
+def fit_lift_table(rows: HourlyRows, bin_k: float) -> tuple[tuple[float, float, int], ...]:
+    """The COP table by lift ``T_flow - T_out`` (heat-weighted flow of the hour), with the same
+    minimum count and nearest-bin rule as :func:`fit_table`."""
+    return _bin_table(rows.t_flow - rows.t_out, rows, bin_k, "lift")
 
 
 def _record(
@@ -430,6 +478,7 @@ def _record(
     config: ClimateConfig,
     fit: Mapping[str, Any],
     table: tuple[tuple[float, float, int], ...],
+    lift_table: tuple[tuple[float, float, int], ...],
     *,
     train_seasons: Sequence[str],
     feature_set_id: str,
@@ -448,6 +497,8 @@ def _record(
         n_train_rows=rows.n,
         feature_set_id=feature_set_id,
         config_sha256=config.sha256,
+        lift_bin_k=float(config.cop.lift_bin_k),
+        lift_table=lift_table,
     )
 
 
@@ -501,26 +552,30 @@ def _score(
 
 
 def validate(model: CopModel, rows: HourlyRows, config: ClimateConfig) -> dict[str, Any]:
-    """Score both the regression and the table on held-out *rows*, given their measured ``Q``."""
+    """Score the regression and both tables on held-out *rows*, given their measured ``Q``."""
     reg = model.predict_regression(rows.q, rows.t_flow, rows.t_out, rows.starts, rows.hours_on)
     tab = model.predict_table(rows.q, rows.t_out)
     bin_k = float(config.cop.table_bin_k)
-    return {
+    out = {
         "regression": _score(rows, reg, config, bin_k),
         "table": _score(rows, tab, config, bin_k),
     }
+    if model.lift_table:
+        lift = model.predict_lift_table(rows.q, rows.t_flow, rows.t_out)
+        out["lift_table"] = _score(rows, lift, config, bin_k)
+    return out
 
 
 def select_model(validation: Mapping[str, Any]) -> tuple[str, str]:
-    """Pick the model with the lower held-out daily MAPE; the regression keeps a tie.
+    """The candidate with the lowest held-out daily MAPE (a tie: the earlier of
+    :data:`CANDIDATES`).  Reported beside the predeclared ``cop.model``, never replacing it.
 
-    Returns ``(selected, reason)``.  Whether the pick also meets the acceptance limits is a
-    separate fact (``passes``): losing the comparison and failing the limits are reported apart.
+    Returns ``(best, reason)``.  Whether a model also meets the acceptance limits is a separate
+    fact (``passes``): losing the comparison and failing the limits are reported apart.
     """
-    reg, tab = validation["regression"], validation["table"]
-    if reg["daily_mape"] <= tab["daily_mape"]:
-        return "regression", "regression daily MAPE is not above the table's"
-    return "table", "regression loses to the table on the held-out daily MAPE"
+    names = [c for c in CANDIDATES if c in validation]
+    best = min(names, key=lambda c: (validation[c]["daily_mape"], names.index(c)))
+    return best, f"{best} has the lowest held-out daily MAPE of {names}"
 
 
 def _sanity(fit: Mapping[str, Any], rows: HourlyRows, knee_c: float) -> dict[str, Any]:
@@ -587,18 +642,20 @@ def fit_and_validate(data: ClimateData, config: ClimateConfig) -> dict[str, Any]
 
         fit = fit_regression(train, float(config.cop.defrost_knee_c))
         table = fit_table(train, float(config.cop.table_bin_k))
+        lift_table = fit_lift_table(train, float(config.cop.lift_bin_k))
+        selected = str(config.cop.model)
         model = _record(
             train,
             config,
             fit,
             table,
+            lift_table,
             train_seasons=train_seasons,
             feature_set_id=data.feature_set_id,
-            selected="regression",
+            selected=selected,
         )
         validation = validate(model, test, config)
-        selected, reason = select_model(validation)
-        model = model.with_selected(selected)
+        best, reason = select_model(validation)
         folds.append(
             {
                 "train": train_seasons,
@@ -608,7 +665,9 @@ def fit_and_validate(data: ClimateData, config: ClimateConfig) -> dict[str, Any]
                 "model": model.to_dict(),
                 "model_id": model.model_id,
                 "selected": selected,
-                "selection_reason": reason,
+                "selection_reason": "predeclared in config (cop.model)",
+                "held_out_best": best,
+                "held_out_best_reason": reason,
                 "validation": validation,
                 "limits": {
                     "daily_mape": config.cop.daily_mape,
@@ -660,7 +719,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             "",
             f"- model id `{fold['model_id']}`: **{fold['selected']}** selected "
             f"({fold['selection_reason']}); selected model passes the limits: "
-            f"{fold['selected_passes']}",
+            f"{fold['selected_passes']}; lowest held-out MAPE: {fold['held_out_best']}",
             f"- training hours {fold['train_hours']}, validation hours {fold['test_hours']}",
             f"- limits: daily MAPE <= {limits['daily_mape']:.0%}, "
             f"|season error| <= {limits['season_error']:.0%}",
@@ -668,7 +727,7 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             "| model | days | daily MAPE | season error | passes |",
             "|---|---|---|---|---|",
         ]
-        for name in ("regression", "table"):
+        for name in [c for c in CANDIDATES if c in fold["validation"]]:
             v = fold["validation"][name]
             lines.append(
                 f"| {name} | {v['days']} | {100 * v['daily_mape']:.1f}% | "
@@ -682,15 +741,18 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                 f"| {name} | {t['value']:.4g} | {t['std_error']:.2g} | {lo} to {hi} | {t['ok']} |"
             )
         lines += ["", "Residuals by outdoor temperature bin (predicted over measured - 1):", ""]
-        lines += ["| T_out from (C) | hours | regression | table |", "|---|---|---|---|"]
-        reg = fold["validation"]["regression"]["residuals_by_t_out"]
-        tab = {b["t_out_from_c"]: b for b in fold["validation"]["table"]["residuals_by_t_out"]}
-        for b in reg:
-            t = tab[b["t_out_from_c"]]
-            lines.append(
-                f"| {b['t_out_from_c']:g} | {b['hours']} | {_pct(b['relative_error'])} | "
-                f"{_pct(t['relative_error'])} |"
-            )
+        names = [c for c in CANDIDATES if c in fold["validation"]]
+        lines += [
+            "| T_out from (C) | hours | " + " | ".join(names) + " |",
+            "|---|---|" + "---|" * len(names),
+        ]
+        by_name = {
+            n: {b["t_out_from_c"]: b for b in fold["validation"][n]["residuals_by_t_out"]}
+            for n in names
+        }
+        for b in fold["validation"]["regression"]["residuals_by_t_out"]:
+            cells = " | ".join(_pct(by_name[n][b["t_out_from_c"]]["relative_error"]) for n in names)
+            lines.append(f"| {b['t_out_from_c']:g} | {b['hours']} | {cells} |")
         lines.append("")
     lines += ["## Hot water COP (information only)", ""]
     for season, v in report["dhw_cop_information_only"].items():

@@ -346,7 +346,7 @@ Agreed with the owner on 2026-10-30. Everything is expressed in %, Kh (degree-ho
 #### Validation and model acceptance
 
 - **Seasons:** S1 = 2023-11-08..2024-04-30 (train only); S2 = 2024-10..2025-04 (train, secondary test); S3 = 2025-10..2026-04 (held-out test and primary gate period); 2026-10 onward is untouched and reserved for C4. Fit on October-April; the gate and headline metrics use November-March.
-- **Folds:** fit S1, test S2; fit S1+S2, test S3.
+- **Folds:** fit S1, test S2; fit S1+S2, test S3 (the model iteration below fits S2 only).
 - **Forecasts:** origins at 00, 06, 12 and 18 local, observer state, 24 h open loop on measured `T_out`. RMSE and bias at 1, 6, 12 and 24 h in two modes: Q-driven (measured `Q`) and u-driven (replayed `u` through the response model), against persistence and diurnal persistence.
 - **Acceptance** (committed in `config/climate.yaml` before any results):
   - Q-driven RMSE on S3 at most 0.30 K at 6 h, 0.40 K at 12 h, 0.50 K at 24 h; |bias| at 24 h at most 0.15 K; at least 15% better than the better baseline at 12 h and 24 h.
@@ -385,6 +385,48 @@ Otherwise NO-GO, or UNDETERMINED if the model is not accepted. C1b, C3, C4 and C
 **Model-error bounds:** paired simulated differences; a saving or comfort gain only counts above the legacy replay error; the `min_hours` regime test; the mismatch run (plan with one accepted model or fold, simulate with the other); an out-of-distribution share report with a warning above 10%.
 
 **Statistics:** S3 November-March is primary and S2 is reported. The same day mask for every policy, paired daily differences and a 7-day block bootstrap (`forecast_eval.block_bootstrap`) with a preregistered seed. The saving is decomposed into a volume effect and timing plus COP.
+
+#### C2 model iteration (the one predeclared iteration, config version 2)
+
+The first `climate-fit` run was UNDETERMINED on S3. Diagnosis: S1 is a different plant regime (flow
+water about 34 °C against 26–28 °C later, comfort-room valves shut about half the heating time while
+heat went to the always-open rooms and the slab, apparent UA about three times S2's and S3's; nothing
+physical changed in the house); heat measurement is fine; the fit did not score valve-shut and
+rule-disabled slots although their heat drove the simulation, which inflated UA; the fold-stability
+ratio diverges at a legitimate zero bound; long compressor runs left `T_out` unknown and the
+simulable S3 days biased to mild weather; the `T_out`-binned COP table cannot follow flow changes.
+Agreed with the owner, all written into `config/climate.yaml` and committed before the rerun:
+
+- **Training excludes S1** (`seasons.training_excluded`): one fold, fit S2, test S3. The outdoor
+  offset model keeps S1 (it is about the sensor, not the plant).
+- **Causal weekly refit** (`model.adaptive`): from the first S3 gate-month day, every 7 days, the
+  thermal parameters are refitted on the trailing 28 days before the origin, shrunk toward the S2
+  fit (penalty `lambda * sum(((p - p_S2) / box width)^2)`); response, valve cap, offsets and starts
+  stay the S2 fit. `lambda` per model is chosen on S2 only (prior on S2 up to 2024-12-31, weekly
+  refits over the rest of the S2 gate months, lowest mean Q-driven RMSE at 12 and 24 h among values
+  whose refits meet the stability criterion) and committed separately before any S3 run.
+- **Fit scoring:** every slot with a valid air temperature is scored; only unknown quality, open
+  window, thermostat outage and cooling mark bad data. The validation scoring is unchanged.
+- **`T_out`:** `t_out_debiased` stays the source; slots where it is unknown take `t_out_fused`
+  (`signals.t_out_fill_unknown_from_fused`), recorded per slot; the model id hashes the station
+  manifest.
+- **COP:** the model is a table binned by lift `T_flow - T_out` (2 K, same minimum count and
+  nearest-bin rule), trained on S2 and validated on S3 against the unchanged 8 % / 3 % limits; the
+  regression and the `T_out` table are reported. With it the legacy-replay electricity and cost
+  criteria are computed (simulated heat priced through the lift table at the flow target).
+- **Acceptance protocol changes (only these two):** fold stability becomes "at least 95 % of the
+  weekly refits have every parameter inside the envelope and none on a bound, `g_s` at 0 allowed";
+  the baseline gain at 12 and 24 h becomes "not worse" (at least 0 %). Every other threshold is
+  unchanged; the COP limits now sit in the acceptance table. No further iteration follows: a
+  failure is UNDETERMINED.
+
+**Outcome (2026-10-30, one run at the predeclaration commit): UNDETERMINED**, so C2 counts as no-go
+and the iteration budget is spent. Neither model passed every criterion. Both failed the 6 h
+Q-driven RMSE, the u-driven daily-energy MAPE and season bias, the `min_hours` 10 regime bias and the
+COP season error. A also failed the 12 h RMSE, the 24 h bias, the 15 h regime bias and the whole
+legacy replay. B passed the legacy replay (electricity, cost and Kh) but failed the parameter
+criteria: its S2 slab capacity sits on its lower bound and most weekly refits hit a bound. The
+figures stay in the private model directory.
 
 #### Code layout and PR order
 

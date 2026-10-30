@@ -21,6 +21,11 @@ a nuisance parameter per segment, eliminated in closed form (variable projection
 linear in it).  A parameter on a bound of the search box, or a derived one outside the envelope of
 ``config/climate.yaml``, makes the fit a failure, and so does a parameter that the data cannot pin
 down (relative standard error above ``IDENT_MAX_REL_SE`` from the Jacobian at the optimum).
+
+With a *prior* (a parameter set fitted elsewhere) and a *shrinkage* strength ``lambda``, the fit
+adds ``lambda * sum(((p - p_prior) / width)^2)`` to the cost, ``width`` being each parameter's
+search-box width, and starts from the prior: the causal weekly refits of ``climate-fit`` stay close
+to the training-season fit unless their window's data say otherwise.
 """
 
 from __future__ import annotations
@@ -402,11 +407,15 @@ def fit_thermal(
     envelope: Mapping[str, Sequence[float]],
     *,
     starts: Sequence[Mapping[str, float]] | None = None,
+    prior: Mapping[str, float] | None = None,
+    shrinkage: float = 0.0,
 ) -> ThermalFit:
     """Fit model *kind* on *fi*; the best of the start points wins.
 
     With a return measurement the fit runs twice: the second pass re-weights the air and return
-    residuals by their first-pass RMS and restarts from the first-pass optimum."""
+    residuals by their first-pass RMS and restarts from the first-pass optimum.  A *prior* is the
+    single start point (unless *starts* is given) and, with *shrinkage* > 0, the centre of the
+    penalty described in the module docstring; the reported RMSE is the data part only."""
     if not fi.segments:
         raise ValueError("no fit segment: not enough slots with known inputs")
     with_return = kind == "B" and fi.has_return
@@ -416,7 +425,16 @@ def fit_thermal(
     hi = np.array([box[n][1] for n in names])
     sigma = (AIR_SIGMA_K, RETURN_SIGMA_K)
     passes = 2 if with_return else 1
+    if starts is None and prior is not None:
+        starts = [{n: prior.get(n, _STARTS[kind][0][n]) for n in names}]
     points = list(starts or _STARTS[kind])
+    penalised = [i for i, n in enumerate(names) if prior is not None and n in prior]
+    centre = np.array([prior[names[i]] for i in penalised]) if penalised else np.zeros(0)
+    scale = np.sqrt(max(shrinkage, 0.0)) / (hi - lo)[penalised]
+
+    def penalty(th: np.ndarray) -> np.ndarray:
+        return scale * (th[penalised] - centre)
+
     best = None
     for _ in range(passes):
         problem = _Problem(kind, names, fi, sigma)
@@ -424,7 +442,7 @@ def fit_thermal(
         for start in points:
             x0 = np.clip([start[n] for n in names], lo + 1e-6 * (hi - lo), hi - 1e-6 * (hi - lo))
             res = least_squares(
-                lambda th: problem.run(th)[0],
+                lambda th: np.concatenate([problem.run(th)[0], penalty(th)]),
                 x0,
                 bounds=(lo, hi),
                 x_scale="jac",
@@ -474,6 +492,7 @@ def fit_thermal(
         sigma=sigma,
         nfev=int(best.nfev),
         message=str(best.message),
+        extra={"shrinkage": float(shrinkage)} if prior is not None else {},
     )
 
 

@@ -285,26 +285,33 @@ uv run battery-optimizer climate-fit \
 ```
 
 Fits the C2 thermal models (first-order A and slab + air B), their observers and heat responses
-and the compressor-starts model on every fold of [`config/climate.yaml`](../config/climate.yaml)
-(`--climate-config` to use another file), validates each fold on its test season and records the
-acceptance verdict of the [C2 design](planning/climate-optimizer-implementation.md#c2-design-and-predeclared-gate).
-It reads the climate feature set, the dataset's PVPC prices (for the replayed legacy permission `u`)
-and the private site file `<data_dir>/climate/site.yaml`; it writes nothing else and no runtime
-or actuator is touched.
+and the compressor-starts model on the fold of [`config/climate.yaml`](../config/climate.yaml)
+(`--climate-config` to use another file; fit S2, test S3), refits the thermal parameters causally
+every week of the test season on the trailing window, shrunk toward the training fit, fits the COP
+model, validates on the test season and records the acceptance verdict of the
+[C2 design](planning/climate-optimizer-implementation.md#c2-model-iteration-the-one-predeclared-iteration-config-version-2).
+It reads the climate feature set, the dataset's PVPC prices (for the replayed legacy permission `u`),
+the private site file `<data_dir>/climate/site.yaml` and its reference station's stored months
+(needed for the long-gap outdoor fill); it writes nothing else and no runtime or actuator is touched.
+It refuses to run while `model.adaptive.shrinkage` is unset: that value is chosen on S2 only by
+`hack/climate_shrinkage.py` (same arguments, writes
+`<data_dir>/analysis/v1/climate-shrinkage/<inputs>-<config>/`) and committed before the run.
 
 Output: `<data_dir>/analysis/v1/climate-models/<model_id>/` with `model.json` (parameters per fold
 and model, physical reading, fit diagnostics, observer, response, room offsets and starts model),
 `validation.json` (Q-driven and u-driven forecast errors, daily energy, the legacy replay's
 degree-hours, every acceptance criterion with its value and status, the A vs B selection) and
-`validation.md`. `model_id` is the SHA-256 of the feature-set id, the dataset id, the fold
-windows, the code version, the config hash and the site-file hash. The files are written
+`validation.md`. `model.json` also holds every weekly refit; `validation.json` the outdoor fill
+share, the COP validation and the legacy replay's electricity and cost. `model_id` is the SHA-256 of
+the feature-set id, the dataset id, the fold windows, the code version, the config hash, the
+site-file hash and the input hash (which covers the station manifest and the outdoor source). The files are written
 atomically and never overwritten: the same id with different bytes is refused. The data dir must
 lie outside a git tree. The output holds private figures: it stays in the data dir.
 
-The command prints the directory and the verdict: `ACCEPTED` (with the criteria still pending, see
-below) or `UNDETERMINED` when no model passes. The legacy-replay electricity and cost criteria need
-the COP model and the policy simulator (C2 PRs 2 and 4) and are reported as `pending`; the
-model-iteration budget of the plan is never used by the command itself. See
+The command prints the directory and the verdict: `ACCEPTED` or `UNDETERMINED` when no model
+passes. The COP limits and the legacy-replay electricity and cost (simulated heat priced through the
+COP lift table) are acceptance criteria; the model-iteration budget of the plan is never used by
+the command itself. See
 [Architecture](architecture.md#climate-subpackage-climate) for the method.
 
 ## `forecast-eval`

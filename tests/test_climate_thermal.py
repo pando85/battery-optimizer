@@ -126,6 +126,44 @@ def test_b_is_not_identifiable_without_the_slab_measurement_and_it_is_detected()
     assert seen.params["c_s"] == pytest.approx(TRUE_B["c_s"], rel=0.1)
 
 
+def test_shrinkage_pulls_the_fit_toward_the_prior_monotonically():
+    w = _drivers(days=6)
+    _xs, y, _ = _house("A", TRUE_A, w, [21.0], seed=4)
+    fi = _fit_inputs(w, y)
+    prior = {"ua": 0.12, "tau": 140.0, "q0": 1.2, "g_s": 0.3}
+    free = thermal.fit_thermal("A", fi, ENVELOPE, prior=prior, shrinkage=0.0)
+    # no shrinkage: the data decide (the prior is only the start point)
+    assert free.params["ua"] == pytest.approx(TRUE_A["ua"], rel=0.1)
+    box = thermal.bounds_for("A", ENVELOPE)
+    dist = []
+    for lam in (0.0, 1e2, 1e4, 1e6, 1e9):
+        fit = thermal.fit_thermal("A", fi, ENVELOPE, prior=prior, shrinkage=lam)
+        assert fit.extra == {"shrinkage": lam}
+        dist.append(sum(((fit.params[n] - prior[n]) / (box[n][1] - box[n][0])) ** 2 for n in prior))
+    assert all(b <= a + 1e-9 for a, b in zip(dist, dist[1:], strict=False))
+    assert dist[-1] < 1e-4 < dist[0]  # a huge strength returns the prior
+    # the reported error is the data part: it grows as the prior wins
+    strong = thermal.fit_thermal("A", fi, ENVELOPE, prior=prior, shrinkage=1e9)
+    assert strong.rmse_air_k > free.rmse_air_k
+    # without a prior the shrinkage is ignored and nothing is recorded
+    plain = thermal.fit_thermal("A", fi, ENVELOPE, shrinkage=1e9)
+    assert plain.extra == {} and plain.params["ua"] == pytest.approx(TRUE_A["ua"], rel=0.1)
+
+
+def test_shrinkage_covers_b_with_or_without_a_return_measurement():
+    w = _drivers(days=6)
+    _xs, y, y_ret = _house("B", TRUE_B, w, [21.0, 23.0], seed=5)
+    prior = dict(TRUE_B, ua=0.15, c_s=20.0)
+    with_ret = thermal.fit_thermal(
+        "B", _fit_inputs(w, y, y_ret), ENVELOPE, prior=prior, shrinkage=1e9
+    )
+    no_ret = thermal.fit_thermal("B", _fit_inputs(w, y), ENVELOPE, prior=prior, shrinkage=1e9)
+    for fit in (with_ret, no_ret):
+        for name in ("ua", "c_a", "c_s", "k", "q0", "g_s"):
+            assert fit.params[name] == pytest.approx(prior[name], rel=1e-3, abs=1e-4), name
+    assert with_ret.params["b_ret"] == pytest.approx(prior["b_ret"], rel=1e-3)
+
+
 def test_a_parameter_on_an_envelope_bound_is_a_failed_fit():
     leaky = dict(TRUE_A, ua=0.8)  # above the envelope's 0.5 kW/K
     w = _drivers()
