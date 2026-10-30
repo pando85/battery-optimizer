@@ -59,7 +59,7 @@ are required, otherwise **UNDETERMINED**.
 |---|---|---|
 | Comfort | Hall/kitchen below 23.5 degC | at most 10% of the day-window time |
 | Comfort | Each thermostat room below 21 degC | at most 3% of all time |
-| Efficiency | Heat-pump electricity per heating degree-day (base 18 degC, daily mean outdoor, open for owner review) | at most +20% against the S3 band-matched baseline |
+| Efficiency | Heat-pump electricity per heating degree-day (base 15 degC, as `HDD_BASE_C` in `hack/system_sim.py:64`, so it stays on the replay's basis; daily mean outdoor) | at most +20% against the S3 band-matched baseline |
 | Machine | Compressor starts per day | median at most 20 |
 | Machine | Electric heater | no controller-caused activation (DHW heater hours unchanged) |
 | DHW | Share of DHW heat-pump energy in the scheduled window | at least 80% |
@@ -89,5 +89,5 @@ reason. The commit history of this file is the audit trail. No amendment has bee
 
 ## 5. Items for the owner at review
 
-- The validity definition (section 1) and the heating degree-day base (section 3).
+- The validity definition (section 1) and the room list (design section 3). The degree-day base follows `hack/system_sim.py`.
 - The go-live date: it fixes the start of the new regime and the end of the legacy window.

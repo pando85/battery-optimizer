@@ -261,7 +261,7 @@ part of B0 to B3.
 
 | Step | Content | Status |
 |---|---|---|
-| **B0** | Diagnostics: [C2 recovery](climate-c2-recovery.md) R0 to R2 and the warm-up rates (feeds the optimum-start table) | in progress |
+| **B0** | Diagnostics: [C2 recovery](climate-c2-recovery.md) R0 to R2 and the warm-up rates (feeds the optimum-start table) | done (2026-10-31), see [climate-c2-recovery section 7](climate-c2-recovery.md#7-status-2026-10-31-b0-results-r0-to-r2) |
 | **B1** | Offline MPC replay on the committed comfort schedule | planned |
 | **B2** | Shadow runner in the service (read-only plan and prediction metrics) | planned |
 | **B3** | Preregistered comparison after winter | planned |
@@ -274,7 +274,7 @@ Answered by the owner on 2026-10-31.
 |---|---|---|---|---|
 | Outdoor-temperature source for the curve | 7.1 | Resolved | 2026-10-31 | Offset-corrected unit sensor; the offset is an editable HA helper |
 | Day window end time | 3 | Resolved | 2026-10-31 | 22:00, confirmed (no longer an assumption) |
-| Lead-time values | 6 | Resolved (no owner decision needed) | 2026-10-31 | Values come from B0; until then conservative editable placeholders (180 min below 6 degC outdoor, 120 min above); the TODO table stays for the measured values |
+| Lead-time values | 6 | Resolved (no owner decision needed) | 2026-10-31 | Resolved with B0 (2026-10-31): measured p75 defaults by day type in the table of section 6; the 180/120 min placeholders are withdrawn |
 | Legionella policy | 7.2, 13 | Resolved | 2026-10-31 | Off for now; the final MPC (track B) should schedule it eventually (future extension) |
 | Import-limit basis | 9 | Resolved (owner-confirmed; no distributor document yet) | 2026-10-31 | Instantaneous trip; battery cap must regulate in real time against measured load with a margin (actuator ADR requirement) |
 | Thermostat device programs | 4 | Resolved | 2026-10-31 | Disabled, owner-confirmed |
