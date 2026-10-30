@@ -26,6 +26,7 @@ import pytest
 from battery_optimizer import extract_prom
 from battery_optimizer.extract_prom import (
     BASE_URL_ENV_VAR,
+    CLIMATE_ENTITY_IDS,
     CLIMATE_ROOMS,
     DEAD_DUPLICATE_ENTITY_IDS,
     DEFAULT_BASE_URL,
@@ -1384,18 +1385,44 @@ class TestClimateRegistry:
         assert f"no_samples_extracted:{self.SETPOINT}" in flags
         assert f"no_samples_extracted:{self.ROOM}" not in flags
 
-    def test_mixing_default_and_climate_entities_is_refused_before_any_request(
-        self, tmp_path: Path, config: Path
+    def test_the_climate_group_excludes_entities_of_the_other_groups(self) -> None:
+        assert set(CLIMATE_ENTITY_IDS) >= set(CLIMATE_ROOMS.values())
+        assert not set(CLIMATE_ENTITY_IDS) & set(DEFAULT_ENTITY_IDS)
+        assert set(CLIMATE_ENTITY_IDS) <= set(FEATURE_ENTITY_IDS)
+        for shared in (
+            "sensor.aquarea_outside_ambient_temperature",
+            "sensor.aquarea_heat_power_consumed",
+            "input_boolean.appdaemon_climate_enable",
+            "switch.aquarea_force_dhw_mode",
+        ):
+            assert shared in ENTITY_SPECS
+            assert shared not in CLIMATE_ENTITY_IDS
+
+    @pytest.mark.parametrize(
+        "other",
+        [
+            "sensor.shellyem_main_channel_1_energy",  # default entity
+            "sensor.esios_pvpc",  # default entity
+            "sensor.aquarea_outside_ambient_temperature",  # earlier feature entity
+            "sensor.aquarea_heat_power_consumed",  # earlier feature entity
+        ],
+    )
+    def test_mixing_the_climate_group_with_another_group_is_refused_before_any_request(
+        self, tmp_path: Path, config: Path, other: str
     ) -> None:
         fake = FakePrometheus([])
-        with pytest.raises(ValueError, match="must not mix default entities"):
-            run_extract(tmp_path, fake.client, config, entities=[DEFAULT_ENTITY_IDS[0], self.ROOM])
-        with pytest.raises(ValueError, match="must not mix default entities"):
-            run_extract(
-                tmp_path, fake.client, config, entities=[self.SETPOINT, DEFAULT_ENTITY_IDS[1]]
-            )
+        for entities in ([other, self.ROOM], [self.SETPOINT, other]):
+            with pytest.raises(ValueError, match="must not mix climate entities"):
+                run_extract(tmp_path, fake.client, config, entities=entities)
         assert fake.requests == []
         assert not (tmp_path / "data" / "manifests").exists()
+
+    def test_other_mixes_keep_their_behaviour(self, tmp_path: Path, config: Path) -> None:
+        # default + earlier feature entities was never refused and still is not
+        fake = FakePrometheus([])
+        entities = [DEFAULT_ENTITY_IDS[0], "sensor.shellypmmini_servers_power"]
+        run_extract(tmp_path, fake.client, config, entities=entities, end="2024-01-01T01:00:00Z")
+        assert fake.requests
 
     def test_unmixed_extractions_are_accepted(self, tmp_path: Path, config: Path) -> None:
         fake = FakePrometheus([])

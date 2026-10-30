@@ -84,6 +84,7 @@ from battery_optimizer.build import (
 )
 from battery_optimizer.config import PeriodRule, TariffPeriods, load_config, tariff_period_for
 from battery_optimizer.extract_prom import (
+    CLIMATE_ENTITY_IDS,
     DEAD_DUPLICATE_ENTITY_IDS,
     ENTITY_SPECS,
     FEATURE_ENTITY_IDS,
@@ -91,7 +92,6 @@ from battery_optimizer.extract_prom import (
     canonical_labels_json,
     compute_series_key,
 )
-from battery_optimizer.features import CLIMATE_SIGNALS
 from battery_optimizer.paths import parts_dir
 from battery_optimizer.schemas import RAW_SAMPLE, SCHEMA_VERSION, validate_table
 
@@ -2135,7 +2135,7 @@ class TestLoadRawInputs:
             data_dir, cfg, *window, lookback=timedelta(minutes=5)
         )
 
-        climate_entities = {sig.entity for sig in CLIMATE_SIGNALS}
+        climate_entities = set(CLIMATE_ENTITY_IDS)
         specs = [s for s in ENTITY_SPECS.values() if s.entity_id in climate_entities]
         assert {s.entity_id for s in specs} == climate_entities
         assert climate_entities <= set(FEATURE_ENTITY_IDS)

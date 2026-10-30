@@ -221,8 +221,7 @@ feature entities is also ignored by `build`'s lineage hash. With `--dataset`, th
 ### Climate signal set (`--signal-set climate`)
 
 ```bash
-# Feature-only entities are extracted on their own: an extraction that mixes them with the
-# default entities is refused, because it would enter the canonical lineage.
+# The climate entities are their own extraction group (`extract_prom.CLIMATE_ENTITY_IDS`).
 uv run battery-optimizer extract --source prometheus --config config/tariff.yaml \
   --start 2026-01-12T00:00:00Z --end 2026-01-15T00:00:00Z --allow-coverage-gaps \
   --entities climate.thermostat_bedroom,climate.thermostat_bedroom#setpoint,sensor.aquarea_tank_temperature
@@ -244,6 +243,13 @@ is zero-filled. A counter (`*_delta`) is the increase of the counter per slot: a
 the previous value is a reset and counts the value read after it, a smaller drop is a rollback and
 counts nothing (the energy totals slip back by tenths of a kWh); both are counted in the manifest
 quality (`counter_resets`, `counter_rollbacks`). `--dataset` needs the default set.
+
+An entity belongs to one extraction group. `extract` refuses a run that mixes a climate entity
+with a default entity (it would change the canonical `dataset_id`) or with an earlier feature entity
+(the default feature set reads every manifest that names one, so it would change the default
+`feature_set_id`). The entities both sets use (outdoor temperature, heat/DHW/cool power, force-DHW
+and the AppDaemon helpers) are extracted once, with the earlier feature entities, and the climate set
+reads them from that extraction.
 
 A thermostat has two series under one entity: `climate.thermostat_x` is its current temperature and
 `climate.thermostat_x#setpoint` its target temperature (`extract --entities` takes both; the

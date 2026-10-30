@@ -190,6 +190,45 @@ class EntitySpec:
         return f"{self.entity_id}#{self.series}" if self.series else self.entity_id
 
 
+_CLIMATE_SPECS: tuple[EntitySpec, ...] = (
+    *(
+        spec
+        for room in CLIMATE_ROOMS.values()
+        for spec in (
+            EntitySpec(room, "hass_climate_current_temperature_celsius", "°C"),
+            EntitySpec(room, "hass_climate_target_temperature_celsius", "°C", "setpoint"),
+        )
+    ),
+    EntitySpec("sensor.aquarea_tank_temperature", "hass_sensor_unit_celsius", "°C"),
+    EntitySpec("sensor.aquarea_outlet_temperature", "hass_sensor_unit_celsius", "°C"),
+    EntitySpec("sensor.aquarea_inlet_temperature", "hass_sensor_unit_celsius", "°C"),
+    EntitySpec("sensor.aquarea_outlet_target_temperature", "hass_sensor_unit_celsius", "°C"),
+    EntitySpec("sensor.aquarea_compressor_frequency", "hass_sensor_unit_hz", "Hz"),
+    # A monotonic start counter; its metric name carries no unit.
+    EntitySpec("sensor.aquarea_compressor_start_stop_counter", "hass_sensor_state", "count"),
+    EntitySpec("sensor.aquarea_pump_flow", "hass_sensor_unit_l_per_min", "L/min"),
+    *(
+        EntitySpec(f"sensor.aquarea_{mode}_energy_{side}", "hass_sensor_energy_kwh", "kWh")
+        for mode in ("heat", "dhw", "cool")
+        for side in ("produced", "consumed")
+    ),
+    # Aerothermal branch of the main meter (it also feeds a few appliances).
+    EntitySpec("sensor.shellyem_main_channel_2_power", "hass_sensor_power_w", "W"),
+    EntitySpec("sensor.shellyem_main_channel_2_energy", "hass_sensor_energy_kwh", "kWh"),
+    # TODO(climate): register the numeric operating-mode, defrost and 3-way-valve sensors here
+    # once the homelab change publishes them; their entity ids are not known yet.
+)
+"""Series added for the separate climate feature set (``features.CLIMATE_SIGNALS``).  Metrics
+verified against the long-term archive on 2026-10-30.  The entities that the default feature
+set already extracts (outdoor temperature, heat/DHW/cool power, force-DHW, the AppDaemon
+helpers) are not repeated here: they stay in the earlier extraction group."""
+
+CLIMATE_ENTITY_IDS: tuple[str, ...] = tuple(dict.fromkeys(s.entity_id for s in _CLIMATE_SPECS))
+"""The climate extraction group: feature-only entities that belong to no other group.  An
+extraction may not mix them with default entities (they would change the canonical
+``dataset_id``) or with the earlier feature entities (the default feature-set id reads every
+manifest that names one of those, so shared parts would change it)."""
+
 ENTITY_SPECS: dict[str, EntitySpec] = {
     spec.key: spec
     for spec in (
@@ -250,39 +289,7 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         # Washer submeter candidate (audit only; the owner has not confirmed it).
         EntitySpec("sensor.smart_plug_v2_terrace_power", "hass_sensor_power_w", "W"),
         EntitySpec("sensor.terrace_lavadora_energy_today", "hass_sensor_energy_wh", "Wh"),
-        # Heat-pump and room series for the separate climate feature set
-        # (``features.CLIMATE_SIGNALS``).  Feature-only like the entities above: the canonical
-        # extraction, ``dataset_id`` and lineage never read them.  Metrics verified against the
-        # long-term archive on 2026-10-30.  Entities registered above (outdoor temperature,
-        # heat/DHW/cool power, force-DHW and the AppDaemon helpers) are reused as they are.
-        *(
-            spec
-            for room in CLIMATE_ROOMS.values()
-            for spec in (
-                EntitySpec(room, "hass_climate_current_temperature_celsius", "\u00b0C"),
-                EntitySpec(room, "hass_climate_target_temperature_celsius", "\u00b0C", "setpoint"),
-            )
-        ),
-        EntitySpec("sensor.aquarea_tank_temperature", "hass_sensor_unit_celsius", "\u00b0C"),
-        EntitySpec("sensor.aquarea_outlet_temperature", "hass_sensor_unit_celsius", "\u00b0C"),
-        EntitySpec("sensor.aquarea_inlet_temperature", "hass_sensor_unit_celsius", "\u00b0C"),
-        EntitySpec(
-            "sensor.aquarea_outlet_target_temperature", "hass_sensor_unit_celsius", "\u00b0C"
-        ),
-        EntitySpec("sensor.aquarea_compressor_frequency", "hass_sensor_unit_hz", "Hz"),
-        # A monotonic start counter; its metric name carries no unit.
-        EntitySpec("sensor.aquarea_compressor_start_stop_counter", "hass_sensor_state", "count"),
-        EntitySpec("sensor.aquarea_pump_flow", "hass_sensor_unit_l_per_min", "L/min"),
-        *(
-            EntitySpec(f"sensor.aquarea_{mode}_energy_{side}", "hass_sensor_energy_kwh", "kWh")
-            for mode in ("heat", "dhw", "cool")
-            for side in ("produced", "consumed")
-        ),
-        # Aerothermal branch of the main meter (it also feeds a few appliances).
-        EntitySpec("sensor.shellyem_main_channel_2_power", "hass_sensor_power_w", "W"),
-        EntitySpec("sensor.shellyem_main_channel_2_energy", "hass_sensor_energy_kwh", "kWh"),
-        # TODO(climate): register the numeric operating-mode, defrost and 3-way-valve sensors
-        # here once the homelab change publishes them; their entity ids are not known yet.
+        *_CLIMATE_SPECS,
     )
 }
 
@@ -502,23 +509,26 @@ def resolve_entity_specs(entities: Iterable[str] | None) -> tuple[EntitySpec, ..
 
 
 def refuse_mixed_lineage(specs: Iterable[EntitySpec]) -> None:
-    """Refuse one extraction that mixes default (canonical) and feature-only entities.
+    """Refuse an extraction that mixes the climate group with any other group.
 
-    ``build`` skips a raw manifest whose entities are all feature-only; a manifest that also
-    names a default entity enters the canonical lineage, so its parts would change the
-    ``dataset_id`` of an unchanged gross-load series.  Extract the two groups separately.
+    A raw manifest that names a default entity enters the canonical lineage, so climate parts in
+    it would change the ``dataset_id``.  A manifest that names an earlier feature entity (outdoor
+    temperature, heat-pump power, control states) is read by the default feature set, so climate
+    parts in it would change the default ``feature_set_id``.  Extract the groups separately; the
+    climate feature set reads the shared entities from the earlier feature extraction.  Mixes
+    among the default and earlier feature entities are not restricted here.
 
     Raises:
-        ValueError: both a default and a feature-only entity were requested.
+        ValueError: a climate entity was requested with a default or earlier feature entity.
     """
     ids = {s.entity_id for s in specs}
-    canonical = sorted(ids.intersection(DEFAULT_ENTITY_IDS))
-    feature = sorted(ids.intersection(FEATURE_ENTITY_IDS))
-    if canonical and feature:
+    climate = sorted(ids.intersection(CLIMATE_ENTITY_IDS))
+    other = sorted(ids.intersection((*DEFAULT_ENTITY_IDS, *FEATURE_ENTITY_IDS)) - set(climate))
+    if climate and other:
         raise ValueError(
-            "an extraction must not mix default entities with feature-only entities: it would "
-            "enter the canonical lineage and change the dataset_id; run two extractions "
-            f"(default: {', '.join(canonical)}; feature-only: {', '.join(feature)})"
+            "an extraction must not mix climate entities with default or other feature "
+            "entities: it would change the canonical dataset_id or the default feature_set_id; "
+            f"run separate extractions (climate: {', '.join(climate)}; other: {', '.join(other)})"
         )
 
 

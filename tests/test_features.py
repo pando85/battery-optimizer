@@ -16,6 +16,7 @@ import pytest
 from battery_optimizer import features
 from battery_optimizer.cli import main
 from battery_optimizer.extract_prom import (
+    CLIMATE_ENTITY_IDS,
     CLIMATE_ROOMS,
     ENTITY_SPECS,
     FEATURE_ENTITY_IDS,
@@ -589,6 +590,13 @@ class TestClimateSignals:
         assert features.COMFORT_EXCLUDED_ROOMS == {"office_a"}
         assert features.COMFORT_EXCLUDED_ROOMS <= set(CLIMATE_ROOMS)
 
+    def test_every_climate_entity_is_in_the_climate_group_or_shared_with_the_default_set(
+        self,
+    ) -> None:
+        default_entities = {s.entity for s in features.SIGNALS}
+        for sig in features.CLIMATE_SIGNALS:
+            assert (sig.entity in CLIMATE_ENTITY_IDS) != (sig.entity in default_entities)
+
     def test_every_climate_entity_is_a_registered_feature_entity(self) -> None:
         registered = {(s.entity_id, s.metric) for s in ENTITY_SPECS.values()}
         for sig in features.CLIMATE_SIGNALS:
@@ -716,12 +724,13 @@ CURRENT = "hass_climate_current_temperature_celsius"
 TARGET = "hass_climate_target_temperature_celsius"
 
 
-@pytest.fixture
-def climate_dir(tmp_path: Path) -> Path:
-    directory = tmp_path / "climate-data"
-    directory.mkdir()
+CLIMATE_ENTITIES = [ROOM, OFFICE_A, STARTS, HEAT_ENERGY, FREQ]
+
+
+def _climate_rows() -> list[dict[str, Any]]:
+    """Raw rows of the climate extraction group only (none of the earlier feature entities)."""
     n = 121
-    degc = "°C"
+    degc = "\u00b0C"
     rows = _raw_rows(ROOM, CURRENT, degc, T0, [20.0] * n)
     rows += _raw_rows(ROOM, TARGET, degc, T0, [22.0] * n)
     rows += _raw_rows(OFFICE_A, CURRENT, degc, T0, [24.0] * n)  # no setpoint series
@@ -730,7 +739,14 @@ def climate_dir(tmp_path: Path) -> Path:
     energy = [100.0 + 0.01 * i for i in range(n)]
     rows += _raw_rows(HEAT_ENERGY, "hass_sensor_energy_kwh", "kWh", T0, energy)
     rows += _raw_rows(FREQ, "hass_sensor_unit_hz", "Hz", T0, [40.0] * n)
-    _write_raw(directory, rows, entities=[ROOM, OFFICE_A, STARTS, HEAT_ENERGY, FREQ])
+    return rows
+
+
+@pytest.fixture
+def climate_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "climate-data"
+    directory.mkdir()
+    _write_raw(directory, _climate_rows(), entities=CLIMATE_ENTITIES)
     return directory
 
 
@@ -786,6 +802,37 @@ class TestBuildClimateFeatures:
         assert rooms["office_a"]["comfort"] is False
         assert rooms["bedroom"] == {"entity": ROOM, "comfort": True}
         assert rooms["office_t"]["comfort"] is True
+
+    def test_a_climate_extraction_leaves_the_default_set_unchanged(self, data_dir: Path) -> None:
+        window = ("2026-01-05T00:00:00Z", "2026-01-05T02:00:00Z")
+        before = build_features(data_dir=str(data_dir), start=window[0], end=window[1])
+        table_before, manifest_before = load_features(before)
+
+        # a climate extraction over an overlapping window, into the same store
+        _write_raw(data_dir, _climate_rows(), entities=CLIMATE_ENTITIES)
+        after = build_features(data_dir=str(data_dir), start=window[0], end=window[1])
+        table_after, manifest_after = load_features(after)
+
+        assert after == before  # same feature_set_id, so the same directory
+        assert manifest_after["feature_set_id"] == manifest_before["feature_set_id"]
+        assert manifest_after["inputs"] == manifest_before["inputs"]
+        assert table_after.equals(table_before)
+
+    def test_the_climate_set_reads_both_extractions(self, data_dir: Path) -> None:
+        _write_raw(data_dir, _climate_rows(), entities=CLIMATE_ENTITIES)
+        out = self._build(data_dir)
+        table, manifest = load_features(out)
+        # from the climate extraction
+        assert table.column("room_bedroom_temp_mean_c").to_pylist()[1] == pytest.approx(20.0)
+        assert table.column("compressor_freq_mean").to_pylist()[1] == pytest.approx(40.0)
+        # from the earlier feature extraction (heat power 0 W, then 800 W; climate_enable on)
+        assert table.column("hp_heat_kwh").to_pylist()[5] == pytest.approx(0.2)
+        assert table.column("climate_enable_at_start").to_pylist()[1] == 1.0
+        assert len(manifest["inputs"]["raw_extraction_ids"]) == 2
+        assert (
+            "sensor.aquarea_heat_power_consumed"
+            not in (manifest["quality"]["entities_without_samples"])
+        )
 
     def test_the_climate_set_has_its_own_id_and_no_default_manifest_key(
         self, data_dir: Path, climate_dir: Path
