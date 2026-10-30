@@ -252,6 +252,11 @@ uv run python hack/climate_cop.py --feature-set <climate feature set id> \
 `<data_dir>/analysis/v1/climate-cop/<feature set>-<config>[-name]/`; they hold private figures and
 stay in the data dir.
 
+`hack/system_sim.py` (read-only) replays a heat-pump regime x house battery grid per season and writes
+`report.json`, `report.md` and one benchmark run per scenario into
+`<data_dir>/analysis/v1/system-sim/<run-id>/`; method, results and the exact command are in the
+[system replay](planning/system-replay.md).
+
 ### Fused outdoor temperature (`station.py`, `tout.py`)
 
 The heat pump's outdoor sensor reads 1.5 to 2.5 K low while the compressor runs and warm in the sun,
