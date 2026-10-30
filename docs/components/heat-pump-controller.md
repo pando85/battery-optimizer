@@ -17,6 +17,33 @@ repository never writes to it (shadow phase, [AGENTS.md](../../AGENTS.md)).
   from; [cop-model](cop-model.md) and [thermal-model](thermal-model.md) data; LF-1
   ([hp-consumption-forecast](hp-consumption-forecast.md)) replays it.
 
+## Heater facts (import-limit inputs)
+
+From the Panasonic service manual (indoor WH-ADC0309J3E5 with outdoor WH-UD09JE5 documented; the owner's
+WH-ADC0309JE5C and WH-UD09JE5-1 are assumed equivalent). Page details in the homelab
+`docs/user-guide/heat-pump-water-temperature.md`.
+
+- One integrated 3.00 kW electric heater (13.0 A) on its own supply (own 16 A breaker); backup for space
+  heating and, with the tank heater set to Internal, the DHW booster (p.25-26, 138, 146).
+- Heat pump alone at most 3.47 kW (about 2.0 kW rated at A7W35); **worst case with the heater is about
+  6.5 kW**, above the 5.0 kW import limit, which the smart meter enforces by cutting supply (cuts have
+  happened).
+- Automatic starts: space heating below the outdoor "O/D temp for heater ON" (default 0 degC, live reading
+  0 degC; p.144); defrost if the backup heater is enabled (p.145); hot water when the tank target exceeds the
+  heat pump reach, about 51 to 55 degC (p.26, 107, 137-138); the **weekly sterilization**, default 65 degC for
+  10 min, a scheduled 3 kW load (p.150); anti-freeze below 6 degC (p.152); a forced heater on a heat pump
+  error only if "Force Heater" = Auto (default Manual; p.144, 147-148). SMART DHW (default 20:00 to 05:00)
+  can suppress reheat (p.152).
+- The current 49 degC tank target (2026-10-30) is within heat pump range. Any DHW target above about
+  51 degC starts the heater.
+- Power-limit inputs exist (demand control 0-10 V, external compressor switch, SG-ready, CN-THERMO; most need
+  the optional CZ-NS4P board; p.92-93, 98, 103, 159-163). The manual does not say demand control limits the
+  heater. Whether any is fitted is unknown.
+- Observed (read-only, 2023-11-08 to 2026-10-25): no heater state or heater power signal is exported, and the
+  tank temperature never exceeded 51 degC, so no 65 degC sterilization or heater-boosted hot water is visible;
+  the outdoor temperature was below 0 degC on only 11 days (minimum -3 degC). There is no evidence of a
+  heater run, but also no direct heater signal.
+
 ## Calibrated on
 
 Not fitted: the rules and `min_hours` were chosen by the owner. What exists is the observed behaviour:
@@ -36,6 +63,8 @@ Not fitted: the rules and `min_hours` were chosen by the owner. What exists is t
 - The pump runs a fixed direct water target; the stored heating curve is inactive
   ([C7-F](../planning/climate-flow-calibration-optimization.md)).
 - Setpoints are manual and high enough that comfort-room valves stay open.
+- The heater stays off in normal operation (hot water at or below about 50 degC, outdoor above 0 degC); the
+  weekly sterilization is the one scheduled exception to check (the facts above).
 - The comfort schedule ([ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md): hall-kitchen at least 23.5 degC from 12:00 on weekdays and from 09:00
   at weekends, all rooms at least 21 degC) can be met by optimum start with the fewest kWh. Untested:
   the schedule shape was never replayed.
@@ -46,6 +75,8 @@ Not fitted: the rules and `min_hours` were chosen by the owner. What exists is t
   A changed hour selection also needs a matching `structured_forecast.py` replay update.
 - The comfort schedule goes live, the legacy rule or the `dhw_control` forcing is retired, or boost
   starts: the load shape changes for every consumer listed above.
+- The heater facts change (tank target above about 51 degC, sterilization or "Force Heater" enabled, a
+  power-limit input fitted, a model difference from the manual).
 - Two price-reactive writers run at once (legacy rule plus boost plus a battery with native price
   features).
 
