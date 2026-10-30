@@ -16,6 +16,16 @@ the [top-level README](../README.md).
 | [Container image](container.md) | Published tags, running the batch commands and `serve` from the image, provenance verification |
 | [Known issues](known-issues.md) | HA retention, per-chunk emptiness, row-level re-extraction dedup, `carry_in` flags |
 
+## Component calibration records
+
+What each component was calibrated on, what it assumes and what invalidates it, so a plant or control
+change leads to a recalibration instead of a silent drift.
+
+| Document | Purpose |
+|---|---|
+| [Components overview](components/README.md) | How to use the pages, page template, dependency map and status table of every component |
+| [Regime log](components/regime-log.md) | Dated log of real plant and control changes (water target, setpoints, `min_hours`, AppDaemon fixes) and the planned ones (comfort schedule, battery go-live) |
+
 ## Architecture decision records
 
 | ADR | Title | Status |

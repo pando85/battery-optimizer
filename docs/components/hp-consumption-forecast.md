@@ -1,0 +1,57 @@
+# Heat-pump consumption forecast (C6, optional HP-plan interface, LF-1)
+
+## Purpose and owner
+
+Tells the battery forecaster how much electricity the heat pump will draw and when, so the battery does
+not learn it by lag. Two pieces: **LF-1 `structured`** (built, offline: replays the legacy AppDaemon rule,
+`structured_forecast.py`) and the **HP-plan interface** (C6, specified here, not built). Owner: this
+repository for the consumer side; the plan would be published by the homelab controller
+([heat-pump-controller](heat-pump-controller.md)).
+
+## Interfaces
+
+- **LF-1 in:** prices, as-of outdoor temperature, climate features; **out:** a load forecast through the
+  forecaster seam. The service refuses it.
+- **Interface (proposed, one read-only HA entity, no new endpoint):** `sensor.hp_planned_energy`, state =
+  kWh planned for the next 24 h, attributes `schema_version`, `generated_at`, `valid_until`, `plan_id`,
+  `meter_basis` (`ch2_branch` or `heishamon`, they differ by about 1.28), `slots[]` of
+  `{start, kwh, kind: heat|dhw|boost}`, `boost`.
+- **Battery side:** `gross_forecast = LF-0(ch1 - hp_measured) + sum(slots.kwh)`, falling back to plain
+  LF-0 when the entity is stale, missing or past `valid_until`; the basis is recorded in `forecast_meta`.
+  The residual subtraction must use the same meter basis the plan publishes (no double counting).
+- **Consumer:** [battery-load-forecast](battery-load-forecast.md).
+
+## Calibrated on
+
+Nothing for the interface. LF-1 was evaluated on the legacy history only (periods of the
+[load-forecaster plan](../planning/load-forecaster-improvement-plan.md)): it **failed gate G4 twice**; the heating season lost, mostly in the hot-water
+part; only a cooling-season gain of about 10% of the P0 gap was seen. Rule versions
+`climate_control@5af36d49` and `dhw_control@5af36d49`.
+
+## Assumptions
+
+- A perfect whole-house forecast is worth about a fifth of the battery's net saving
+  ([load-forecaster plan](../planning/load-forecaster-improvement-plan.md)); the heat-pump share of that
+  is smaller, and a clock-scheduled heat pump should be more slot-regular than the price-chosen one.
+- Under a grid-target charge adapter forecast error becomes charge-energy error, not a safety problem,
+  provided the target is capped below the import limit.
+
+## Invalidated when
+
+- **LF-1:** the legacy cheapest-hours rule is retired or its version changes. Its replay then describes
+  a rule that no longer runs; keep the code for legacy-history evaluation only.
+- **Interface:** the controller's plan format, meter basis or horizon changes; the heat-pump sub-meter
+  changes; boost adds kinds the forecaster does not know.
+
+## Recalibrate by
+
+Decide on evidence, not by building: after 6 to 8 weeks of new-regime data run
+`uv run battery-optimizer decompose-load --features <climate feature set dir> --dataset <dir>`
+([CLI](../cli.md#decompose-load)) and read the heat-pump row of the price-weighted headroom. Predeclare
+what share of the P0 gap counts as material before looking. Build the interface only above it; then
+acceptance is a paired forecast-eval against LF-0 on a window after the build.
+
+## Status
+
+**planned** (2026-10-30): interface specified, not built. **LF-1 goes stale** the day the legacy rule is
+retired; it is parked as a forward-looking forecaster either way.

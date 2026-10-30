@@ -29,6 +29,10 @@ to make these boundaries explicit.
 | **[Battery Model](planning/components/battery-model.md)** | Supply physical state and constraints: capacity, SOC bounds, charge/discharge power, one-way efficiencies, grid import/export accounting | `battery.py` (`BatterySpec`, `Horizon`, numeric physics/validation), battery configuration resolved via `benchmark.resolve_battery_assumptions`; `service/virtual_battery.py` replays shadow decisions. The shipped **0.80 round-trip efficiency is an assumption**, not a device measurement. |
 | **[Dispatch Optimizer](planning/components/dispatch-optimizer.md)** | Find feasible, low-cost charge/discharge decisions from **Load Forecast + Price Outlook + Battery Model**, current SOC and economic assumptions | `service/planner.py` freezes a `PlanningSnapshot`, invokes the shared `oracle.solve_oracle` (SciPy/HiGHS), and produces `DispatchPlan`/`DispatchIntent` via `dispatch.py`; `rolling_horizon.py` is the offline policy/replanning harness. The service re-solves every 15 minutes and on selected changes, but remains **shadow-only**. |
 
+What each component was calibrated on, what it assumes and what invalidates it is recorded per
+component in [components](components/README.md), with the [regime log](components/regime-log.md) of real
+plant and control changes. Update them when a component or the plant changes.
+
 ### Boundaries and information flow
 
 - The **Load Forecaster** emits time-aligned demand predictions. It does not choose battery
