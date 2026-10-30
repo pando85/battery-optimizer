@@ -79,7 +79,7 @@ offline iteration safe, and it is why the absence of hardware blocks only one co
 | Component | v1 — works simply | v2 | v3 | Hardware-gated? |
 |---|---|---|---|---|
 | **Price feed** | archived realised prices; published = realised (owner-asserted 2026-10-24, `verified_from_data: false`) | OMIE day-ahead plus PVPC adjustments, giving a real 14:00 estimate for the next day | daily attribute snapshot, converting the assertion into a measurement | No |
-| **Load forecast** | trailing slot mean, 28-day window | server baseline and AppDaemon schedules as explicit inputs | quantiles P10/P50/P90, then appliance-conditioned using the preserved HA enum history | No |
+| **Load forecast** | trailing slot mean, 28-day window | server baseline and AppDaemon schedules as explicit inputs (ADR-0006: the heat-pump plan is an input only if the decomposition headroom on new-regime data is material) | quantiles P10/P50/P90, then appliance-conditioned using the preserved HA enum history | No |
 | **Optimizer / MPC** | two-publication rolling horizon, ~34 h, two solves per local day — **done, and promoted: `rolling_horizon` is the fifth canonical rung (2026-10-24), the ladder is `no_battery`, `causal_price`, `day_ahead`, `rolling_horizon`, `oracle`, and `--policies all` runs all five** | 15-minute replan cadence over a 24–48 h horizon, executing only the next interval — **done as of 2026-10-24** (`replan_interval_slots` / `horizon_slots`; cadence 1 with `horizon_slots=96` is ADR-0001 §3), **now exercised on real data** across the four representative windows (the ladder 96 → 4 → 1 improves or ties monotonically), and roughly **48× the solve count** (about **37× the wall time**, since per-solve time is lower at a fine cadence). Causal load-forecast alignment **complete** (`--rolling-horizon-load-forecast-mode`): conservative event-local-day cutoff, entire horizon uses that cutoff, `"frozen"` preserved for goldens, `"causal"` now the benchmark and CLI default | degradation and throughput cost — **mechanism complete, uncalibrated**: `--throughput-cost-eur-per-kwh` planning flag, `economic_sensitivity.py` sweeps (user-supplied hypotheticals, no calibration, terminal optimization vs scoring separated). Then scenario or robust price handling | No |
 | **Battery model** | scalar round-trip efficiency, nameplate capacity and power, SOC window — **the scalar is now 0.80** (adopted 2026-10-24, bottom of the community-measured 0.80–0.84 range, superseding 0.88; still an assumption, not a measurement), and the shipped block is pinned by a test | measured efficiency-versus-power curve plus idle draw | SOC hysteresis and real physical rate limits | **Yes, from v2** |
 | **Dispatch contract** | absent — **no longer the state** | versioned schema: interval, mode, target power, SOC target, expected price, confidence, generation instant, expiry, sequence — **done 2026-10-24** (`src/battery_optimizer/dispatch.py`, TODO-4.6): typed, validated, canonically serialized, physics delegated to `battery.py`, caller-supplied clock with no wall-clock fallback and an AST test proving it | acknowledged, one-in-flight, bounded retries | No — **the contract is not gated; the writer that would use it is** |
@@ -284,9 +284,11 @@ figures were placeholders until the commit landed. The rebuild has since produce
   non-zero canonical value is a future explicit decision.
 - **Quality gate enforcement.** Helper built with `reject` / `report` policies; not yet enabled on
   canonical pipeline (`min_usable_fraction = 0.0` is inert). Enabling requires a threshold decision.
-- **Joint HVAC/DHW and battery optimisation.** Phase 8, and it requires its own ADR:
+- ~~**Joint HVAC/DHW and battery optimisation.** Phase 8, and it requires its own ADR:
   AppDaemon currently owns comfort scheduling, and two controllers must not
-  independently change the same load.
+  independently change the same load.~~ **Closed 2026-10-30 by
+  [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md):** the
+  heat pump and the battery are decoupled and joint dispatch is not pursued.
 - **The daily price-publication snapshot.** Still worth taking eventually, because it
   is the only way to turn the owner's published-equals-realised assertion into a
   measurement. It is optional rather than blocking, and it needs weeks of calendar

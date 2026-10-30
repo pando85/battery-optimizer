@@ -2,6 +2,7 @@
 
 - **Status:** Proposed extension; design and data collection only. No authority to change heat-pump settings. Reconciled 2026-10-30 with the C2 outcome (UNDETERMINED, no-go) and the C1a/C2 data findings; the identification, modeling and simulated-gate stages were replaced by a joint field trial agreed in principle with the owner (arms and preregistration still to be agreed)
 - **Date:** 2026-10-30
+- **Decision context:** [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md) (2026-10-30) changed the F2 arms: A legacy cheapest-hours, B comfort schedule + efficiency-first (proposed, to be preregistered in F2a); the preheat/boost arm is dropped.
 - **Parent plan:** [Climate optimizer implementation](climate-optimizer-implementation.md) (C0–C7), [C2 recovery plan](climate-c2-recovery.md) (R0–R5), [ADR-0005](../adr/0005-shared-energy-planning-climate.md)
 - **Repositories:** `pando85/home-energy-optimizer` (datasets, preregistration, trial analysis); `pando85/homelab` (HA/AppDaemon helper semantics, guarded physical command writer)
 - **Scope:** Space heating and supply/flow temperature only. No DHW temperature, cooling, battery dispatch or joint MPC changes.
@@ -61,17 +62,18 @@ Carry provenance, quality flags, instrument calibration/resolution and decision-
 
 A model-free comparison on the real house. It varies the two levers that interact, permitted heating hours and water temperature, because varying one at a time would miss the interaction (flow temperature changed valve behaviour and COP in the history).
 
-**Arms.** A few, each compared with **current operation as the baseline**. The arms are still to be agreed with the owner; candidates only:
-- weather-dependent permitted hours (the model-free `min_hours` result points at 6–12 °C outdoor, see the [main plan](climate-optimizer-implementation.md#6-iteration-sequence-separately-reviewable-prs));
-- native curve mode (activating the configured Z1 curve instead of the fixed target);
-- possibly preheating in the cheapest hours.
+**Arms.** Two, proposed after [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md) and **to be preregistered in F2a** (not yet agreed in detail):
+- **A, legacy cheapest-hours:** current operation, the baseline.
+- **B, comfort schedule + efficiency-first:** hall/kitchen at 23.5 °C or more from 12:00 on weekdays and 09:00 at weekends, every room at 21 °C or more, optimum start from learned warm-up rates, the native heating curve (low water temperature) and long gentle runs, price ignored.
+
+The weather-dependent-hours candidate and the preheating arm are dropped: price-driven preheating is out of scope because very cheap windows are rare in winter, and boost is not part of this trial.
 
 **Blocks.** Whole-week blocks in randomised order, so weather and price trends do not line up with one arm. The slab and building time constant is about 150 h, so the first 1–2 days of each block are discarded as washout. That is short against 150 h: carry-over is not removed, so the preregistration states how it is handled (randomised order, previous-arm adjustment) rather than assuming it away.
 
 **Metrics, preregistered before the first block.** All adjusted for heating degree-days:
-- degree-hours (Kh) below 22 °C in the comfort rooms (bedroom, hall-kitchen, office T);
+- degree-hours (Kh) below the comfort minimums in the comfort rooms (bedroom, hall-kitchen, office T); F2a re-bases the former 22 °C threshold on the ADR-0006 schedule (hall/kitchen 23.5 °C in the scheduled hours, every room 21 °C) and keeps 22 °C as a comparison with history;
 - heating electricity;
-- cost relative to each day's price level (price-neutral), so arms are not rewarded for luckier price weeks;
+- cost relative to each day's price level (price-neutral), so arms are not rewarded for luckier price weeks (secondary; heating electricity and comfort are primary);
 - compressor starts.
 
 Also preregistered: arms and their exact settings, block order and seed, washout rule, day-exclusion rules (DHW, defrost, outages), the HDD adjustment, the electrical metering basis, per-arm decision thresholds and the abort conditions. Do not invent thresholds in this document; agree them with the owner and commit them before the first block. A comfort regression vetoes any cost or electricity gain.

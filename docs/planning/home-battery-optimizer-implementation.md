@@ -146,7 +146,7 @@ Phases 0–4 can proceed without the physical battery. **Phase 5 requires verifi
 
 ## 11. Phase 8 — Optional extensions (separate decisions)
 
-- [ ] **TODO-8.1** Evaluate **joint** HVAC/DHW and battery scheduling only after comfort/temperature constraints and AppDaemon ownership are explicitly specified; propose another ADR before changing existing heating automations.
+- [x] ~~**TODO-8.1** Evaluate **joint** HVAC/DHW and battery scheduling only after comfort/temperature constraints and AppDaemon ownership are explicitly specified; propose another ADR before changing existing heating automations.~~ **Superseded 2026-10-30 by [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md):** the heat pump and the battery are decoupled; joint scheduling is not pursued.
 - [ ] **TODO-8.2** Add battery vendor adapter(s) behind the same planner contract (e.g. Zendure), only after proving actual capabilities and fail-safe semantics.
 - [ ] **TODO-8.3** Add optional PV import/export compensation and backup reserve handling if the home's equipment changes.
 - [ ] **TODO-8.4** Investigate multi-day stochastic tariff scenarios, adaptive SOC reserve and demand-response optimization only if economic gains justify the operational risk.
@@ -305,7 +305,7 @@ secrets references, storage, policies, dashboards and runbooks. The history impo
   with a real Marstek/Omnibattery. Map genuine battery telemetry and complete two representative
   weeks before declaring Phase C accepted.
 - **Exit gate C:** at least **two weeks** of shadow plans compared against native battery behaviour (the Phase 5
-  window), with the economic gain, stale-source behaviour and alert quality reviewed. If the gain does not justify a
+  window; per ADR-0006, with real battery telemetry in the new heat-pump regime, not overlapping the switch or alternating trial blocks), with the economic gain, stale-source behaviour and alert quality reviewed. If the gain does not justify a
   permanent system, stop here (see §15).
 
 #### Phase D — Gated live actuation (out of scope now)

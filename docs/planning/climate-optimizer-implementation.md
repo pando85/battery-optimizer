@@ -2,7 +2,7 @@
 
 - **Status:** C2 completed **UNDETERMINED / no-go** (2026-10-30); [diagnostic-first recovery (R0–R5)](climate-c2-recovery.md) proposed. The original C2 gate remains frozen. No new climate actuation is authorized.
 - **Date:** 2026-10-30
-- **Architecture decision:** [ADR-0005](../adr/0005-shared-energy-planning-climate.md)
+- **Architecture decision:** [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md) (decoupled comfort control and battery arbitrage; supersedes decisions 1 and 2 of [ADR-0005](../adr/0005-shared-energy-planning-climate.md)). **Read [the decoupled objective](#decoupled-objective-and-obsolete-items-adr-0006) first: the price-driven objective, shared planner and cost-MPC rows below are obsolete or parked.**
 - **Repository ownership:** `pando85/battery-optimizer` for models, planning, history and evaluations; [`pando85/homelab`](https://github.com/pando85/homelab) for AppDaemon controls, HA entities, GitOps, manifests and deployment
 - **Related:** [ADR-0001](../adr/0001-home-battery-economic-dispatch.md), [ADR-0004](../adr/0004-battery-optimizer-production-architecture.md), [battery runtime](../service.md), [component architecture](../architecture.md), [load forecaster](components/load-forecaster.md)
 
@@ -168,6 +168,8 @@ Models must be versioned, bounded, replayable and persisted on the existing PVC 
 
 ### 3.3 Optimization and solver behavior
 
+> **Obsolete since ADR-0006 (2026-10-30).** The objective below is price-driven and is replaced by the [decoupled objective](#decoupled-objective-and-obsolete-items-adr-0006). The constraint and safety text still applies. Kept for the record.
+
 The decision variable is the **space-heating permission schedule** `u[t]` per 15-minute slot (`Heat+DHW` vs `DHW`) plus the DHW force, with minimum run/rest times. Delivered heat is a **modelled response** to `u[t]` (pump curve, room valves, slab state), not a free `Q_heat[t]`. A thermostat-setpoint offset within the comfort band is a candidate later lever; it needs another writer, so C2 reports it as an offline counterfactual without gating on it; it feeds C7.
 
 Optimize a 24–48 h lookahead on the existing 15-minute grid, bounded by actual **published** prices and reliable forecast coverage; unknown later prices must be labeled as estimates with an uncertainty policy, never silently treated as known. A terminal heat-storage value/penalty must prevent artificially cheap end-of-horizon cooling.
@@ -279,12 +281,12 @@ Forecast interfaces should carry UTC slot IDs, kWh, quality and model/plan versi
 | **C1a — Offline extraction and climate feature set** | battery-optimizer + homelab configuration | Map verified room, tank, compressor, power and weather data (mode-aware, including cooling power/energy) into extraction and a **separate climate feature set**; quality report; homelab numeric template sensors for operating mode, defrost and 3-way valve (C0 homelab work); no control writes | Enough measured history and documented gaps to fit a model without inventing data; `dataset_id` and existing feature-set ids unchanged; battery baseline regression-free |
 | **C2 — Thermal identification, COP and dual-objective gate** | battery-optimizer | Pure models (first-order and two-state slab+air), fitting, safe parameter envelopes, recorded versions and chronological validation; COP fitted on electricity; policy simulator and the go/no-go gate ([design](#c2-design-and-predeclared-gate)); DHW stays fixed | Model acceptance criteria met on the held-out season (otherwise UNDETERMINED, treated as no-go); bad sensors trigger model fallback; gate verdict recorded with its preregistration |
 | **C2-R — Recovery after UNDETERMINED** | optimizer (offline) | [Independent diagnostic-first model recovery](climate-c2-recovery.md): sensor and heat attribution, observability, minimal/empirical alternatives, and prospective validation | New preregistered observation/action/policy gates; does **not** amend or override the failed C2 protocol; no actuation |
-| **C1b — Live climate observer** | battery-optimizer | Live climate observer in `serve` behind a feature flag, read-only; blocked by C2 no-go until a *new* accepted recovery route and separate promotion decision | Existing battery runtime unaffected; freshness and quality metrics |
-| **C3 — Climate shadow planner** | battery-optimizer | **Blocked:** historical C2 no-go. A new accepted C2-R policy gate may separately authorize an experimental shadow planner; existing C3 must not use failed A/B as accepted defaults | Reproducible new acceptance, deterministic bounded plans and no interference with battery runtime |
-| **C4 — Evaluation and plan handoff** | battery-optimizer, then homelab | Compare cheap-hours, comfort-rule and MPC using identical historical decision-time inputs; add AppDaemon **shadow** plan reader and telemetry | Comfort, model-cost and cycling comparisons recorded; shadow reads cannot actuate; tested expires/parse errors |
+| **C1b — Live climate observer** (parked, ADR-0006) | battery-optimizer | Live climate observer in `serve` behind a feature flag, read-only; blocked by C2 no-go until a *new* accepted recovery route and separate promotion decision | Existing battery runtime unaffected; freshness and quality metrics |
+| **C3 — Climate shadow planner** (obsolete as a cost MPC, ADR-0006) | battery-optimizer | **Blocked:** historical C2 no-go. A new accepted C2-R policy gate may separately authorize an experimental shadow planner; existing C3 must not use failed A/B as accepted defaults | Reproducible new acceptance, deterministic bounded plans and no interference with battery runtime |
+| **C4 — Evaluation and plan handoff** (obsolete as a cost comparison, ADR-0006) | battery-optimizer, then homelab | Compare cheap-hours, comfort-rule and MPC using identical historical decision-time inputs; add AppDaemon **shadow** plan reader and telemetry | Comfort, model-cost and cycling comparisons recorded; shadow reads cannot actuate; tested expires/parse errors |
 | **C5 — Gated heating control** | homelab (plus explicit optimizer flag/config) | Single writer for heat and DHW; controlled schedule activation with acknowledgement and safety fallback | Manual supervised pilot, recovery and hardware-state checks, acceptance of temperature and cycling behavior; easy switch back to legacy |
-| **C6 — Demand forecast exchange** | battery-optimizer | Expose committed climate electric load to the battery forecaster; validate residual and historical reconciliation | No double counting; battery shadow savings/forecast regret improve on matched windows; no battery writes |
-| **C7 — Optional evolution** | both, new ADR as needed | Per-room refinements beyond C2, DHW optimization refinements, [flow-temperature calibration and optimization (C7-F)](climate-flow-calibration-optimization.md), setpoint-offset lever (needs a writer), cooling (needs humidity sources and a dew-point constraint), joint MPC, AppDaemon retirement | Separate evidence and safety/comfort decision per addition; C7-F has its own gate and must not invalidate the predeclared C2 heat-v1 gate |
+| **C6 — Demand forecast exchange** (reduced to the optional HP-plan entity, ADR-0006) | battery-optimizer | Expose committed climate electric load to the battery forecaster; validate residual and historical reconciliation | No double counting; battery shadow savings/forecast regret improve on matched windows; no battery writes |
+| **C7 — Optional evolution** | both, new ADR as needed | Per-room refinements beyond C2, DHW optimization refinements, [flow-temperature calibration and optimization (C7-F)](climate-flow-calibration-optimization.md), setpoint-offset lever (needs a writer), cooling (needs humidity sources and a dew-point constraint), ~~joint MPC~~ (dropped by ADR-0006), AppDaemon retirement | Separate evidence and safety/comfort decision per addition; C7-F has its own gate and must not invalidate the predeclared C2 heat-v1 gate |
 
 **Flow-temperature extension (C7-F):** [Dedicated flow-temperature field-trial plan](climate-flow-calibration-optimization.md) is now control-surface verification (F0), passive coverage (F1) and a model-free joint field trial (F2) of permitted heating hours and water temperature against current operation, with its own preregistered per-arm GO/NO-GO/UNDETERMINED verdicts. None depends on an accepted C2 model. Guarded flow actuation (F5) and maintenance (F6) are parked until the trial shows a static configuration leaves substantial value. C7-F is optional and must neither delay nor rewrite C2/C3/C5 acceptance or reuse the C2 heat-v1 gate.
 
@@ -465,6 +467,62 @@ figures stay in the private model directory.
 - **battery-optimizer — C3 (only after a new accepted gate; not started, C2 was UNDETERMINED):** opt-in shadow planning and `GET /climate/plan`; prove battery shadow behavior unaffected.
 - **homelab — C4/C5 (same condition):** explicit read-only plan consumption then a separately approved, reversible controlled heating rollout.
 - **now, see the next steps in the ordering above:** the `min_hours` analysis, then C7-F F0/F1 and the joint field trial ([flow-temperature field-trial plan](climate-flow-calibration-optimization.md)), keeping its preregistered verdicts separate from the predeclared C2 permission-only decision. The trial is agreed in principle; its arms and preregistration are still open.
+
+### Decoupled objective and obsolete items (ADR-0006)
+
+[ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md) (2026-10-30) replaces the price-driven objective. The heat-pump controller **minimises electricity subject to a comfort schedule**; the battery optimiser does the price arbitrage and treats the heat pump as exogenous load.
+
+~~~text
+min  Σ_t predicted_electric_kWh(u)[t]
+s.t. hall/kitchen >= 23.5 °C from 12:00 on weekdays and from 09:00 at weekends   (minimum, not target)
+     every room   >= 21 °C at all times
+     optimum start from learned warm-up rates; low water temperature, native heating curve, long gentle runs
+     compressor, DHW, hygiene and manufacturer constraints unchanged
+~~~
+
+Price enters only through **boost** (at most 0.04 €/kWh for 3 h or more, tunable): battery first, then a heat soak (room ceiling about 25.5 °C, water about 30 to 32 °C), then DHW to 55 to 60 °C. Boost sits after normal mode and battery arbitrage. All parameters are Home Assistant helpers.
+
+**Obsolete or parked by ADR-0006:**
+
+| Item | Status |
+|---|---|
+| Price-based climate objective (`min Σ price × kWh`, section 3.3) | Replaced by the objective above |
+| C1b live observer, C3 shadow planner, C4 cost comparison, `GET /climate/plan` | Parked (C3 and C4 as a cost MPC are obsolete); the offline `climate/` package stays for warm-up-rate learning |
+| C6 demand forecast exchange | Reduced to the optional `sensor.hp_planned_energy` entity (specified in the ADR, built only if the HP forecast share is material) |
+| C7 joint MPC | Dropped |
+| Cheapest-hours preheat arm of the C7-F trial | Dropped (boost is rare in winter) |
+| Legacy cheapest-hours rule and DHW price forcing | Retired when the comfort schedule goes live |
+| C2-R G-R3 "report cost and electricity" | Electricity at comfort becomes the primary metric, cost secondary |
+
+**Ordered work list** (smallest change that works; "needs tests" marks behavioural code changes):
+
+*Now (this winter; docs and homelab, no battery code)*
+
+1. ADR-0006 and the plan updates (this change).
+2. Record the HP switch date(s) and the trial block calendar in `docs/planning/`, not `config/tariff.yaml`. Exclude the first 28 days after the switch and alternating-arm weeks from gate-C and forecast evaluations.
+3. Homelab, before boost goes live: retire the legacy cheapest-hours rule and DHW forcing (one DHW writer); check whether 55 to 60 °C engages the tank booster heater and its power; AppDaemon must not start the booster while another large load runs.
+4. Verify the import-limit basis (instantaneous overload trip against 15-minute average) with the contract or distributor.
+5. Homelab: comfort schedule, optimum start and the helpers, with the C7-F F2 trial (arms proposed, to be preregistered in F2a).
+
+*Before battery go-live (gates C and D)*
+
+6. Gross-load reconstruction in `build` (`raw + charge - discharge`, register and extract the battery counters, refuse the no-battery assumption after commissioning); needs tests.
+7. Disable OmniBattery's native economic features.
+8. Charge adapter with a grid target capped below the import limit minus a margin, with a charge-rate bound; test the target and cap interaction at commissioning.
+9. Boost interlock in AppDaemon (battery state of charge, then soak, then DHW), reading the battery state read-only.
+10. Throughput cost: run the existing sensitivity sweep, pick the knee, set `planning.throughput_cost_eur_per_kwh` in `config/service.yaml`, record the decision with the warranty terms.
+11. Actuator ADR (separate writer process, scoped token, shadow-rule amendment in `AGENTS.md`), then the failure tests of gate D.
+12. Gate C on two weeks of real battery telemetry in the new regime.
+
+*Later (evidence-gated)*
+
+13. HP decomposition headroom on 6 to 8 weeks of new-regime data; build the HP-plan entity and the battery-side forecaster only if it is material, otherwise consider the day-type forecast.
+14. Confirm the replay findings with the ordinary benchmark on measured new-regime load.
+15. Measured round-trip efficiency curve, idle draw and wear recalibration (TODO-7.1, TODO-7.4).
+16. Staged rename, only after go-live is stable and never in the same change as an authority change.
+17. Retire the forward-looking resume path of the structured forecaster; keep its code for legacy-regime evaluation.
+
+Not needed: a shared or joint MPC, a climate planner in `serve`, a new endpoint or broker for the exchange, a boost field in the dispatch contract.
 
 ## 7. Validation, metrics and non-negotiable safety
 
