@@ -45,6 +45,17 @@ by this optimizer, under a separate ADR; the shadow phase has no writer.
   sterilization (65 degC, 10 min, default) and below the outdoor heater-on temperature (default 0 degC). The
   sterilization is a **scheduled 3 kW load**, and none of it is in the load forecast, so the grid-target cap
   must hold the battery charge below the limit minus the heater, not only the forecast load.
+  Read-only heater binaries now exist (`binary_sensor.aquarea_internal_heater_state`,
+  `binary_sensor.aquarea_external_heater_state`, `binary_sensor.aquarea_force_heater_state`; history from
+  2026-10-30/31): they are the signal for a future heater-aware load guard (follow-up, not built now).
+- **Negative prices are handled; no price is clamped.** The price paid can be negative (26 h at or below 0 in
+  2024-01 to 2026-10, 18 h of them below 0, minimum -0.0126 EUR/kWh pre-tax; [boost-mode](boost-mode.md)).
+  The cost model keeps them (`cost.py:26-28`, `cost.py:634-637`, `cost.py:1064-1066`: a negative price gives a
+  negative cost), the MILP forbids charging and discharging in the same slot with a binary mode, so a negative
+  price is a charging opportunity and not a free loop (`oracle.py:28-40`; tests `tests/test_battery.py:273`
+  and `:289`), and the PVPC reader drops only non-finite values (`service/pvpc.py:108-115`). Remaining limit:
+  at a negative price the optimiser wants to import as much as it can, bounded only by the import-limit
+  headroom on forecast load (the cap in the assumption above), and export is not modelled.
 - Throughput cost 0.0, so marginal cycles that merely clear the 0.80 round trip are taken
   (about 1.2 equivalent full cycles per winter day in the replay).
 - Omnibattery's own price features will be off, so this is the only battery price reactor.

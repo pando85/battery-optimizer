@@ -41,8 +41,20 @@ WH-ADC0309JE5C and WH-UD09JE5-1 are assumed equivalent). Page details in the hom
   heater. Whether any is fitted is unknown.
 - Observed (read-only, 2023-11-08 to 2026-10-25): no heater state or heater power signal is exported, and the
   tank temperature never exceeded 51 degC, so no 65 degC sterilization or heater-boosted hot water is visible;
-  the outdoor temperature was below 0 degC on only 11 days (minimum -3 degC). There is no evidence of a
-  heater run, but also no direct heater signal.
+  the outdoor temperature was below 0 degC on only 11 days (minimum -3 degC).
+- HeishaMon observation of 2026-10-30 ([regime log](regime-log.md)): the legionella/sterilization function is
+  **off** (`Sterilization_State` 0; the configured 65 degC / 10 min is unused; the tank never exceeded 51 degC
+  from 2023-11 to 2026-10); DHW heater lifetime hours **0**; room/backup heater lifetime hours **29**; the
+  heater-on outdoor temperature is 0 degC. So the booster has never run, and the backup heater has run for
+  space heating or defrost for 29 h in total, over an unknown period and not attributable to a day.
+- **Heater sensors (read-only, added in homelab on 2026-10-30/31, recorded in Prometheus):**
+  `binary_sensor.aquarea_sterilization_state`, `sensor.aquarea_sterilization_temperature`,
+  `sensor.aquarea_sterilization_max_time`, `binary_sensor.aquarea_force_heater_state`,
+  `sensor.aquarea_room_heater_operating_hours`, `sensor.aquarea_dhw_heater_operating_hours`,
+  `sensor.aquarea_heater_on_outdoor_temperature`, `sensor.aquarea_heating_mode` (0 curve, 1 direct),
+  `binary_sensor.aquarea_tank_heater_enabled`, `binary_sensor.aquarea_room_heater_enabled`,
+  `binary_sensor.aquarea_internal_heater_state`, `binary_sensor.aquarea_external_heater_state`. Before
+  them there was no heater history; it starts on those dates.
 
 ## Calibrated on
 
@@ -53,6 +65,23 @@ Not fitted: the rules and `min_hours` were chosen by the owner. What exists is t
   `dhw_control@5af36d49` ([regime log](regime-log.md)).
 - Observed regimes: S2 11 h; S3 10 h then 15 h from 2026-01-02. Water target 28 then 26 degC; setpoints
   23.0 in S3. Feature set `da6d678016ed`.
+- Comfort history, hall-kitchen (local time, whole winters Nov to Mar, slots with a reading; S1 coverage 92%,
+  S2 100%, S3 97 to 98%). Temperatures in degC:
+
+  | | S1 | S2 | S3 |
+  |---|---|---|---|
+  | Setpoint mean (weekday 12 to 22) | 24.0 | 24.8 | 23.0 |
+  | Weekday 12 to 22: mean / p10 / p90 | 23.4 / 22.0 / 24.4 | 23.4 / 22.4 / 24.5 | 22.2 / 21.0 / 23.2 |
+  | Weekday 12 to 22: share at or above 23.5 / 25 | 56% / 5.0% | 47% / 0.7% | 2.9% / 0.2% |
+  | Weekend 09 to 22: mean, share at or above 23.5 | 23.7, 71% | 23.6, 59% | 22.2, 4.5% |
+  | Night 00 to 07: mean | 23.1 | 22.9 | 21.7 |
+  | Share of time below 21: bedroom / hall-kitchen | 6.4% / 5.2% | 2.5% / 1.5% | 15.5% / 12.3% |
+  | Bedroom p10 | 21.5 | 21.8 | 20.4 |
+
+  The 23.5 degC target of the comfort schedule was met about half the weekday afternoons under the S1 and
+  S2 setpoints and almost never under S3 (setpoint 23.0), where the bedroom spent 15.5% of the winter below
+  21 degC. Reproduce: `uv run python hack/comfort_history.py --feature-set da6d678016ed
+  --data-dir <store>` (writes `<store>/analysis/v1/comfort-history/<run-id>/`).
 - Comfort evidence is an **association**: 15 h days against 10 h days in S3 show about 12% against 39% of
   time below 22 degC for +16% heating electricity ([climate plan](../planning/climate-optimizer-implementation.md),
   [replay](../planning/system-replay.md)). Months apart, so confounded.
@@ -64,7 +93,7 @@ Not fitted: the rules and `min_hours` were chosen by the owner. What exists is t
   ([C7-F](../planning/climate-flow-calibration-optimization.md)).
 - Setpoints are manual and high enough that comfort-room valves stay open.
 - The heater stays off in normal operation (hot water at or below about 50 degC, outdoor above 0 degC); the
-  weekly sterilization is the one scheduled exception to check (the facts above).
+  weekly sterilization, the one scheduled exception, is observed off on 2026-10-30 (the facts above).
 - The comfort schedule ([ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md): hall-kitchen at least 23.5 degC from 12:00 on weekdays and from 09:00
   at weekends, all rooms at least 21 degC) can be met by optimum start with the fewest kWh. Untested:
   the schedule shape was never replayed.
