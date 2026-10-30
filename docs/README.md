@@ -53,7 +53,8 @@ the [top-level README](../README.md).
 | [Forecast experiments](planning/energy-baseline-forecast-experiments.md) | Rolling-horizon and forecast experiment records |
 | [AppDaemon baseline context](planning/energy-baseline-appdaemon-baseline-context.md) | Context on the existing AppDaemon heating/DHW control the baseline is compared against |
 | [Climate optimizer plan](planning/climate-optimizer-implementation.md) | Shared-runtime components, temperature/DHW modeling, shadow evaluation, AppDaemon migration and control gates |
-| [Climate flow calibration and optimization (C7-F)](planning/climate-flow-calibration-optimization.md) | Optional flow-temperature identification campaign, COP/heat-response validation, incremental MPC gate and guarded rollout |
+| [C2 recovery and alternative identification](planning/climate-c2-recovery.md) | UNDETERMINED outcome, diagnostic-first model simplification, plant/energy identification and new prospective promotion gates |
+| [Climate flow calibration and optimization (C7-F)](planning/climate-flow-calibration-optimization.md) | Optional model-free joint field trial of permitted heating hours and water temperature; guarded flow actuation parked |
 
 ## Provenance
 
