@@ -403,6 +403,8 @@ _KEPT_COLUMNS = (
     "compressor_starts_delta",
     "pump_flow_mean",
     "servers_kwh",
+    "hp_dhw_kwh",
+    "hp_cool_kwh",
     "hp_dhw_out_kwh",
     "hp_heat_energy_out_delta",
     "hp_heat_energy_delta",
