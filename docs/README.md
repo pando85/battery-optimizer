@@ -24,6 +24,7 @@ the [top-level README](../README.md).
 | [0002](adr/0002-appliance-aware-load-forecasting.md) | Appliance-aware load forecasting | Proposed |
 | [0003](adr/0003-phase1-measurement-and-baseline.md) | Phase 1 measurement and baseline | Accepted (2026-10-23) |
 | [0004](adr/0004-battery-optimizer-production-architecture.md) | Production runtime and independent source repository | Accepted (2026-10-25; software architecture, shadow only) |
+| [0005](adr/0005-shared-energy-planning-climate.md) | Shared runtime and climate optimization | Proposed (2026-10-30; architecture only) |
 
 ## Delivery snapshot (2026-10-25)
 
@@ -51,6 +52,7 @@ the [top-level README](../README.md).
 | [Baseline progress](planning/energy-baseline-progress.md) | Phase 1 status, built datasets and benchmark runs |
 | [Forecast experiments](planning/energy-baseline-forecast-experiments.md) | Rolling-horizon and forecast experiment records |
 | [AppDaemon baseline context](planning/energy-baseline-appdaemon-baseline-context.md) | Context on the existing AppDaemon heating/DHW control the baseline is compared against |
+| [Climate optimizer plan](planning/climate-optimizer-implementation.md) | Shared-runtime components, temperature/DHW modeling, shadow evaluation, AppDaemon migration and control gates |
 
 ## Provenance
 
