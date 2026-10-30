@@ -26,6 +26,7 @@ import pytest
 from battery_optimizer import extract_prom
 from battery_optimizer.extract_prom import (
     BASE_URL_ENV_VAR,
+    CLIMATE_ROOMS,
     DEAD_DUPLICATE_ENTITY_IDS,
     DEFAULT_BASE_URL,
     DEFAULT_CHUNK_SECONDS,
@@ -1260,6 +1261,148 @@ class TestDeterminism:
 # ---------------------------------------------------------------------------
 # Public surface: entities, base URL, escaping, arguments, logging
 # ---------------------------------------------------------------------------
+
+
+class TestClimateRegistry:
+    ROOM = "climate.thermostat_bedroom"
+    SETPOINT = "climate.thermostat_bedroom#setpoint"
+
+    def test_existing_entries_keep_their_entity_id_as_key(self) -> None:
+        for key, spec in ENTITY_SPECS.items():
+            if not spec.series:
+                assert key == spec.entity_id
+        assert ENTITY_SPECS["sensor.esios_pvpc"].series == ""
+
+    def test_every_room_has_a_current_and_a_setpoint_series(self) -> None:
+        assert set(CLIMATE_ROOMS) == {"bedroom", "hall_kitchen", "office_t", "office_a"}
+        for entity in CLIMATE_ROOMS.values():
+            current, setpoint = ENTITY_SPECS[entity], ENTITY_SPECS[f"{entity}#setpoint"]
+            assert current.entity_id == setpoint.entity_id == entity
+            assert current.metric == "hass_climate_current_temperature_celsius"
+            assert setpoint.metric == "hass_climate_target_temperature_celsius"
+            assert current.unit == setpoint.unit == "°C"
+
+    def test_heat_pump_series_use_the_verified_metrics(self) -> None:
+        expected = {
+            "sensor.aquarea_tank_temperature": "hass_sensor_unit_celsius",
+            "sensor.aquarea_outlet_temperature": "hass_sensor_unit_celsius",
+            "sensor.aquarea_inlet_temperature": "hass_sensor_unit_celsius",
+            "sensor.aquarea_outlet_target_temperature": "hass_sensor_unit_celsius",
+            "sensor.aquarea_compressor_frequency": "hass_sensor_unit_hz",
+            "sensor.aquarea_compressor_start_stop_counter": "hass_sensor_state",
+            "sensor.aquarea_pump_flow": "hass_sensor_unit_l_per_min",
+            "sensor.aquarea_heat_energy_produced": "hass_sensor_energy_kwh",
+            "sensor.aquarea_dhw_energy_consumed": "hass_sensor_energy_kwh",
+            "sensor.aquarea_cool_energy_consumed": "hass_sensor_energy_kwh",
+            "sensor.shellyem_main_channel_2_power": "hass_sensor_power_w",
+            "sensor.shellyem_main_channel_2_energy": "hass_sensor_energy_kwh",
+        }
+        for entity, metric in expected.items():
+            assert ENTITY_SPECS[entity].metric == metric
+        # entities that must not be extracted
+        for entity in (
+            "sensor.aquarea_energy_consumed",
+            "binary_sensor.aquarea_power_state",
+            "sensor.aquarea_defrost_temperature",
+            "climate.rack_controller_rack_thermostat",
+        ):
+            assert entity not in ENTITY_SPECS
+
+    def test_climate_entities_are_feature_only_with_real_entity_ids(self) -> None:
+        for entity in CLIMATE_ROOMS.values():
+            assert entity in FEATURE_ENTITY_IDS
+            assert entity not in DEFAULT_ENTITY_IDS
+        assert all("#" not in entity for entity in FEATURE_ENTITY_IDS)
+        assert len(set(FEATURE_ENTITY_IDS)) == len(FEATURE_ENTITY_IDS)
+
+    def test_both_series_of_an_entity_resolve_and_query_the_real_entity(self) -> None:
+        specs = resolve_entity_specs([self.ROOM, self.SETPOINT, self.ROOM])
+        assert [s.metric for s in specs] == [
+            "hass_climate_current_temperature_celsius",
+            "hass_climate_target_temperature_celsius",
+        ]
+        assert [s.entity_id for s in specs] == [self.ROOM, self.ROOM]
+        assert [build_range_query(s, 61) for s in specs] == [
+            f'hass_climate_current_temperature_celsius{{entity="{self.ROOM}"}}[61s]',
+            f'hass_climate_target_temperature_celsius{{entity="{self.ROOM}"}}[61s]',
+        ]
+
+    def test_extracting_both_series_keeps_them_apart(self, tmp_path: Path, config: Path) -> None:
+        current, setpoint = ENTITY_SPECS[self.ROOM], ENTITY_SPECS[self.SETPOINT]
+
+        def series(spec: EntitySpec, instance: str, values: list[tuple[float, float]]) -> Any:
+            labels = labels_for(spec.entity_id, metric=spec.metric, instance=instance, job="home")
+            return (labels, values)
+
+        # The HA restart changes ``instance``: the same entity arrives from two scrape targets.
+        fake = FakePrometheus(
+            [
+                series(current, "10.0.0.1:8123", [(_BASE + 10, 20.5)]),
+                series(current, "10.0.0.2:8123", [(_BASE + 70, 20.75)]),
+                series(setpoint, "10.0.0.2:8123", [(_BASE + 70, 22.0)]),
+            ]
+        )
+        path = run_extract(
+            tmp_path,
+            fake.client,
+            config,
+            entities=[self.ROOM, self.SETPOINT],
+            chunk_seconds=3600,
+            end="2024-01-01T01:00:00Z",
+        )
+        table = read_rows(tmp_path / "data")
+        assert set(table.column("entity").to_pylist()) == {self.ROOM}
+        by_metric: dict[str, list[float]] = {}
+        for metric, value in zip(
+            table.column("metric").to_pylist(), table.column("value").to_pylist(), strict=True
+        ):
+            by_metric.setdefault(metric, []).append(value)
+        assert by_metric == {current.metric: [20.5, 20.75], setpoint.metric: [22.0]}
+        # one series identity per metric, whatever the scrape instance
+        assert len(set(table.column("series_key").to_pylist())) == 2
+        manifest = manifest_of(path)
+        assert manifest.entities == [self.ROOM]
+        stats = manifest.params["entity_stats"]
+        assert [(e["entity"], e["metric"], e["samples"]) for e in stats] == [
+            (self.ROOM, current.metric, 2),
+            (self.ROOM, setpoint.metric, 1),
+        ]
+
+    def test_a_missing_series_is_flagged_by_its_own_key(self, tmp_path: Path, config: Path) -> None:
+        current = ENTITY_SPECS[self.ROOM]
+        labels = labels_for(self.ROOM, metric=current.metric, instance="i:1", job="home")
+        fake = FakePrometheus([(labels, [(_BASE + 10, 20.5)])])
+        path = run_extract(
+            tmp_path,
+            fake.client,
+            config,
+            entities=[self.ROOM, self.SETPOINT],
+            chunk_seconds=3600,
+            end="2024-01-01T01:00:00Z",
+        )
+        flags = manifest_of(path).quality_flags
+        assert f"no_samples_extracted:{self.SETPOINT}" in flags
+        assert f"no_samples_extracted:{self.ROOM}" not in flags
+
+    def test_mixing_default_and_climate_entities_is_refused_before_any_request(
+        self, tmp_path: Path, config: Path
+    ) -> None:
+        fake = FakePrometheus([])
+        with pytest.raises(ValueError, match="must not mix default entities"):
+            run_extract(tmp_path, fake.client, config, entities=[DEFAULT_ENTITY_IDS[0], self.ROOM])
+        with pytest.raises(ValueError, match="must not mix default entities"):
+            run_extract(
+                tmp_path, fake.client, config, entities=[self.SETPOINT, DEFAULT_ENTITY_IDS[1]]
+            )
+        assert fake.requests == []
+        assert not (tmp_path / "data" / "manifests").exists()
+
+    def test_unmixed_extractions_are_accepted(self, tmp_path: Path, config: Path) -> None:
+        fake = FakePrometheus([])
+        for entities in (list(DEFAULT_ENTITY_IDS), [self.ROOM, self.SETPOINT]):
+            end = "2024-01-01T01:00:00Z"
+            run_extract(tmp_path, fake.client, config, entities=entities, end=end)
+        assert fake.requests
 
 
 class TestEntityRegistry:
