@@ -158,17 +158,79 @@ _BACKOFF_MAX_SECONDS = 30.0
 # ---------------------------------------------------------------------------
 
 
+CLIMATE_ROOMS: dict[str, str] = {
+    "bedroom": "climate.thermostat_bedroom",
+    "hall_kitchen": "climate.thermostat_hall_kitchen",
+    "office_t": "climate.thermostat_office_t",
+    "office_a": "climate.thermostat_office_a",
+}
+"""Room name -> thermostat entity; the one place the rooms are listed.  Each thermostat carries
+a current and a target temperature series (see :class:`EntitySpec` ``series``)."""
+
+
 @dataclass(frozen=True)
 class EntitySpec:
-    """A Prometheus-backed numeric entity: which metric carries it, its unit."""
+    """A Prometheus-backed numeric series: which entity, which metric carries it, its unit.
+
+    An entity normally has one series and is registered under its entity id.  A second metric
+    of the same entity (a thermostat's target next to its current temperature) is registered
+    with a ``series`` alias, which only widens the registry key and the per-series flag label
+    to ``<entity_id>#<series>``; the PromQL selector and the stored ``entity`` column always
+    carry the real entity id.
+    """
 
     entity_id: str
     metric: str
     unit: str
+    series: str = ""
 
+    @property
+    def key(self) -> str:
+        """Registry key: the entity id, or ``<entity_id>#<series>`` for an extra series."""
+        return f"{self.entity_id}#{self.series}" if self.series else self.entity_id
+
+
+_CLIMATE_SPECS: tuple[EntitySpec, ...] = (
+    *(
+        spec
+        for room in CLIMATE_ROOMS.values()
+        for spec in (
+            EntitySpec(room, "hass_climate_current_temperature_celsius", "°C"),
+            EntitySpec(room, "hass_climate_target_temperature_celsius", "°C", "setpoint"),
+        )
+    ),
+    EntitySpec("sensor.aquarea_tank_temperature", "hass_sensor_unit_celsius", "°C"),
+    EntitySpec("sensor.aquarea_outlet_temperature", "hass_sensor_unit_celsius", "°C"),
+    EntitySpec("sensor.aquarea_inlet_temperature", "hass_sensor_unit_celsius", "°C"),
+    EntitySpec("sensor.aquarea_outlet_target_temperature", "hass_sensor_unit_celsius", "°C"),
+    EntitySpec("sensor.aquarea_compressor_frequency", "hass_sensor_unit_hz", "Hz"),
+    # A monotonic start counter; its metric name carries no unit.
+    EntitySpec("sensor.aquarea_compressor_start_stop_counter", "hass_sensor_state", "count"),
+    EntitySpec("sensor.aquarea_pump_flow", "hass_sensor_unit_l_per_min", "L/min"),
+    *(
+        EntitySpec(f"sensor.aquarea_{mode}_energy_{side}", "hass_sensor_energy_kwh", "kWh")
+        for mode in ("heat", "dhw", "cool")
+        for side in ("produced", "consumed")
+    ),
+    # Aerothermal branch of the main meter (it also feeds a few appliances).
+    EntitySpec("sensor.shellyem_main_channel_2_power", "hass_sensor_power_w", "W"),
+    EntitySpec("sensor.shellyem_main_channel_2_energy", "hass_sensor_energy_kwh", "kWh"),
+    # TODO(climate): register the numeric operating-mode, defrost and 3-way-valve sensors here
+    # once the homelab change publishes them; their entity ids are not known yet.
+)
+"""Series added for the separate climate feature set (``features.CLIMATE_SIGNALS``).  Metrics
+verified against the long-term archive on 2026-10-30.  The entities that the default feature
+set already extracts (outdoor temperature, heat/DHW/cool power, force-DHW, the AppDaemon
+helpers) are not repeated here: they stay in the earlier extraction group."""
+
+CLIMATE_ENTITY_IDS: tuple[str, ...] = tuple(dict.fromkeys(s.entity_id for s in _CLIMATE_SPECS))
+"""The climate extraction group: feature-only entities that belong to no other group.  An
+extraction may not mix them with default entities (they would change the canonical
+``dataset_id``) or with the earlier feature entities (the default feature-set id reads every
+manifest that names one of those, so shared parts would change it)."""
 
 ENTITY_SPECS: dict[str, EntitySpec] = {
-    spec.entity_id: spec
+    spec.key: spec
     for spec in (
         EntitySpec(
             "sensor.shellyem_main_channel_1_energy",
@@ -227,6 +289,7 @@ ENTITY_SPECS: dict[str, EntitySpec] = {
         # Washer submeter candidate (audit only; the owner has not confirmed it).
         EntitySpec("sensor.smart_plug_v2_terrace_power", "hass_sensor_power_w", "W"),
         EntitySpec("sensor.terrace_lavadora_energy_today", "hass_sensor_energy_wh", "Wh"),
+        *_CLIMATE_SPECS,
     )
 }
 
@@ -240,11 +303,14 @@ DEFAULT_ENTITY_IDS: tuple[str, ...] = (
 DEAD_DUPLICATE_ENTITY_IDS = frozenset({"sensor.esios_pvpc_2"})
 
 FEATURE_ENTITY_IDS: tuple[str, ...] = tuple(
-    entity_id
-    for entity_id in ENTITY_SPECS
-    if entity_id not in DEFAULT_ENTITY_IDS and entity_id not in DEAD_DUPLICATE_ENTITY_IDS
+    dict.fromkeys(
+        spec.entity_id
+        for spec in ENTITY_SPECS.values()
+        if spec.entity_id not in DEFAULT_ENTITY_IDS
+        and spec.entity_id not in DEAD_DUPLICATE_ENTITY_IDS
+    )
 )
-"""Registered entities that feed the sub-load feature table, never the canonical build."""
+"""Registered entities that feed the feature tables, never the canonical build."""
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -436,10 +502,35 @@ def resolve_entity_specs(entities: Iterable[str] | None) -> tuple[EntitySpec, ..
             raise ValueError(f"metric name {spec.metric!r} is not a valid Prometheus metric name")
         if not _UNIT_RE.match(spec.unit):
             raise ValueError(f"unit {spec.unit!r} contains unsupported characters")
-        specs.setdefault(spec.entity_id, spec)
+        specs.setdefault(spec.key, spec)
     if not specs:
         raise ValueError("entity list resolved to empty — nothing to extract")
     return tuple(specs.values())
+
+
+def refuse_mixed_lineage(specs: Iterable[EntitySpec]) -> None:
+    """Refuse an extraction that names a climate entity together with anything else.
+
+    A raw manifest that names a default entity, or an entity that is in no feature group (an
+    unregistered ``entity:metric:unit`` triple, the dead duplicate price), enters the canonical
+    lineage, so climate parts in it would change the ``dataset_id``.  A manifest that names an
+    earlier feature entity (outdoor temperature, heat-pump power, control states) is read by the
+    default feature set, so climate parts in it would change the default ``feature_set_id``.  The
+    climate group is therefore extracted alone; the climate feature set reads the shared entities
+    from the earlier feature extraction.  Other mixes are not restricted here.
+
+    Raises:
+        ValueError: a climate entity was requested with an entity outside the climate group.
+    """
+    ids = {s.entity_id for s in specs}
+    climate = sorted(ids.intersection(CLIMATE_ENTITY_IDS))
+    other = sorted(ids.difference(CLIMATE_ENTITY_IDS))
+    if climate and other:
+        raise ValueError(
+            "an extraction of climate entities must not include any other entity: it would "
+            "change the canonical dataset_id or the default feature_set_id; run separate "
+            f"extractions (climate: {', '.join(climate)}; other: {', '.join(other)})"
+        )
 
 
 def build_range_query(spec: EntitySpec, window_seconds: int) -> str:
@@ -593,6 +684,8 @@ class _Row:
     unit: str
     value: float
     labels_json: str
+    stats_key: str = field(compare=False)
+    """:attr:`EntitySpec.key` of the requested series (not part of the row's sort order)."""
 
     @property
     def dedup_key(self) -> tuple[str, int]:
@@ -638,7 +731,7 @@ class _EntityStats:
 
     def flags(self, chunks_total: int) -> list[str]:
         """Manifest quality flags describing exactly what was empty, and why."""
-        e = self.entity_id
+        e = self.spec.key  # the entity id, plus "#<series>" for an entity with a second series
         out: list[str] = []
         if self.samples == 0:
             out.append(f"no_samples_extracted:{e}")
@@ -791,6 +884,7 @@ def matrix_to_rows(
                     unit=spec.unit,
                     value=value,
                     labels_json=labels_json,
+                    stats_key=spec.key,
                 )
             )
     if not matrix:
@@ -824,7 +918,7 @@ def dedupe_rows(
     seen_values: dict[tuple[str, int], set[float]] = {}
     kept: list[_Row] = []
     for row in ordered:
-        stats = stats_by_entity[row.entity]
+        stats = stats_by_entity[row.stats_key]
         if row.ts_us <= previous.get(row.labels_json, -1):
             stats.boundary_duplicates += 1
             continue
@@ -928,7 +1022,7 @@ def extract_prometheus(
 
     Raises:
         ValueError: bad window (naive/non-ISO/empty), bad chunk width, or an
-            entity with no known metric mapping.
+            entity with no known metric mapping, or default and feature-only entities mixed.
         PrometheusHTTPError / PrometheusQueryError / NonFiniteSampleError:
             query failures (case c).  A failed run leaves at most orphaned
             parts and **no** manifest.
@@ -958,8 +1052,9 @@ def extract_prometheus(
         )
 
     specs = resolve_entity_specs(entities)
+    refuse_mixed_lineage(specs)
     url = resolve_base_url(base_url)
-    entity_ids = [s.entity_id for s in specs]
+    entity_ids = list(dict.fromkeys(s.entity_id for s in specs))
     started_at = iso_z(datetime.now(UTC))
 
     manifest = new_manifest(
@@ -991,7 +1086,7 @@ def extract_prometheus(
     )
     extraction_id = manifest.extraction_id
 
-    stats = {s.entity_id: _EntityStats(s) for s in specs}
+    stats = {s.key: _EntityStats(s) for s in specs}
     watermark: dict[str, int] = {}
     part_files: list[dict[str, object]] = []
     total_rows = 0
@@ -1007,7 +1102,7 @@ def extract_prometheus(
             chunk_rows: list[_Row] = []
 
             for spec in specs:
-                st = stats[spec.entity_id]
+                st = stats[spec.key]
                 st.chunks += 1
                 query = build_range_query(spec, window_seconds)
                 matrix = query_range_vector(
@@ -1068,7 +1163,7 @@ def extract_prometheus(
 
     flags: list[str] = []
     for spec in specs:
-        st = stats[spec.entity_id]
+        st = stats[spec.key]
         flags.extend(st.flags(chunk_count))
         log.info(
             "entity %s metric=%s unit=%s samples=%d series=%d first=%s last=%s "
@@ -1100,7 +1195,7 @@ def extract_prometheus(
     manifest.part_files = part_files
     manifest.quality_flags = sorted(set(flags))
     manifest.params["chunks"] = chunk_count
-    manifest.params["entity_stats"] = [stats[e].as_dict(chunk_count) for e in entity_ids]
+    manifest.params["entity_stats"] = [stats[s.key].as_dict(chunk_count) for s in specs]
     manifest.coverage_notes = (
         f"{chunk_count} chunk(s) of <= {chunk_seconds}s covering "
         f"[{iso_z(t_start)}, {iso_z(t_end)}) via instant range-vector queries; "

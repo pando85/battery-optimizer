@@ -261,6 +261,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Canonical dataset directory: also write the servers + heat pump <= main-meter check",
     )
     p_feat.add_argument(
+        "--signal-set",
+        choices=["default", "climate"],
+        default="default",
+        help="Signals to build: 'default' (sub-loads, the load-forecaster feature set) or "
+        "'climate' (rooms, heat-pump water side, compressor, thermal/electric energy; a "
+        "separate feature set with its own id)",
+    )
+    p_feat.add_argument(
         "--max-gap-seconds",
         type=float,
         default=None,
@@ -1066,7 +1074,7 @@ def cmd_build_features(args: argparse.Namespace) -> int:
     """Build the sub-load feature table next to (never inside) the canonical datasets."""
     from battery_optimizer import features
 
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {"signals": features.SIGNAL_SETS[args.signal_set]}
     if args.max_gap_seconds is not None:
         kwargs["max_gap_seconds"] = args.max_gap_seconds
     if args.min_coverage is not None:

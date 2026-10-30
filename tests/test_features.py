@@ -15,7 +15,14 @@ import pytest
 
 from battery_optimizer import features
 from battery_optimizer.cli import main
-from battery_optimizer.extract_prom import compute_series_key
+from battery_optimizer.extract_prom import (
+    CLIMATE_ENTITY_IDS,
+    CLIMATE_ROOMS,
+    ENTITY_SPECS,
+    FEATURE_ENTITY_IDS,
+    compute_series_key,
+    resolve_entity_specs,
+)
 from battery_optimizer.features import (
     FeatureError,
     Signal,
@@ -518,3 +525,357 @@ class TestCli:
         )
         assert rc == 1
         assert "no raw parts" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# The default signal set is frozen; the climate set is separate
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultSetIsPinned:
+    def test_signal_list_and_feature_set_id_are_unchanged(self) -> None:
+        assert [(s.entity, s.alias, s.kind) for s in features.SIGNALS] == [
+            ("sensor.shellypmmini_servers_power", "servers", "power"),
+            ("sensor.aquarea_heat_power_consumed", "hp_heat", "power"),
+            ("sensor.aquarea_dhw_power_consumed", "hp_dhw", "power"),
+            ("sensor.aquarea_cool_power_consumed", "hp_cool", "power"),
+            ("sensor.aquarea_heat_power_produced", "hp_heat_out", "power"),
+            ("sensor.aquarea_dhw_power_produced", "hp_dhw_out", "power"),
+            ("sensor.aquarea_cool_power_produced", "hp_cool_out", "power"),
+            ("sensor.aquarea_power_consumed", "hp_total_reported", "power"),
+            ("sensor.smart_plug_v2_terrace_power", "washer_plug", "power"),
+            ("sensor.aquarea_outside_ambient_temperature", "outdoor_temp", "temperature"),
+            ("input_boolean.appdaemon_climate_enable", "climate_enable", "state"),
+            ("input_boolean.appdaemon_dhw_enable", "dhw_enable", "state"),
+            ("input_number.appdaemon_climate_min_hours_per_day", "climate_min_hours", "state"),
+            ("switch.aquarea_force_dhw_mode", "dhw_force", "state"),
+            ("sensor.terrace_lavadora_energy_today", "washer_energy_today_wh", "counter"),
+        ]
+        assert all(s.metric is None and s.source == s.entity for s in features.SIGNALS)
+        # Computed with the code before the climate set existed: a fixed input gives this id.
+        fixed = features.compute_feature_set_id(
+            part_hashes=[{"part": "p1", "sha256": "aa"}, {"part": "p2", "sha256": "bb"}],
+            code_ver="test-version",
+            window_start=T0,
+            window_end=T0 + timedelta(days=1),
+            params={
+                "interval_seconds": 900,
+                "max_gap_seconds": 300.0,
+                "min_coverage": 0.8,
+                "lookback_seconds": 3600.0,
+            },
+            signals=features.SIGNALS,
+        )
+        assert fixed == "8cd8263e440a5a970b0a9461e5dc546c18e72d4f9a570f09fae8b491e24d2236"
+
+    def test_the_selector_defaults_to_the_default_set(self) -> None:
+        assert features.SIGNAL_SETS["default"] is features.SIGNALS
+        assert features.SIGNAL_SETS["climate"] is features.CLIMATE_SIGNALS
+        assert build_features.__kwdefaults__["signals"] is features.SIGNALS
+
+
+class TestClimateSignals:
+    def test_aliases_and_columns_are_unique(self) -> None:
+        aliases = [s.alias for s in features.CLIMATE_SIGNALS]
+        assert len(set(aliases)) == len(aliases)
+        columns = features.feature_schema(features.CLIMATE_SIGNALS).names
+        assert len(set(columns)) == len(columns)
+
+    def test_rooms_are_named_generically_from_the_one_room_mapping(self) -> None:
+        by_alias = {s.alias: s for s in features.CLIMATE_SIGNALS}
+        for room, entity in CLIMATE_ROOMS.items():
+            temp, setpoint = by_alias[f"room_{room}_temp"], by_alias[f"room_{room}_setpoint"]
+            assert temp.entity == setpoint.entity == entity
+            assert temp.metric != setpoint.metric
+            assert temp.source != setpoint.source
+        assert features.COMFORT_EXCLUDED_ROOMS == {"office_a"}
+        assert features.COMFORT_EXCLUDED_ROOMS <= set(CLIMATE_ROOMS)
+
+    def test_every_climate_entity_is_in_the_climate_group_or_shared_with_the_default_set(
+        self,
+    ) -> None:
+        default_entities = {s.entity for s in features.SIGNALS}
+        for sig in features.CLIMATE_SIGNALS:
+            assert (sig.entity in CLIMATE_ENTITY_IDS) != (sig.entity in default_entities)
+
+    def test_every_climate_entity_is_a_registered_feature_entity(self) -> None:
+        registered = {(s.entity_id, s.metric) for s in ENTITY_SPECS.values()}
+        for sig in features.CLIMATE_SIGNALS:
+            assert sig.entity in FEATURE_ENTITY_IDS
+            if sig.metric is not None:
+                assert (sig.entity, sig.metric) in registered
+
+    def test_cooling_power_and_energy_are_included(self) -> None:
+        aliases = {s.alias for s in features.CLIMATE_SIGNALS}
+        assert {"hp_cool", "hp_cool_out", "hp_cool_energy", "hp_cool_energy_out"} <= aliases
+
+    def test_the_id_depends_on_the_signal_set_and_a_pinned_metric(self) -> None:
+        kwargs: dict[str, Any] = {
+            "part_hashes": [],
+            "code_ver": "v",
+            "window_start": T0,
+            "window_end": T0 + timedelta(hours=1),
+            "params": {},
+        }
+        base = Signal(SERVERS, "servers", features.KIND_TEMPERATURE)
+        pinned = Signal(SERVERS, "servers", features.KIND_TEMPERATURE, "m")
+        ids = {
+            features.compute_feature_set_id(**kwargs, signals=sigs)
+            for sigs in (features.SIGNALS, features.CLIMATE_SIGNALS, (base,), (pinned,))
+        }
+        assert len(ids) == 4
+
+
+class TestCounterDelta:
+    COUNTER = Signal("sensor.x", "starts", features.KIND_COUNTER_DELTA)
+
+    def _minutes(self, values: list[float], start_minute: int = 0) -> tuple[np.ndarray, np.ndarray]:
+        base = int(T0.timestamp()) * 1_000_000
+        t = base + (start_minute + np.arange(len(values), dtype=np.int64)) * 60_000_000
+        return t, np.array(values, dtype=np.float64)
+
+    def test_rates_treat_a_decrease_as_a_reset_to_zero(self) -> None:
+        rates, resets, rollbacks = features.counter_rates(
+            np.array([0.0, 60.0, 120.0, 180.0]), np.array([10.0, 11.0, 2.0, 3.0])
+        )
+        # 10 -> 11: +1; 11 -> 2: counter restarted, +2 since the restart; 2 -> 3: +1
+        assert (rates[:3] * 60.0).tolist() == pytest.approx([1.0, 2.0, 1.0])
+        assert (resets, rollbacks) == (1, 0)
+
+    def test_a_small_decrease_is_a_rollback_that_adds_nothing(self) -> None:
+        # the live energy totals slip back by tenths of a kWh; that is not a restart from zero
+        rates, resets, rollbacks = features.counter_rates(
+            np.array([0.0, 60.0, 120.0, 180.0]), np.array([2100.2, 2100.7, 2100.6, 2101.0])
+        )
+        assert (rates[:3] * 60.0).tolist() == pytest.approx([0.5, 0.0, 0.4])
+        assert (resets, rollbacks) == (0, 1)
+
+    def test_a_single_sample_has_no_increase(self) -> None:
+        rates, resets, rollbacks = features.counter_rates(np.array([0.0]), np.array([5.0]))
+        assert rates.tolist() == [0.0]
+        assert (resets, rollbacks) == (0, 0)
+
+    def test_a_steady_counter_gives_its_increase_per_slot(self) -> None:
+        t, v = self._minutes([100.0 + 0.01 * i for i in range(61)])
+        cols = signal_columns(
+            self.COUNTER, t, v, us_edges(4), max_gap_seconds=300.0, min_coverage=0.8
+        )
+        assert cols["starts_delta"].tolist() == pytest.approx([0.15] * 4)
+        assert cols["starts_quality"].tolist() == ["measured"] * 4
+
+    def test_the_total_increase_survives_a_reset(self) -> None:
+        values = [10.0] * 30 + [11.0] * 60 + [2.0] * 31
+        t, v = self._minutes(values)
+        cols = signal_columns(
+            self.COUNTER, t, v, us_edges(8), max_gap_seconds=300.0, min_coverage=0.8
+        )
+        # +1 at minute 30, then a reset at minute 90 worth the 2 starts counted since.
+        assert np.nansum(cols["starts_delta"]) == pytest.approx(3.0, abs=0.02)
+
+    def test_a_gap_is_unknown_not_zero_and_not_the_whole_increase(self) -> None:
+        # the counter is read for 15 minutes, then not for 30 minutes, then read again
+        first, v1 = self._minutes([float(i) for i in range(16)])
+        second, v2 = self._minutes([500.0 + i for i in range(10)], start_minute=45)
+        cols = signal_columns(
+            self.COUNTER,
+            np.concatenate([first, second]),
+            np.concatenate([v1, v2]),
+            us_edges(4),
+            max_gap_seconds=300.0,
+            min_coverage=0.8,
+        )
+        assert cols["starts_quality"][1] == "unknown"
+        assert np.isnan(cols["starts_delta"][1])
+        # slot 0 holds the 15 increases of its 15 covered minutes; slot 3 has 9 of its 15
+        # minutes covered (unknown), and the 485 increase accrued across the gap is in no slot
+        assert np.nansum(cols["starts_delta"]) == pytest.approx(15.0)
+        assert cols["starts_delta"][0] == pytest.approx(15.0)
+
+    def test_no_samples_is_unknown(self) -> None:
+        cols = signal_columns(
+            self.COUNTER,
+            np.zeros(0, dtype=np.int64),
+            np.zeros(0),
+            us_edges(2),
+            max_gap_seconds=300.0,
+            min_coverage=0.8,
+        )
+        assert np.isnan(cols["starts_delta"]).all()
+        assert cols["starts_quality"].tolist() == ["unknown"] * 2
+
+    def test_gauge_is_the_time_weighted_mean(self) -> None:
+        base = int(T0.timestamp()) * 1_000_000
+        t = base + np.array([0, 450, 900], dtype=np.int64) * 1_000_000
+        cols = signal_columns(
+            Signal("sensor.f", "freq", features.KIND_GAUGE),
+            t,
+            np.array([10.0, 30.0, 30.0]),
+            us_edges(1),
+            max_gap_seconds=1000.0,
+            min_coverage=0.8,
+        )
+        assert cols["freq_mean"][0] == pytest.approx(20.0)
+        assert cols["freq_coverage"][0] == pytest.approx(1.0)
+
+
+ROOM = "climate.thermostat_bedroom"
+OFFICE_A = "climate.thermostat_office_a"
+STARTS = "sensor.aquarea_compressor_start_stop_counter"
+HEAT_ENERGY = "sensor.aquarea_heat_energy_consumed"
+FREQ = "sensor.aquarea_compressor_frequency"
+CURRENT = "hass_climate_current_temperature_celsius"
+TARGET = "hass_climate_target_temperature_celsius"
+
+
+CLIMATE_ENTITIES = [ROOM, OFFICE_A, STARTS, HEAT_ENERGY, FREQ]
+
+
+def _climate_rows() -> list[dict[str, Any]]:
+    """Raw rows of the climate extraction group only (none of the earlier feature entities)."""
+    n = 121
+    degc = "\u00b0C"
+    rows = _raw_rows(ROOM, CURRENT, degc, T0, [20.0] * n)
+    rows += _raw_rows(ROOM, TARGET, degc, T0, [22.0] * n)
+    rows += _raw_rows(OFFICE_A, CURRENT, degc, T0, [24.0] * n)  # no setpoint series
+    starts = [10.0] * 30 + [11.0] * 60 + [2.0] * 31
+    rows += _raw_rows(STARTS, "hass_sensor_state", "count", T0, starts)
+    energy = [100.0 + 0.01 * i for i in range(n)]
+    rows += _raw_rows(HEAT_ENERGY, "hass_sensor_energy_kwh", "kWh", T0, energy)
+    rows += _raw_rows(FREQ, "hass_sensor_unit_hz", "Hz", T0, [40.0] * n)
+    return rows
+
+
+@pytest.fixture
+def climate_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "climate-data"
+    directory.mkdir()
+    _write_raw(directory, _climate_rows(), entities=CLIMATE_ENTITIES)
+    return directory
+
+
+class TestBuildClimateFeatures:
+    WINDOW = ("2026-01-05T00:00:00Z", "2026-01-05T02:00:00Z")
+
+    def _build(self, data_dir: Path, **kwargs: Any) -> Path:
+        return build_features(
+            data_dir=str(data_dir),
+            start=self.WINDOW[0],
+            end=self.WINDOW[1],
+            signals=features.CLIMATE_SIGNALS,
+            **kwargs,
+        )
+
+    def test_both_series_of_one_thermostat_land_in_their_own_columns(
+        self, climate_dir: Path
+    ) -> None:
+        table, manifest = load_features(self._build(climate_dir))
+        assert table.schema.equals(features.feature_schema(features.CLIMATE_SIGNALS))
+        assert table.column("room_bedroom_temp_mean_c").to_pylist()[1] == pytest.approx(20.0)
+        assert table.column("room_bedroom_setpoint_mean_c").to_pylist()[1] == pytest.approx(22.0)
+        assert table.column("room_office_a_temp_mean_c").to_pylist()[1] == pytest.approx(24.0)
+        assert table.column("compressor_freq_mean").to_pylist()[1] == pytest.approx(40.0)
+        assert table.column("hp_heat_energy_delta").to_pylist()[2] == pytest.approx(0.15)
+        assert manifest["quality"]["series"]["room_bedroom_setpoint"]["metric"] == TARGET
+        assert manifest["quality"]["series"]["room_bedroom_temp"]["metric"] == CURRENT
+        by_alias = {s["alias"]: s for s in manifest["signals"]}
+        assert by_alias["room_bedroom_setpoint"]["unit"] == "°C"
+        assert by_alias["compressor_starts"]["unit"] == "count"
+
+    def test_missing_series_are_unknown_and_named_not_zero_filled(self, climate_dir: Path) -> None:
+        table, manifest = load_features(self._build(climate_dir))
+        assert table.column("room_office_a_setpoint_mean_c").null_count == table.num_rows
+        assert table.column("hp_cool_kwh").null_count == table.num_rows
+        assert set(table.column("hp_cool_quality").to_pylist()) == {"unknown"}
+        missing = manifest["quality"]["entities_without_samples"]
+        assert f"{OFFICE_A}#setpoint" in missing
+        # every name is a token `extract --entities` accepts
+        assert resolve_entity_specs(missing)
+        assert "sensor.aquarea_cool_power_consumed" in missing
+        assert ROOM not in missing
+
+    def test_counter_resets_are_reported_and_deltas_keep_the_total(self, climate_dir: Path) -> None:
+        table, manifest = load_features(self._build(climate_dir))
+        quality = manifest["quality"]["series"]["compressor_starts"]
+        assert (quality["counter_resets"], quality["counter_rollbacks"]) == (1, 0)
+        assert quality["slots_measured"] + quality["slots_partial"] > 0
+        deltas = table.column("compressor_starts_delta").to_pylist()
+        assert sum(d for d in deltas if d is not None) == pytest.approx(3.0, abs=0.02)
+
+    def test_room_roles_are_recorded_as_data_only(self, climate_dir: Path) -> None:
+        _table, manifest = load_features(self._build(climate_dir))
+        rooms = manifest["climate"]["rooms"]
+        assert rooms["office_a"]["comfort"] is False
+        assert rooms["bedroom"] == {"entity": ROOM, "comfort": True}
+        assert rooms["office_t"]["comfort"] is True
+
+    def test_a_climate_extraction_leaves_the_default_set_unchanged(self, data_dir: Path) -> None:
+        window = ("2026-01-05T00:00:00Z", "2026-01-05T02:00:00Z")
+        before = build_features(data_dir=str(data_dir), start=window[0], end=window[1])
+        table_before, manifest_before = load_features(before)
+
+        # a climate extraction over an overlapping window, into the same store
+        _write_raw(data_dir, _climate_rows(), entities=CLIMATE_ENTITIES)
+        after = build_features(data_dir=str(data_dir), start=window[0], end=window[1])
+        table_after, manifest_after = load_features(after)
+
+        assert after == before  # same feature_set_id, so the same directory
+        assert manifest_after["feature_set_id"] == manifest_before["feature_set_id"]
+        assert manifest_after["inputs"] == manifest_before["inputs"]
+        assert table_after.equals(table_before)
+
+    def test_the_climate_set_reads_both_extractions(self, data_dir: Path) -> None:
+        _write_raw(data_dir, _climate_rows(), entities=CLIMATE_ENTITIES)
+        out = self._build(data_dir)
+        table, manifest = load_features(out)
+        # from the climate extraction
+        assert table.column("room_bedroom_temp_mean_c").to_pylist()[1] == pytest.approx(20.0)
+        assert table.column("compressor_freq_mean").to_pylist()[1] == pytest.approx(40.0)
+        # from the earlier feature extraction (heat power 0 W, then 800 W; climate_enable on)
+        assert table.column("hp_heat_kwh").to_pylist()[5] == pytest.approx(0.2)
+        assert table.column("servers_kwh").to_pylist()[1] == pytest.approx(0.06)
+        assert table.column("climate_enable_at_start").to_pylist()[1] == 1.0
+        assert len(manifest["inputs"]["raw_extraction_ids"]) == 2
+        assert (
+            "sensor.aquarea_heat_power_consumed"
+            not in (manifest["quality"]["entities_without_samples"])
+        )
+
+    def test_the_climate_set_has_its_own_id_and_no_default_manifest_key(
+        self, data_dir: Path, climate_dir: Path
+    ) -> None:
+        default_out = build_features(
+            data_dir=str(data_dir), start="2026-01-05T00:00:00Z", end="2026-01-05T02:00:00Z"
+        )
+        _table, default_manifest = load_features(default_out)
+        assert "climate" not in default_manifest
+        climate_out = self._build(climate_dir)
+        assert climate_out.name != default_out.name
+
+    def test_the_cop_check_runs_without_the_reported_total(self, climate_dir: Path) -> None:
+        _table, manifest = load_features(self._build(climate_dir))
+        assert set(manifest["quality"]["cop_check"]) == {"heat", "dhw", "cool"}
+
+    def test_the_main_meter_check_needs_the_servers_and_heat_pump_signals(
+        self, climate_dir: Path
+    ) -> None:
+        needed = {"servers_kwh", "hp_heat_kwh", "hp_dhw_kwh", "hp_cool_kwh"}
+        assert needed <= set(features.feature_schema(features.CLIMATE_SIGNALS).names)
+        with pytest.raises(FeatureError, match="servers and heat-pump power"):
+            build_features(
+                data_dir=str(climate_dir),
+                start=self.WINDOW[0],
+                end=self.WINDOW[1],
+                signals=features.CLIMATE_SIGNALS[:2],
+                dataset=str(climate_dir),
+            )
+
+    def test_cli_selects_the_climate_set(
+        self, climate_dir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        argv = ["build-features", "--data-dir", str(climate_dir)]
+        argv += ["--start", self.WINDOW[0], "--end", self.WINDOW[1], "--signal-set", "climate"]
+        assert main(argv) == 0
+        out = capsys.readouterr().out.strip().split(": ", 2)[-1]
+        _table, manifest = load_features(out)
+        assert "climate" in manifest
+        assert out.endswith(manifest["feature_set_id"])
