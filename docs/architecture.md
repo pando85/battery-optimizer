@@ -9,6 +9,10 @@ Home Assistant and Prometheus, runs the same MPC kernel live and records plans t
 Decisions are recorded in [`adr/`](adr/); the production architecture is
 [ADR-0004](adr/0004-battery-optimizer-production-architecture.md).
 
+## Proposed climate-planning extension
+
+[ADR-0005](adr/0005-shared-energy-planning-climate.md) proposes reusing this **read-only** resident runtime for a domain-specific thermal/DHW planner rather than creating a second ingest/optimization deployment. It keeps AppDaemon's existing HeishaMon actuation separate and explicitly gated. No climate planner, ClimatePlan endpoint or AppDaemon plan consumer is implemented yet; see the [phased climate plan](planning/climate-optimizer-implementation.md). Battery dispatch remains shadow-only and unchanged.
+
 ## Planning components
 
 The README [ASCII component diagram](../README.md#architecture) is a **logical architecture**:
