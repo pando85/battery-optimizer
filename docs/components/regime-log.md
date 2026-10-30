@@ -45,6 +45,7 @@ S2 2024-10-01 to 2025-04-30, S3 2025-10-01 to 2026-04-30.
 | 2026-10-30 | Template room-temperature sensors and `hass_climate_action` (real valve demand) start to exist; earlier demand must be inferred. Pump verified in direct mode, water target 26 degC, space heating off (hot water only) | doc | data-pipeline, thermal-model |
 | 2026-10-30 | Observation, not a change: HeishaMon shows the legionella/sterilization function off (`Sterilization_State` 0; configured 65 degC / 10 min unused; tank never above 51 degC 2023-11 to 2026-10) and DHW heater lifetime hours 0 | observation | heat-pump-controller, boost-mode, battery-optimizer |
 | 2026-10-30 | Observation, not a change: room/backup heater lifetime hours 29 (date range unknown); heater-on outdoor temperature 0 degC. Read-only HA sensors for the heater, sterilization and `Heating_Mode` are being added in homelab (entity ids to follow) | observation | heat-pump-controller, data-pipeline |
+| 2026-10-30/31 | Heater, sterilization and Heating_Mode sensors added to HA (homelab commits `d9c3bc3e7` and `1f23f6b2b`), history starts here; entity ids in [heat-pump-controller](heat-pump-controller.md#heater-facts-import-limit-inputs) | git | heat-pump-controller, data-pipeline, battery-optimizer |
 | 2026-10-30 | Decoupled design agreed ([ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md)): the heat pump does comfort with the fewest kWh and ignores price, the battery does price arbitrage | doc | all |
 
 ## Planned (not yet real: dates to be filled in)

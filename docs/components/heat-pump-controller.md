@@ -47,9 +47,14 @@ WH-ADC0309JE5C and WH-UD09JE5-1 are assumed equivalent). Page details in the hom
   from 2023-11 to 2026-10); DHW heater lifetime hours **0**; room/backup heater lifetime hours **29**; the
   heater-on outdoor temperature is 0 degC. So the booster has never run, and the backup heater has run for
   space heating or defrost for 29 h in total, over an unknown period and not attributable to a day.
-- **Placeholder (entity ids to follow):** read-only HA sensors for the heater, sterilization and `Heating_Mode`
-  are being added in the homelab repository. Entity ids: `TODO`. Until they exist the heater stays
-  unobserved at 15-minute resolution.
+- **Heater sensors (read-only, added in homelab on 2026-10-30/31, recorded in Prometheus):**
+  `binary_sensor.aquarea_sterilization_state`, `sensor.aquarea_sterilization_temperature`,
+  `sensor.aquarea_sterilization_max_time`, `binary_sensor.aquarea_force_heater_state`,
+  `sensor.aquarea_room_heater_operating_hours`, `sensor.aquarea_dhw_heater_operating_hours`,
+  `sensor.aquarea_heater_on_outdoor_temperature`, `sensor.aquarea_heating_mode` (0 curve, 1 direct),
+  `binary_sensor.aquarea_tank_heater_enabled`, `binary_sensor.aquarea_room_heater_enabled`,
+  `binary_sensor.aquarea_internal_heater_state`, `binary_sensor.aquarea_external_heater_state`. Before
+  them there was no heater history; it starts on those dates.
 
 ## Calibrated on
 
