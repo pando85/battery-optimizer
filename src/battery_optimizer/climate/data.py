@@ -24,7 +24,10 @@ Derived signals
   fused series ``t_out_fused = r + mu + x_hat`` (Kalman-smoothed local offset, see
   :mod:`battery_optimizer.climate.tout`) with its standard deviation, and the hash of the station
   manifest.  ``t_out_model`` is the series the models read, chosen by ``signals.t_out_source``
-  (``debiased`` unless the configuration says ``fused``); the ``outdoor_unknown`` filter follows it.
+  (``debiased`` unless the configuration says ``fused``); with
+  ``signals.t_out_fill_unknown_from_fused`` the debiased series takes the fused value on exactly
+  the slots where it is unknown and the station reference is known (``t_out_filled``).  The
+  ``outdoor_unknown`` filter follows ``t_out_model``.
 * ``valve_open_inferred``: from room temperature and setpoint (a room below its setpoint wants
   heat); ``climate_action`` has no history before 2026-10-30.  Not the plant's valve cap.
 * ``solar``: clear-sky proxy, the positive part of the sine of the solar elevation at the slot
@@ -306,13 +309,20 @@ class ClimateData:
     columns: dict[str, np.ndarray] = field(default_factory=dict)
     t_out_source: str = "debiased"
     fusion: Fusion | None = None
+    #: Slots where ``t_out_debiased`` is unknown and ``t_out_model`` reads the fused series
+    #: (``signals.t_out_fill_unknown_from_fused``); ``None`` when nothing is filled.
+    t_out_filled: np.ndarray | None = None
 
     @property
     def t_out_model(self) -> np.ndarray:
-        """The outdoor series the models read: ``signals.t_out_source``."""
+        """The outdoor series the models read: ``signals.t_out_source``, and with the long-gap
+        fill the fused value on the ``t_out_filled`` slots."""
         if self.t_out_source == "fused":
             assert self.fusion is not None
             return self.fusion.fused
+        if self.t_out_filled is not None and self.t_out_filled.any():
+            assert self.fusion is not None
+            return np.where(self.t_out_filled, self.fusion.fused, self.t_out_debiased)
         return self.t_out_debiased
 
     @property
@@ -643,7 +653,9 @@ def build_climate_data(
     """Derive the climate signals from a feature table (and prices on the same grid).
 
     With a *station* series the fused outdoor temperature is built too; ``signals.t_out_source``
-    then picks the series the ``outdoor_unknown`` filter and ``t_out_model`` follow.
+    then picks the series the ``outdoor_unknown`` filter and ``t_out_model`` follow, and
+    ``signals.t_out_fill_unknown_from_fused`` fills the unknown debiased slots from it.  Without a
+    station nothing is filled (``climate-fit`` refuses that combination).
     """
     _require(table, REQUIRED_COLUMNS)
     tz = ZoneInfo(config.timezone)
@@ -739,7 +751,15 @@ def build_climate_data(
             "signals.t_out_source is 'fused' but there is no station series "
             "(set reference_station in the site file and fetch it)"
         )
-    t_out_model = fusion.fused if sig.t_out_source == "fused" else t_out_debiased
+    t_out_filled = None
+    if sig.t_out_source == "fused":
+        t_out_model = fusion.fused
+    else:
+        t_out_model = t_out_debiased
+        if sig.t_out_fill_unknown_from_fused and fusion is not None:
+            # only where the debiased series is unknown and the station reference is known
+            t_out_filled = ~np.isfinite(t_out_debiased) & fusion.from_reference
+            t_out_model = np.where(t_out_filled, fusion.fused, t_out_debiased)
 
     # --- training filters (True = drop the slot) ----------------------------------------------
     flt = config.filters
@@ -833,6 +853,7 @@ def build_climate_data(
         columns={name: col(name) for name in dict.fromkeys(_KEPT_COLUMNS)},
         t_out_source=sig.t_out_source,
         fusion=fusion,
+        t_out_filled=t_out_filled,
     )
 
 

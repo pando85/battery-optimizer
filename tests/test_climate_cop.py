@@ -16,7 +16,7 @@ from battery_optimizer.climate.data import build_climate_data
 
 TRUE = {"a": 0.10, "b": 0.006, "c": 0.004, "d": 0.07, "e": 0.05}
 KNEE = 5.0
-#: Three short January seasons so a synthetic grid of a few weeks covers both folds.
+#: Three short January seasons so a synthetic grid of a few weeks covers the fold (fit S2, test S3).
 SEASON_DAYS = {"S1": date(2024, 1, 1), "S2": date(2024, 1, 11), "S3": date(2024, 1, 21)}
 DAYS_PER_SEASON = 8
 
@@ -123,16 +123,17 @@ def test_regression_recovers_known_parameters_and_beats_the_table(config):
     # T_out is held clear of the knee region's edge so each term is identifiable
     data, _ = make_data(config, law=true_law, noise=0.002)
     report = cop.fit_and_validate(data, config)
-    assert [(f["train"], f["test"]) for f in report["folds"]] == [
-        (["S1"], "S2"),
-        (["S1", "S2"], "S3"),
-    ]
+    assert [(f["train"], f["test"]) for f in report["folds"]] == [(["S2"], "S3")]
     for fold in report["folds"]:
         coef = fold["model"]["coefficients"]
         for name, value in TRUE.items():
             assert coef[name] == pytest.approx(value, rel=0.15, abs=0.01), name
-        assert fold["selected"] == "regression"
-        assert fold["selected_passes"] is True
+        # the model is predeclared (cop.model); the held-out best is reported beside it
+        assert fold["selected"] == "lift_table" == fold["model"]["selected"]
+        assert "predeclared" in fold["selection_reason"]
+        assert fold["held_out_best"] == "regression"
+        assert fold["validation"]["regression"]["passes"] is True
+        assert fold["selected_passes"] == fold["validation"]["lift_table"]["passes"]
         assert fold["validation"]["regression"]["daily_mape"] < 0.02
         assert (
             fold["validation"]["table"]["daily_mape"]
@@ -154,26 +155,28 @@ def test_d_and_e_sanity_check_flags_an_implausible_term(config):
     assert terms["e"]["ok"] is False and terms["d"]["ok"] is True
 
 
-def test_the_table_is_selected_when_the_regression_loses(config):
+def test_the_table_is_reported_best_when_the_regression_loses(config):
     data, _ = make_data(config, law=step_law, noise=0.0)
     report = cop.fit_and_validate(data, config)
     for fold in report["folds"]:
-        assert fold["selected"] == "table"
-        assert "loses to the table" in fold["selection_reason"]
+        assert fold["held_out_best"] == "table" and fold["selected"] == "lift_table"
         reg, tab = fold["validation"]["regression"], fold["validation"]["table"]
         assert tab["daily_mape"] < reg["daily_mape"]
-        assert fold["model"]["selected"] == "table"
-        model = cop.CopModel.from_dict(fold["model"])
+        model = cop.CopModel.from_dict(fold["model"]).with_selected("table")
         # the simulator API answers with the table, whatever flow or starts it is given
         got = cop.predict_electricity(model, 2.0, 30.0, np.array([3.0, 10.0]), 9, 9)
         np.testing.assert_allclose(got, [2.0 / 2.5, 2.0 / 5.5])
         np.testing.assert_allclose(cop.predict_electricity(model, 2.0, 99.0, 12.0, 0, 0), 2.0 / 5.5)
 
 
-def test_selection_is_by_held_out_daily_mape_with_a_tie_to_the_regression():
+def test_held_out_best_is_by_daily_mape_with_a_tie_to_the_earlier_candidate():
     reg = {"daily_mape": 0.05}
     assert cop.select_model({"regression": reg, "table": {"daily_mape": 0.05}})[0] == "regression"
     assert cop.select_model({"regression": reg, "table": {"daily_mape": 0.049}})[0] == "table"
+    three = {"regression": reg, "table": {"daily_mape": 0.04}, "lift_table": {"daily_mape": 0.04}}
+    assert cop.select_model(three)[0] == "table"
+    three["lift_table"] = {"daily_mape": 0.03}
+    assert cop.select_model(three)[0] == "lift_table"
 
 
 def test_validation_limits_come_from_the_config(config):
@@ -204,7 +207,7 @@ def test_validation_limits_come_from_the_config(config):
 def test_residuals_by_t_out_bin_cover_every_validation_hour(config):
     data, _ = make_data(config, law=true_law, noise=0.002)
     fold = cop.fit_and_validate(data, config)["folds"][0]
-    for name in ("regression", "table"):
+    for name in ("regression", "table", "lift_table"):
         bins = fold["validation"][name]["residuals_by_t_out"]
         assert sum(b["hours"] for b in bins) == fold["validation"][name]["hours"]
         edges = [b["t_out_from_c"] for b in bins]
@@ -358,6 +361,42 @@ def test_sparse_bins_are_left_out_and_read_the_nearest_populated_bin():
     assert np.isnan(model.cop_table(np.nan))
 
 
+def test_lift_table_bins_flow_minus_outdoor_with_the_same_rules():
+    # lift 30 - t_out: 21 K and 23 K fill two bins, one hour at 27 K is too sparse
+    t_out = np.concatenate([np.full(10, 9.0), np.full(10, 7.0), [3.0]])
+    q = np.concatenate([np.full(10, 4.0), np.full(10, 3.0), [1.0]])
+    rows = _rows(t_out, q, np.ones(t_out.size))
+    table = cop.fit_lift_table(rows, 2.0)
+    assert table == ((20.0, pytest.approx(4.0), 10), (22.0, pytest.approx(3.0), 10))
+    model = _model(lift_table=table, selected="lift_table")
+    # 27 K reads the nearest populated bin (centre 23); far below reads the first bin
+    np.testing.assert_allclose(model.cop_lift([21.0, 23.5, 27.0, 5.0]), [4.0, 3.0, 3.0, 4.0])
+    assert np.isnan(model.cop_lift(np.nan))
+    # the simulator API reads q and the lift; starts and on-time do not enter a table
+    got = cop.predict_electricity(model, 6.0, np.array([30.0, 35.0]), 9.0, 9, 9)
+    np.testing.assert_allclose(got, [6.0 / 4.0, 6.0 / 3.0])
+    with pytest.raises(cop.CopError, match="lift"):
+        cop.fit_lift_table(_rows([1.0], [1.0], [1.0]), 2.0)
+
+
+def test_lift_table_follows_a_flow_change_the_t_out_table_cannot(config):
+    # COP falls with the lift only; the test season runs the water at the top of the training range
+    def law(q, t_flow, t_out, starts, on):
+        return q / (8.0 - 0.15 * (t_flow - t_out))
+
+    data, _ = make_data(
+        config, law=law, noise=0.0, t_out_of=lambda h, rng: rng.uniform(2, 12, h.size)
+    )
+    s3 = data.day_mask(data.day_season == "S3")
+    flow = data.columns["flow_temp_mean_c"]
+    flow[s3] = 38.0
+    data.e_heat_kwh[:] = data.q_heat_kwh / (8.0 - 0.15 * (flow - data.t_out_debiased))
+    fold = cop.fit_and_validate(data, config)["folds"][0]
+    v = fold["validation"]
+    assert v["lift_table"]["daily_mape"] < 0.03 and v["lift_table"]["passes"]
+    assert v["table"]["season_error"] < -0.10 and not v["table"]["passes"]
+
+
 def test_no_populated_bin_is_an_error():
     with pytest.raises(cop.CopError):
         cop.fit_table(_rows([1.0, 2.0], [1.0, 1.0], [1.0, 1.0]), 2.0)
@@ -381,13 +420,15 @@ def _model(**over):
         "n_train_rows": 40,
         "feature_set_id": "fs",
         "config_sha256": "cfg",
+        "lift_bin_k": 2.0,
+        "lift_table": ((20.0, 4.0, 20), (22.0, 3.5, 20), (30.0, 2.5, 20)),
     }
     return cop.CopModel(**{**base, **over})
 
 
 def test_model_record_is_versioned_hashable_and_round_trips_through_json():
     m = _model()
-    assert m.version == cop.COP_MODEL_VERSION == 1
+    assert m.version == cop.COP_MODEL_VERSION == 2
     assert hash(m) == hash(_model()) and {m, _model()} == {m}
     again = cop.CopModel.from_dict(json.loads(json.dumps(m.to_dict())))
     assert again == m and again.model_id == m.model_id
@@ -399,12 +440,15 @@ def test_model_record_is_versioned_hashable_and_round_trips_through_json():
         _model(coefficients=(0.1, 0.006, 0.004, 0.07, 0.051)).model_id,
         _model(config_sha256="other").model_id,
         _model(table=((0.0, 3.1, 20), (2.0, 4.0, 20))).model_id,
+        _model(lift_table=((20.0, 3.0, 20), (22.0, 2.9, 20))).model_id,
     }
-    assert len(ids) == 5
+    assert len(ids) == 6
     with pytest.raises(cop.CopError):
         cop.CopModel.from_dict({**m.to_dict(), "version": 99})
     with pytest.raises(cop.CopError):
         _model(selected="neither")
+    with pytest.raises(cop.CopError, match="lift table is empty"):
+        _model(selected="lift_table", lift_table=())
 
 
 def test_predict_electricity_matches_the_formula_broadcasts_and_never_goes_negative():

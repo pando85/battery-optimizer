@@ -7,8 +7,12 @@
 # data dir (see docs/architecture.md). The file is validated strictly by
 # battery_optimizer.climate.config: an unknown, missing, duplicated or out-of-range key is an error.
 # A change is a new `config_version` and a new config hash in every result it touches.
+#
+# Version 2 is the single predeclared model iteration (plan, "C2 model iteration"), written before
+# the rerun on S3: S1 out of training, causal weekly refits with shrinkage, a COP table by lift, the
+# T_out long-gap fill and two acceptance-protocol changes (parameter stability, baseline gain).
 
-config_version: 1
+config_version: 2
 timezone: Europe/Madrid
 
 # --- comfort band heat-v1 -------------------------------------------------------------------------
@@ -21,15 +25,20 @@ comfort:
 
 # --- seasons and folds (inclusive local dates) ----------------------------------------------------
 seasons:
-  S1: {start: 2023-11-08, end: 2024-04-30} # train only
-  S2: {start: 2024-10-01, end: 2025-04-30} # train, secondary test
+  S1: {start: 2023-11-08, end: 2024-04-30} # excluded from training (see training_excluded)
+  S2: {start: 2024-10-01, end: 2025-04-30} # train, and the shrinkage selection
   S3: {start: 2025-10-01, end: 2026-04-30} # held-out test and primary gate period
   fit_months: [10, 11, 12, 1, 2, 3, 4]
   gate_months: [11, 12, 1, 2, 3] # the gate and headline metrics
   reserved_from: 2026-10-01 # untouched, reserved for C4
+  # S1 is a different plant regime: flow water about 34 C against 26-28 C later, so the comfort
+  # rooms sat at setpoint with their valves shut about half the heating time while heat went to
+  # the always-open rooms and the slab (apparent UA about three times S2's and S3's). Nothing
+  # physical changed in the house. No thermal, response, starts or COP fit reads it. The outdoor
+  # offset model (signals.t_out_fused.fit_seasons) is about the sensor, not the plant, and keeps it.
+  training_excluded: [S1]
 folds:
-  - {train: [S1], test: S2}
-  - {train: [S1, S2], test: S3}
+  - {train: [S2], test: S3}
 
 # --- derived signals ------------------------------------------------------------------------------
 signals:
@@ -55,6 +64,10 @@ signals:
   # only after the held-out leave-block-out comparison (docs/architecture.md, "Fused outdoor
   # temperature").
   t_out_source: debiased
+  # Owner decision before any result of the iteration: where t_out_debiased is unknown (a running
+  # period longer than max_gap_hours, or no reading) the model series takes t_out_fused; every
+  # other slot stays debiased. The filled slots are recorded (ClimateData.t_out_filled).
+  t_out_fill_unknown_from_fused: true
   t_out_fused: # Kalman-smoothed offset between the house sensor and the station reference
     max_ref_gap_hours: 3.0 # station gaps up to this long are bridged; longer ones: no reference
     dark_solar_max: 0.05 # offset observed only where the clear-sky proxy is below this
@@ -95,12 +108,32 @@ model:
   selection:
     b_min_rmse_gain: 0.10 # use B only if it beats A by this much at 12 h and 24 h
     horizons_hours: [12, 24]
+  # Causal trailing-window refit: at each weekly origin (local midnight, from the first gate-month
+  # day of the test season) the thermal parameters are refitted on the fit-month days of the
+  # trailing window_days before it, starting from and shrunk toward the prior (the fold's training
+  # fit): penalty shrinkage * sum(((p - p_prior) / search-box width)^2) on every parameter. A window
+  # without a fit segment keeps the prior and counts as a failed refit. Response, valve cap, room
+  # offsets and starts stay the fold's training fit.
+  adaptive:
+    window_days: 28
+    refit_every_days: 7
+    shrinkage: {A: null, B: null} # chosen on S2 only (selection below), in its own commit
+    # Selection on S2 only: prior fit on the S2 fit-month days up to prior_until, weekly refits from
+    # the next day through the S2 gate months; per model, the grid value with the lowest mean
+    # Q-driven RMSE at acceptance.q_driven.gain_horizons_hours among the values whose weekly refits
+    # meet acceptance.parameters.weekly_refit_ok_share (none: the largest value); a tie: the larger.
+    selection:
+      season: S2
+      prior_until: 2024-12-31
+      grid: [0, 1, 10, 100, 1000, 10000, 100000, 1000000]
 
 acceptance:
   q_driven: # measured Q, season S3
     rmse_k: {6: 0.30, 12: 0.40, 24: 0.50}
     abs_bias_24h_k: 0.15
-    min_gain_vs_baseline: 0.15 # at 12 h and 24 h against the better baseline
+    # at 12 h and 24 h against the better baseline; 0.15 until version 1, now "not worse" (owner
+    # protocol change before the rerun: a 15% margin over persistence is not needed to plan)
+    min_gain_vs_baseline: 0.0
     gain_horizons_hours: [12, 24]
   u_driven: # replayed u through the response model, season S3
     rmse_24h_k: 0.60
@@ -114,13 +147,20 @@ acceptance:
     kh_below_low_rel_error: 0.25
     kh_below_low_abs_error: 10.0
   parameters:
-    fold_rel_diff: 0.30 # each parameter within this between the two folds
+    # replaces the fold stability of version 1 (one training season leaves no fold pair): at least
+    # this share of the weekly refits has every parameter inside the envelope and none on a bound
+    # (g_s at its 0 bound is legitimate)
+    weekly_refit_ok_share: 0.95
   max_iterations: 1 # one predeclared model iteration
 
 cop:
   min_q_kwh: 0.1 # hourly rows below this are excluded
   cop_range: [1.0, 9.0] # implied COP outside is excluded
-  table_bin_k: 2.0 # baseline: COP table binned by T_out
+  table_bin_k: 2.0 # reported: COP table binned by T_out
+  # the model: COP table binned by lift (T_flow - T_out), same minimum count and nearest-bin rule;
+  # the T_out table cannot follow flow-temperature changes. The regression is reported.
+  lift_bin_k: 2.0
+  model: lift_table
   defrost_knee_c: 5.0 # the max(0, 5 - T_out) term
   daily_mape: 0.08
   season_error: 0.03
