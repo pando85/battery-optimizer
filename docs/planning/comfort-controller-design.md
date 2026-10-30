@@ -1,6 +1,6 @@
 # Comfort controller design (homelab AppDaemon)
 
-- **Status:** Design agreed with the owner on 2026-10-31; **for owner review, not yet implemented**. No physical control is authorised by this document.
+- **Status:** Design agreed with the owner on 2026-10-31; owner answers to the open items recorded 2026-10-31 (section 14); **not yet implemented**. No physical control is authorised by this document.
 - **Date:** 2026-10-31
 - **Decisions:** [ADR-0006](../adr/0006-decouple-heat-pump-comfort-from-battery-price-optimisation.md) and its "Amendment 2026-10-31" (this design amends decisions 3 and 4 of the ADR).
 - **Parent plans:** [Climate optimizer implementation](climate-optimizer-implementation.md) (section 6 work list), [C7-F field trial](climate-flow-calibration-optimization.md)
@@ -56,8 +56,8 @@ Setpoints carry a **+0.5 K margin** over the minimum:
 | Office A (`climate.thermostat_office_a`) | 21.5 | 21.5 |
 | Office T (`climate.thermostat_office_t`) | 21.5 | 21.5 |
 
-The **day window** starts at the weekday or weekend start above and ends at **22:00 by default**. The end
-time is an assumption, editable as a helper (open item).
+The **day window** starts at the weekday or weekend start above and ends at **22:00** (owner-confirmed
+2026-10-31; no longer an assumption). The end time stays editable as a helper.
 
 ## 4. Thermostat semantics
 
@@ -69,7 +69,7 @@ time is an assumption, editable as a helper (open item).
 - **Every manual override is logged** (room, time, old value, new value). Repeated patterns produce
   **suggested** schedule changes (a notification or a report), **never silent changes**.
 - **The thermostats must not run their own device programs**, or the setpoint would change behind the
-  controller's back (open item: confirm the current state of the programs).
+  controller's back. The programs are **disabled** (owner-confirmed 2026-10-31).
 
 ## 5. Away mode
 
@@ -85,8 +85,10 @@ its valve because the room is below the new setpoint, the run logic of section 2
 the room reaches the minimum at the window start. The run logic stays purely demand-driven. The lead time
 is a table by outdoor-temperature band, **editable as HA helpers**.
 
-The initial values come from the warm-up analysis (track B, step B0, in progress). Until it reports, the
-table is a marked placeholder:
+The values come from the warm-up analysis (track B, step B0, in progress); **no owner decision is needed**
+(owner, 2026-10-31). Until B0 reports, the implementation uses **conservative, editable placeholders**:
+**180 min** when the outdoor temperature is below 6 degC and **120 min** at or above 6 degC. The table
+below is kept as the TODO for the measured values:
 
 | Outdoor band (degC) | Lead time: early-start write before the window start (minutes) |
 |---|---|
@@ -96,9 +98,9 @@ table is a marked placeholder:
 | TODO (6 to 10) | TODO from B0 |
 | TODO (10 and above) | TODO from B0 |
 
-The band edges above are also placeholders. No lead time is guessed in this document; the first deployment
-uses the B0 values or, if B0 is late, a conservative owner-chosen table recorded in the
-[regime log](../components/regime-log.md).
+The band edges above are also placeholders. No measured lead time is guessed in this document; the first
+deployment uses the B0 values or, if B0 is late, the 180/120 min placeholders above (editable helpers),
+recorded in the [regime log](../components/regime-log.md) when deployed.
 
 ## 7. Water temperature and hot water
 
@@ -122,9 +124,10 @@ Requirements:
 
 The curve is software, not the unit's native curve, so the unit's four curve points are untouched.
 
-**Open: the outdoor-temperature source for the curve.** The unit's own sensor reads about 1.6 to 2.5 K low
-while the compressor runs ([outdoor-temperature](../components/outdoor-temperature.md)). Options: an offset
-correction of the unit sensor, or an HA weather entity.
+**Outdoor-temperature source for the curve (resolved, owner 2026-10-31):** the **offset-corrected unit
+sensor**. The unit's own sensor reads about 1.6 to 2.5 K low while the compressor runs
+([outdoor-temperature](../components/outdoor-temperature.md)); the correction offset is an **editable HA
+helper**. An HA weather entity is not used.
 
 ### 7.2 DHW stays price-optimised (amends ADR-0006 decision 4)
 
@@ -136,8 +139,9 @@ is the better place to use a cheap hour.
   hours rank better), avoiding the optimum-start warm-up.
 - **Tank target at most 50 degC**, so the heat pump alone reaches it and the 3 kW heater never starts
   (service manual: above about 51 to 55 degC needs the heater).
-- **Legionella / sterilization** is currently off (`binary_sensor.aquarea_sterilization_state` 0). Keeping
-  it off is an open owner decision.
+- **Legionella / sterilization** is currently off (`binary_sensor.aquarea_sterilization_state` 0) and
+  **stays off for now** (owner, 2026-10-31). The final MPC (track B, section 13) should schedule it
+  eventually; this is a future extension of the B-track scope.
 
 ### 7.3 Price reactors become three
 
@@ -165,9 +169,15 @@ charging will often share the cheapest hours, so:
 - **AppDaemon must never trigger the 3 kW heater**: DHW target at most 50 degC, no sterilization from
   AppDaemon, no forced heater.
 
-Open: the import-limit basis (instantaneous trip or 15-minute average), and whether the backup heater stays
-enabled for space heating (below the unit's heater-on outdoor temperature of 0 degC it starts by itself;
-see the heater facts in [heat-pump-controller](../components/heat-pump-controller.md)).
+**Import-limit basis (owner-confirmed 2026-10-31; no distributor document yet): an instantaneous trip.**
+The battery cap therefore cannot rely on 15-minute averages. OmniBattery must **regulate against the
+measured load in real time with a margin below the limit**. This is a **requirement for the actuator
+ADR**.
+
+**Backup heater: no decision (2026-10-31).** Default: leave it as is. The unit starts the heater by itself
+below its heater-on outdoor temperature of 0 degC (see the heater facts in
+[heat-pump-controller](../components/heat-pump-controller.md)), and the controller never touches it. The
+item stays open.
 
 ## 10. Rollback and failure mode
 
@@ -217,6 +227,10 @@ no writes, no new credentials, no Home Assistant service calls.
 Shadow can validate predictions and plan differences. It **cannot** show the realised comfort of the MPC,
 because the MPC never acts.
 
+**Future extension (owner, 2026-10-31):** the final MPC should also **schedule the Legionella /
+sterilization cycle** (section 7.2) outside the cheap hours and within the import-limit headroom. It is not
+part of B0 to B3.
+
 | Step | Content | Status |
 |---|---|---|
 | **B0** | Diagnostics: [C2 recovery](climate-c2-recovery.md) R0 to R2 and the warm-up rates (feeds the optimum-start table) | in progress |
@@ -224,14 +238,16 @@ because the MPC never acts.
 | **B2** | Shadow runner in the service (read-only plan and prediction metrics) | planned |
 | **B3** | Preregistered comparison after winter | planned |
 
-## 14. Open items for the owner
+## 14. Owner decisions
 
-| Item | Needed for | Options or default |
-|---|---|---|
-| Outdoor-temperature source for the curve | 7.1 | Offset-corrected unit sensor, or an HA weather entity |
-| Day window end time | 3 | 22:00 default (assumption) |
-| Lead-time values | 6 | B0 warm-up analysis (table is a TODO) |
-| Legionella policy | 7.2 | Currently off; keep off or schedule a controlled cycle outside the cheap hours |
-| Backup heater enabled for space heating | 9 | The heater starts below 0 degC outdoors; keep, restrict or disable |
-| Import-limit basis | 9 | Instantaneous trip or 15-minute average (contract or distributor) |
-| Thermostat device programs | 4 | Confirm they are off, or disable them |
+Answered by the owner on 2026-10-31.
+
+| Item | Section | Status | Date | Answer |
+|---|---|---|---|---|
+| Outdoor-temperature source for the curve | 7.1 | Resolved | 2026-10-31 | Offset-corrected unit sensor; the offset is an editable HA helper |
+| Day window end time | 3 | Resolved | 2026-10-31 | 22:00, confirmed (no longer an assumption) |
+| Lead-time values | 6 | Resolved (no owner decision needed) | 2026-10-31 | Values come from B0; until then conservative editable placeholders (180 min below 6 degC outdoor, 120 min above); the TODO table stays for the measured values |
+| Legionella policy | 7.2, 13 | Resolved | 2026-10-31 | Off for now; the final MPC (track B) should schedule it eventually (future extension) |
+| Import-limit basis | 9 | Resolved (owner-confirmed; no distributor document yet) | 2026-10-31 | Instantaneous trip; battery cap must regulate in real time against measured load with a margin (actuator ADR requirement) |
+| Thermostat device programs | 4 | Resolved | 2026-10-31 | Disabled, owner-confirmed |
+| Backup heater enabled for space heating | 9 | **Open** (no decision) | 2026-10-31 | Default: leave as is (the unit starts it below 0 degC outdoor); the controller never touches it |
