@@ -240,6 +240,71 @@ uv run python hack/climate_cop.py --feature-set <climate feature set id> \
 `<data_dir>/analysis/v1/climate-cop/<feature set>-<config>[-name]/`; they hold private figures and
 stay in the data dir.
 
+### Fused outdoor temperature (`station.py`, `tout.py`)
+
+The heat pump's outdoor sensor reads 1.5 to 2.5 K low while the compressor runs and warm in the sun,
+so `t_out_debiased` keeps only slots with the compressor off and interpolates the rest, which leaves
+a third of the recent seasons interpolated and a few percent unknown, in long cold runs where the
+accuracy matters. An independent reference fixes that: the hourly SYNOP reports of a nearby AEMET
+station, served keyless by Ogimet.
+
+> Fuente: AEMET (via Ogimet). Ogimet's terms are not known, so the fetcher is gentle: monthly
+> requests at least 5 s apart, retry with backoff on a 5xx or a timeout, and each month is fetched
+> once and kept immutable.
+
+- `station.py` decodes the air temperature from the SYNOP report by position (`iRiXhVV`, `Nddff`,
+  `00fff` when the wind is 99 or more, then group 1 `1sTTT`, tenths of a degree, `s` = 1 negative;
+  `NIL` and missing groups are skipped), fetches `https://www.ogimet.com/cgi-bin/getsynop?block=<WMO>&begin=YYYYMMDDHHmm&end=YYYYMMDDHHmm`
+  and stores each month under `<data_dir>/climate/station/<WMO>/raw/` as `YYYY-MM.csv` plus
+  `YYYY-MM.manifest.json` (source, station, request range, `fetched_at`, raw sha256, parser version).
+  `load_station` verifies the raw months against their manifests and returns the series with a
+  manifest hash that changes when a raw month or the parser changes.
+  `reference_at_slots` interpolates it linearly to the 15-minute slot midpoints and bridges station
+  gaps of up to `signals.t_out_fused.max_ref_gap_hours` (3 h: two missing hourly reports, or a
+  3-hourly station); a longer gap leaves the reference unknown.
+- `tout.py` fuses the reference `r(t)` with the house sensor through their difference. The offset
+  `o(t) = house - r` is observed only on trusted dark slots (compressor off for at least
+  `min_off_minutes` and a clear-sky proxy below `signals.t_out_fused.dark_solar_max`, so the sensor's
+  sun bias stays out) and modelled as `o = mu + x`, `x` an AR(1) per slot with state variance `q` and
+  observation variance `r`. `fit_offset_model` finds `mu, phi, q, r` by maximum likelihood on the
+  Kalman filter's innovations (`scipy.optimize`) on the training seasons only
+  (`signals.t_out_fused.fit_seasons`, S1 and S2; a held-out season is refused by the
+  configuration), then `rts_smoother` runs the filter and a Rauch-Tung-Striebel pass over the whole
+  period with the parameters fixed. `t_out_fused = r + mu + x_hat` with the smoother's standard
+  deviation; where `r` is unknown it falls back to `t_out_debiased`. `kalman_filter` is the same
+  model without the backward pass, the mode a live planner would use with a forecast as `r`; no live
+  wiring exists.
+- `data.py` builds the fusion when the private site file has an optional `reference_station` (a quoted
+  5-digit WMO id) and the store holds the months the grid spans: `ClimateData.fusion` carries the
+  reference, the fused series, its standard deviation and the station manifest hash, and
+  `input_sha256` is one id over the feature set, dataset, config, site file, station manifest and
+  `signals.t_out_source`, so a result keyed on it changes id when any input does. `t_out`,
+  `t_out_debiased` and `t_out_fused` stay side by side; `t_out_model` is the one the models read,
+  chosen by `signals.t_out_source` (`debiased` or `fused`, default `debiased`), and the
+  `outdoor_unknown` filter follows it.
+- **Switch rule**, decided before any thermal result uses fused data: fused replaces debiased when its
+  RMSE is lower than `t_out_debiased`'s interpolation on held-out trusted readings in S3. The test
+  (`tout.leave_block_out`) hides blocks of 1 to 6 h of trusted readings and predicts them from
+  (a) the interpolation of the remaining trusted readings and (b) the fused series with the hidden
+  readings also removed from the smoother's input; `hack/climate_station.py evaluate` repeats it on
+  night blocks only (the sensor's sun bias is not in the truth) and on 8 to 24 h blocks against the
+  uncapped interpolation (the gaps where `t_out_debiased` is unknown). The residual compressor-start step
+  (`tout.compressor_start_step`: the change of a series across a compressor start, net of the
+  station's own change) is reported next to it.
+- `hack/climate_station.py` has `fetch` (the monthly downloads), `compare` (each candidate station
+  against the house sensor on trusted slots: coverage, bias by local hour and season, RMSE,
+  correlation of 15-minute and hourly changes, lag) and `evaluate` (fitted parameters, the
+  leave-block-out test, the compressor-start step and coverage). Reports go to
+  `<data_dir>/analysis/v1/climate-station/` and hold private figures.
+
+```bash
+uv run python hack/climate_station.py fetch --stations <WMO> [<WMO> ...]
+uv run python hack/climate_station.py compare --stations <WMO> [<WMO> ...] \
+    --feature-set <climate feature set id> --dataset <data_dir>/analysis/v1/<dataset_id>
+uv run python hack/climate_station.py evaluate --feature-set <climate feature set id> \
+    --dataset <data_dir>/analysis/v1/<dataset_id>
+```
+
 ## Shadow service (`service/`)
 
 **Status: Phase C (PROD-C1 to C3) built — shadow only, no actuation path.** `battery-optimizer serve`
