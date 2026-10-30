@@ -11,7 +11,7 @@ The modules that have no CLI surface are described in [Architecture](architectur
 | `extract`      | **functional** | Ingest from Prometheus / HA history / OMIE day-ahead prices to Parquet |
 | `validate`     | **functional** | Validate raw Parquet against schemas + manifest hashes (prometheus, ha-history, omie) |
 | `build`        | **functional** | Build 15-min analysis dataset                  |
-| `build-features` | **functional** | Build the slot-aligned sub-load feature table, apart from the canonical dataset |
+| `build-features` | **functional** | Build the slot-aligned sub-load (or, with `--signal-set climate`, climate) feature table, apart from the canonical dataset |
 | `decompose-load` | **functional** | Private report: share of load and of LF-0 error per sub-load |
 | `forecast-eval` | **functional** | Pre-registered load-forecaster evaluation: accuracy and paired EUR against LF-0 |
 | `price-eval`   | **functional** | Pre-registered price-outlook evaluation: paired EUR against `exact` and `published_only` |
@@ -217,6 +217,38 @@ dataset directory, and the feature entities are not default entities, so `extrac
 feature entities is also ignored by `build`'s lineage hash. With `--dataset`, the
 `servers + heat pump <= main` check against that dataset's gross load is written to
 `quality/main_meter-<dataset_id12>.json` next to the manifest.
+
+### Climate signal set (`--signal-set climate`)
+
+```bash
+# Feature-only entities are extracted on their own: an extraction that mixes them with the
+# default entities is refused, because it would enter the canonical lineage.
+uv run battery-optimizer extract --source prometheus --config config/tariff.yaml \
+  --start 2026-01-12T00:00:00Z --end 2026-01-15T00:00:00Z --allow-coverage-gaps \
+  --entities climate.thermostat_bedroom,climate.thermostat_bedroom#setpoint,sensor.aquarea_tank_temperature
+uv run battery-optimizer build-features --signal-set climate \
+  --start 2026-01-12T00:00:00Z --end 2026-01-15T00:00:00Z
+```
+
+`--signal-set` is `default` (the sub-load table above, unchanged and with the same feature-set id)
+or `climate`: a **separate** feature set, with its own id and directory next to the default ones,
+for the heat-pump climate work. Per 15-minute UTC slot it carries the mean room temperature and
+setpoint of each thermostat (`room_<room>_temp_mean_c`, `room_<room>_setpoint_mean_c`; rooms in
+`extract_prom.CLIMATE_ROOMS`, with `features.COMFORT_EXCLUDED_ROOMS` marking office A as a heat
+sink, recorded under `climate.rooms` in the manifest), outdoor, tank, flow, return and flow-target
+temperature, mean compressor frequency and pump flow, compressor starts, heating, hot-water and
+cooling electric and thermal energy (kWh integrated from power, and `*_energy_*_delta` from the
+monotonic energy totals), the aerothermal branch (Shelly channel 2) and the force-DHW and AppDaemon
+helper states. The coverage and `measured`/`partial`/`unknown` rules are the same as above; nothing
+is zero-filled. A counter (`*_delta`) is the increase of the counter per slot: a drop to under half
+the previous value is a reset and counts the value read after it, a smaller drop is a rollback and
+counts nothing (the energy totals slip back by tenths of a kWh); both are counted in the manifest
+quality (`counter_resets`, `counter_rollbacks`). `--dataset` needs the default set.
+
+A thermostat has two series under one entity: `climate.thermostat_x` is its current temperature and
+`climate.thermostat_x#setpoint` its target temperature (`extract --entities` takes both; the
+`#setpoint` suffix is a registry key, the Prometheus query and the stored `entity` are the plain
+entity id). The numeric operating-mode, defrost and 3-way-valve sensors are not registered yet.
 
 ## `decompose-load`
 

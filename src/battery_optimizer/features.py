@@ -45,6 +45,19 @@ contains the slot start, NaN when that instant is in a gap) and the time-weighte
 slot (``<name>_mean``, which is the fraction of the slot the boolean was on).  A *counter* such
 as the washer plug's energy-today only has the as-of value at slot start.
 
+Climate signal set
+------------------
+:data:`CLIMATE_SIGNALS` (``build-features --signal-set climate``) is a second, separate feature
+set with its own id: rooms (current and target temperature of each thermostat), the heat pump's
+water side, compressor frequency and starts, pump flow, heat/hot-water/cooling electric and
+thermal energy, the aerothermal branch and the control states.  Two more kinds join the rules
+above.  A *gauge* (frequency, flow) is the time-weighted mean like a temperature.  A
+*counter delta* (compressor starts, the energy totals) is the counter's increase per slot: each
+span's increase is spread over the span in proportion to time and then follows the power rule
+(gaps are not covered, ``partial`` is scaled to the full slot, ``unknown`` is NaN).  A drop to
+under half of the previous value is a counter reset and the span adds the value read after it;
+a smaller drop is a rollback and adds nothing (see :func:`counter_rates`).
+
 Leakage note: every feature of slot ``k`` uses samples from inside slot ``k``.  A forecaster may
 use only ``*_at_start`` of the slot it forecasts, or any feature of an earlier slot.
 """
@@ -75,7 +88,7 @@ from battery_optimizer.build import (
     _resolve_referenced_path,
     _validate_manifest_part,
 )
-from battery_optimizer.extract_prom import iso_z, parse_utc
+from battery_optimizer.extract_prom import CLIMATE_ROOMS, ENTITY_SPECS, iso_z, parse_utc
 from battery_optimizer.manifest import code_version
 from battery_optimizer.paths import resolve_data_dir, write_part_atomic
 
@@ -101,6 +114,8 @@ KIND_POWER = "power"
 KIND_TEMPERATURE = "temperature"
 KIND_STATE = "state"
 KIND_COUNTER = "counter"
+KIND_GAUGE = "gauge"
+KIND_COUNTER_DELTA = "counter_delta"
 
 QUALITY_MEASURED = "measured"
 QUALITY_PARTIAL = "partial"
@@ -123,12 +138,24 @@ class Signal:
     entity: str
     alias: str
     kind: str
+    #: The metric to read when the entity carries more than one (a thermostat's current and
+    #: target temperature); ``None`` reads the entity's only metric.
+    metric: str | None = None
+
+    @property
+    def source(self) -> str:
+        """Key of this signal's raw series: the entity, or ``entity#metric`` when pinned."""
+        return self.entity if self.metric is None else f"{self.entity}#{self.metric}"
 
     def columns(self) -> tuple[str, ...]:
         if self.kind == KIND_POWER:
             return (f"{self.alias}_kwh", f"{self.alias}_coverage", f"{self.alias}_quality")
         if self.kind == KIND_TEMPERATURE:
             return (f"{self.alias}_mean_c", f"{self.alias}_coverage")
+        if self.kind == KIND_GAUGE:
+            return (f"{self.alias}_mean", f"{self.alias}_coverage")
+        if self.kind == KIND_COUNTER_DELTA:
+            return (f"{self.alias}_delta", f"{self.alias}_coverage", f"{self.alias}_quality")
         if self.kind == KIND_STATE:
             return (f"{self.alias}_at_start", f"{self.alias}_mean", f"{self.alias}_coverage")
         if self.kind == KIND_COUNTER:
@@ -162,6 +189,56 @@ COP_PAIRS = (
     ("dhw", "hp_dhw", "hp_dhw_out"),
     ("cool", "hp_cool", "hp_cool_out"),
 )
+
+
+#: Rooms that are not part of the comfort objective (large internal gain); data only.
+COMFORT_EXCLUDED_ROOMS = frozenset({"office_a"})
+
+
+def _room_signals() -> tuple[Signal, ...]:
+    out: list[Signal] = []
+    for room, entity in CLIMATE_ROOMS.items():
+        current, setpoint = ENTITY_SPECS[entity], ENTITY_SPECS[f"{entity}#setpoint"]
+        out.append(Signal(entity, f"room_{room}_temp", KIND_TEMPERATURE, current.metric))
+        out.append(Signal(entity, f"room_{room}_setpoint", KIND_TEMPERATURE, setpoint.metric))
+    return tuple(out)
+
+
+#: The climate feature set: rooms, heat-pump water side, compressor, thermal and electric energy
+#: (heating, hot water and cooling), the aerothermal branch and the control states.  The power
+#: signals reuse the default aliases; a ``*_delta`` column is a counter's increase per slot.
+CLIMATE_SIGNALS: tuple[Signal, ...] = (
+    *_room_signals(),
+    Signal("sensor.aquarea_outside_ambient_temperature", "outdoor_temp", KIND_TEMPERATURE),
+    Signal("sensor.aquarea_tank_temperature", "tank_temp", KIND_TEMPERATURE),
+    Signal("sensor.aquarea_outlet_temperature", "flow_temp", KIND_TEMPERATURE),
+    Signal("sensor.aquarea_inlet_temperature", "return_temp", KIND_TEMPERATURE),
+    Signal("sensor.aquarea_outlet_target_temperature", "flow_target_temp", KIND_TEMPERATURE),
+    Signal("sensor.aquarea_compressor_frequency", "compressor_freq", KIND_GAUGE),
+    Signal("sensor.aquarea_compressor_start_stop_counter", "compressor_starts", KIND_COUNTER_DELTA),
+    Signal("sensor.aquarea_pump_flow", "pump_flow", KIND_GAUGE),
+    Signal("sensor.aquarea_heat_power_consumed", "hp_heat", KIND_POWER),
+    Signal("sensor.aquarea_dhw_power_consumed", "hp_dhw", KIND_POWER),
+    Signal("sensor.aquarea_cool_power_consumed", "hp_cool", KIND_POWER),
+    Signal("sensor.aquarea_heat_power_produced", "hp_heat_out", KIND_POWER),
+    Signal("sensor.aquarea_dhw_power_produced", "hp_dhw_out", KIND_POWER),
+    Signal("sensor.aquarea_cool_power_produced", "hp_cool_out", KIND_POWER),
+    Signal("sensor.aquarea_heat_energy_consumed", "hp_heat_energy", KIND_COUNTER_DELTA),
+    Signal("sensor.aquarea_dhw_energy_consumed", "hp_dhw_energy", KIND_COUNTER_DELTA),
+    Signal("sensor.aquarea_cool_energy_consumed", "hp_cool_energy", KIND_COUNTER_DELTA),
+    Signal("sensor.aquarea_heat_energy_produced", "hp_heat_energy_out", KIND_COUNTER_DELTA),
+    Signal("sensor.aquarea_dhw_energy_produced", "hp_dhw_energy_out", KIND_COUNTER_DELTA),
+    Signal("sensor.aquarea_cool_energy_produced", "hp_cool_energy_out", KIND_COUNTER_DELTA),
+    Signal("sensor.shellyem_main_channel_2_power", "branch_aero", KIND_POWER),
+    Signal("sensor.shellyem_main_channel_2_energy", "branch_aero_energy", KIND_COUNTER_DELTA),
+    Signal("input_boolean.appdaemon_climate_enable", "climate_enable", KIND_STATE),
+    Signal("input_boolean.appdaemon_dhw_enable", "dhw_enable", KIND_STATE),
+    Signal("input_number.appdaemon_climate_min_hours_per_day", "climate_min_hours", KIND_STATE),
+    Signal("switch.aquarea_force_dhw_mode", "dhw_force", KIND_STATE),
+)
+
+#: ``build-features --signal-set`` choices.
+SIGNAL_SETS: dict[str, tuple[Signal, ...]] = {"default": SIGNALS, "climate": CLIMATE_SIGNALS}
 
 
 class FeatureError(RuntimeError):
@@ -249,6 +326,34 @@ def integrate_slots(
     return np.diff(f_value), np.diff(f_time), at_start
 
 
+#: A decrease to less than this fraction of the previous value is a restart from zero.
+COUNTER_RESET_FRACTION = 0.5
+
+
+def counter_rates(t: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, int, int]:
+    """Per-second increase of a monotonic counter over each span between two samples.
+
+    A decrease to less than :data:`COUNTER_RESET_FRACTION` of the previous value is a **reset**
+    (restart of the device or exporter): the counter restarted from zero, so the span's increase
+    is the value read after it, as in Prometheus ``increase``.  Any other decrease is a
+    **rollback** (the energy counters of the live archive slip back by 0.03 to 0.6 kWh at a
+    time): the span adds nothing, and treating it as a reset would add the whole counter value.
+    The returned rates have one entry per sample (the last one is unused, like the value of the
+    last sample of a power series) so they can be integrated with :func:`integrate_slots`; a
+    span's integral is then exactly its increase.
+
+    Returns ``(rates, resets, rollbacks)``.
+    """
+    if t.size < 2:
+        return np.zeros(t.size), 0, 0
+    step = np.diff(values)
+    drop = step < 0
+    reset = drop & (values[1:] < COUNTER_RESET_FRACTION * values[:-1])
+    increase = np.where(reset, values[1:], np.where(drop, 0.0, step))
+    rates = np.append(increase / np.diff(t), 0.0)
+    return rates, int(reset.sum()), int((drop & ~reset).sum())
+
+
 def _quality_labels(coverage: np.ndarray, min_coverage: float) -> np.ndarray:
     labels = np.full(coverage.size, QUALITY_UNKNOWN, dtype=object)
     labels[coverage >= min_coverage] = QUALITY_PARTIAL
@@ -271,6 +376,8 @@ def signal_columns(
     t = (np.asarray(t_us, dtype=np.int64) - origin) / 1e6
     edges = (np.asarray(edges_us, dtype=np.int64) - origin) / 1e6
     slot_s = float(np.median(np.diff(edges))) if n_slots else float(INTERVAL_SECONDS)
+    if signal.kind == KIND_COUNTER_DELTA:
+        values = counter_rates(t, np.asarray(values, dtype=np.float64))[0]
     integral, covered, at_start = integrate_slots(t, values, edges, max_gap_seconds)
     coverage = np.clip(covered / slot_s, 0.0, 1.0)
     known = coverage >= min_coverage
@@ -284,7 +391,12 @@ def signal_columns(
         out[cols[0]] = mean * (slot_s / 3600.0) / 1000.0
         out[cols[1]] = coverage
         out[cols[2]] = _quality_labels(coverage, min_coverage)
-    elif signal.kind == KIND_TEMPERATURE:
+    elif signal.kind == KIND_COUNTER_DELTA:
+        # mean increase rate over the covered time, times the slot length: the slot's increase.
+        out[cols[0]] = mean * slot_s
+        out[cols[1]] = coverage
+        out[cols[2]] = _quality_labels(coverage, min_coverage)
+    elif signal.kind in (KIND_TEMPERATURE, KIND_GAUGE):
         out[cols[0]] = mean
         out[cols[1]] = coverage
     elif signal.kind == KIND_STATE:
@@ -329,8 +441,9 @@ def load_signal_samples(
     chunk overlaps ``[window_start - lookback, window_end)`` are read.  Each part is verified
     (SHA-256, row count, schema) from one read, exactly as the canonical builder does.
 
-    Returns ``(series_by_entity, part_hashes, extraction_ids)``.  An entity with no samples is
-    absent from the mapping.
+    Returns ``(series_by_source, part_hashes, extraction_ids)``, keyed by :attr:`Signal.source`
+    (the entity id unless the signal pins a metric).  A series with no samples is absent from the
+    mapping.
     """
     import datetime as _dt
 
@@ -351,11 +464,13 @@ def load_signal_samples(
     ts_type = pa.timestamp("us", tz="UTC")
     wanted_arr = pa.array(sorted(wanted), pa.string())
 
-    ts_parts: dict[str, list[np.ndarray]] = {e: [] for e in wanted}
-    val_parts: dict[str, list[np.ndarray]] = {e: [] for e in wanted}
-    metrics: dict[str, set[str]] = {e: set() for e in wanted}
-    units: dict[str, set[str]] = {e: set() for e in wanted}
-    keys: dict[str, set[str]] = {e: set() for e in wanted}
+    # One raw series per source: an entity, or an (entity, metric) pair for a pinned metric.
+    sources: dict[str, Signal] = {s.source: s for s in signals}
+    ts_parts: dict[str, list[np.ndarray]] = {k: [] for k in sources}
+    val_parts: dict[str, list[np.ndarray]] = {k: [] for k in sources}
+    metrics: dict[str, set[str]] = {k: set() for k in sources}
+    units: dict[str, set[str]] = {k: set() for k in sources}
+    keys: dict[str, set[str]] = {k: set() for k in sources}
     part_hashes: list[dict[str, Any]] = []
     extraction_ids: list[str] = []
     seen_parts: set[tuple[str, str]] = set()
@@ -394,34 +509,40 @@ def load_signal_samples(
                 continue
             ent = selected.column("entity")
             for entity in pc.unique(ent).to_pylist():
-                sub = selected.filter(pc.equal(ent, entity))
-                ts_parts[entity].append(sub.column("ts").cast(pa.int64()).to_numpy())
-                val_parts[entity].append(sub.column("value").to_numpy())
-                metrics[entity].update(pc.unique(sub.column("metric")).to_pylist())
-                units[entity].update(pc.unique(sub.column("unit")).to_pylist())
-                keys[entity].update(pc.unique(sub.column("series_key")).to_pylist())
+                of_entity = selected.filter(pc.equal(ent, entity))
+                met = of_entity.column("metric")
+                for metric in pc.unique(met).to_pylist():
+                    sub = of_entity.filter(pc.equal(met, metric))
+                    for key, sig in sources.items():
+                        if sig.entity != entity or sig.metric not in (None, metric):
+                            continue
+                        ts_parts[key].append(sub.column("ts").cast(pa.int64()).to_numpy())
+                        val_parts[key].append(sub.column("value").to_numpy())
+                        metrics[key].add(metric)
+                        units[key].update(pc.unique(sub.column("unit")).to_pylist())
+                        keys[key].update(pc.unique(sub.column("series_key")).to_pylist())
         if read_any:
             extraction_ids.append(str(record.get("extraction_id")))
 
     series: dict[str, RawSeries] = {}
-    for entity in sorted(wanted):
-        if not ts_parts[entity]:
+    for key in sorted(sources):
+        if not ts_parts[key]:
             continue
-        if len(metrics[entity]) != 1 or len(units[entity]) != 1:
+        if len(metrics[key]) != 1 or len(units[key]) != 1:
             raise FeatureError(
-                f"{entity}: expected one metric and one unit, found metrics="
-                f"{sorted(metrics[entity])} units={sorted(units[entity])}"
+                f"{sources[key].entity}: expected one metric and one unit, found metrics="
+                f"{sorted(metrics[key])} units={sorted(units[key])}"
             )
         t, v, dropped, conflicts = merge_samples(
-            np.concatenate(ts_parts[entity]), np.concatenate(val_parts[entity])
+            np.concatenate(ts_parts[key]), np.concatenate(val_parts[key])
         )
-        series[entity] = RawSeries(
-            entity=entity,
-            metric=next(iter(metrics[entity])),
-            unit=next(iter(units[entity])),
+        series[key] = RawSeries(
+            entity=sources[key].entity,
+            metric=next(iter(metrics[key])),
+            unit=next(iter(units[key])),
             t_us=t,
             values=v,
-            series_keys=len(keys[entity]),
+            series_keys=len(keys[key]),
             duplicates_dropped=dropped,
             conflicting_duplicates=conflicts,
         )
@@ -476,7 +597,7 @@ def assemble_table(
     empty_t = np.zeros(0, dtype=np.int64)
     empty_v = np.zeros(0, dtype=np.float64)
     for sig in signals:
-        raw = series.get(sig.entity)
+        raw = series.get(sig.source)
         data = signal_columns(
             sig,
             raw.t_us if raw else empty_t,
@@ -573,6 +694,8 @@ def series_quality(
         }
     if signal.kind in (KIND_POWER, KIND_TEMPERATURE):
         out["constant_runs"] = constant_runs(t, raw.values, min_hours=CONSTANT_RUN_HOURS)
+    if signal.kind == KIND_COUNTER_DELTA:
+        _rates, out["counter_resets"], out["counter_rollbacks"] = counter_rates(t, raw.values)
     out["gap_spans"] = int(gap_mask.sum())
     out["gap_seconds"] = float(dt[gap_mask].sum()) if dt.size else 0.0
 
@@ -647,6 +770,8 @@ def cop_check(table: pa.Table, *, min_input_kwh: float = 0.01) -> dict[str, Any]
             entry["slot_cop_p90"] = float(np.percentile(cop, 90))
             entry["share_of_active_slots_with_cop_below_1"] = float((cop < 1.0).mean())
         out[label] = entry
+    if "hp_total_reported_kwh" not in table.column_names:
+        return out  # the climate set has no reported-total sensor
     reported = column_array(table, "hp_total_reported_kwh")
     parts = heat_pump_input(table)
     both = np.isfinite(reported) & np.isfinite(parts)
@@ -776,7 +901,11 @@ def compute_feature_set_id(
             "window_start": iso_z(window_start),
             "window_end": iso_z(window_end),
             "params": params,
-            "signals": [[s.entity, s.alias, s.kind] for s in signals],
+            # A pinned metric extends the entry; the default signals have none, so their id is
+            # the one computed before metrics could be pinned.
+            "signals": [
+                [s.entity, s.alias, s.kind, *([s.metric] if s.metric else [])] for s in signals
+            ],
             "raw_parts": [[p["part"], p["sha256"]] for p in part_hashes],
         },
         sort_keys=True,
@@ -824,6 +953,11 @@ def build_features(
         raise FeatureError("max_gap_seconds must be > 0")
     if not 0.0 < min_coverage <= 1.0:
         raise FeatureError("min_coverage must be in (0, 1]")
+    if dataset is not None and "servers_kwh" not in feature_schema(signals).names:
+        raise FeatureError(
+            "--dataset checks servers + heat pump against the main meter and needs the "
+            "default signal set"
+        )
     root = resolve_data_dir(data_dir)
     t_start = parse_utc(start, name="start")
     t_end = parse_utc(end, name="end")
@@ -856,16 +990,16 @@ def build_features(
     quality: dict[str, Any] = {
         "series": {
             sig.alias: series_quality(
-                series[sig.entity],
+                series[sig.source],
                 table,
                 sig,
                 max_gap_seconds=max_gap_seconds,
                 min_coverage=min_coverage,
             )
             for sig in signals
-            if sig.entity in series
+            if sig.source in series
         },
-        "entities_without_samples": [s.entity for s in signals if s.entity not in series],
+        "entities_without_samples": [s.source for s in signals if s.source not in series],
         "cop_check": cop_check(table),
     }
 
@@ -887,8 +1021,8 @@ def build_features(
                 "alias": s.alias,
                 "kind": s.kind,
                 "columns": list(s.columns()),
-                "metric": series[s.entity].metric if s.entity in series else None,
-                "unit": series[s.entity].unit if s.entity in series else None,
+                "metric": series[s.source].metric if s.source in series else None,
+                "unit": series[s.source].unit if s.source in series else None,
             }
             for s in signals
         ],
@@ -898,6 +1032,13 @@ def build_features(
         ],
         "quality": quality,
     }
+    if signals is CLIMATE_SIGNALS:
+        manifest["climate"] = {
+            "rooms": {
+                room: {"entity": entity, "comfort": room not in COMFORT_EXCLUDED_ROOMS}
+                for room, entity in CLIMATE_ROOMS.items()
+            }
+        }
     write_part_atomic(directory / "parts" / part_name, payload)
     write_part_atomic(directory / MANIFEST_NAME, json_bytes(manifest))
     log.info("wrote feature set %s (%d slots) to %s", feature_set_id, table.num_rows, directory)

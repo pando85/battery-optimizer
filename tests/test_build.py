@@ -85,10 +85,13 @@ from battery_optimizer.build import (
 from battery_optimizer.config import PeriodRule, TariffPeriods, load_config, tariff_period_for
 from battery_optimizer.extract_prom import (
     DEAD_DUPLICATE_ENTITY_IDS,
+    ENTITY_SPECS,
+    FEATURE_ENTITY_IDS,
     VOLATILE_IDENTITY_LABELS,
     canonical_labels_json,
     compute_series_key,
 )
+from battery_optimizer.features import CLIMATE_SIGNALS
 from battery_optimizer.paths import parts_dir
 from battery_optimizer.schemas import RAW_SAMPLE, SCHEMA_VERSION, validate_table
 
@@ -2111,6 +2114,54 @@ class TestLoadRawInputs:
         assert after.part_hashes == before.part_hashes
         assert servers not in after.declared_entities
         assert servers not in after.observed_entities
+
+    def test_climate_extraction_leaves_lineage_part_hashes_and_dataset_id(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        """A feature-only extraction of every registered climate series is invisible to build."""
+        cfg = write_tariff(tmp_path)
+        rows = counter_rows(_T0, 13, times=aligned_times(_T0, 13, 300.0))
+        rows += price_rows(_T0, {0: 0.1}, per_minute=6, step_seconds=10.0)
+        write_raw_part(data_dir, rows)
+        window = (_T0, _T0 + timedelta(hours=1))
+        kwargs: dict[str, Any] = {
+            "entities": [GRID, PRICE],
+            "window_start": window[0],
+            "window_end": window[1],
+            "lookback": timedelta(minutes=5),
+        }
+        before = load_raw_inputs(data_dir, **kwargs)
+        table_before, manifest_before = build_rows(
+            data_dir, cfg, *window, lookback=timedelta(minutes=5)
+        )
+
+        climate_entities = {sig.entity for sig in CLIMATE_SIGNALS}
+        specs = [s for s in ENTITY_SPECS.values() if s.entity_id in climate_entities]
+        assert {s.entity_id for s in specs} == climate_entities
+        assert climate_entities <= set(FEATURE_ENTITY_IDS)
+        climate_rows = [
+            raw_row(spec.entity_id, spec.metric, spec.unit, _T0 + timedelta(seconds=60 * i), 21.0)
+            for spec in specs
+            for i in range(5)
+        ]
+        entities = sorted({s.entity_id for s in specs})
+        _publish_prom_part(
+            data_dir,
+            to_raw_table(climate_rows),
+            "climate-a.parquet",
+            entities=entities,
+            chunk=window,
+        )
+        after = load_raw_inputs(data_dir, **kwargs)
+        table_after, manifest_after = build_rows(
+            data_dir, cfg, *window, lookback=timedelta(minutes=5)
+        )
+
+        assert after.lineage == before.lineage
+        assert after.part_hashes == before.part_hashes
+        assert not set(entities) & set(after.declared_entities)
+        assert manifest_after["dataset_id"] == manifest_before["dataset_id"]
+        assert values_for(table_after, "dataset_id") == values_for(table_before, "dataset_id")
 
     def test_mixed_extraction_with_a_feature_entity_still_counts(self, data_dir: Path) -> None:
         servers = "sensor.shellypmmini_servers_power"
