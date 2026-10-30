@@ -85,6 +85,17 @@ def test_fresh_inputs_produce_a_persisted_shadow_plan(tmp_path, cleanup):
     assert record["intents"][0]["valid_from"] == first.isoformat()
 
 
+def test_the_committed_wear_cost_reaches_the_plan_snapshot(tmp_path, cleanup):
+    clock = FakeClock(NOW)
+    service = make_service(tmp_path, clock, entity_mode=True)
+    cleanup(service)
+    feed(service, NOW)
+    assert run(service.request_solve("test")) == "ok"
+    snapshot = service.plans[-1].snapshot
+    assert snapshot.throughput_cost_eur_per_kwh == 0.01
+    assert snapshot.input_payload()["throughput_cost_eur_per_kwh"] == 0.01
+
+
 @pytest.mark.parametrize(
     ("mutate", "reason"),
     [

@@ -93,7 +93,11 @@ planning:
   # EUR/DC-kWh on end-of-horizon SOC: `trailing_mean` = mean PVPC over the history
   # window (the benchmark's default rule), or an explicit number.
   terminal_value: trailing_mean
-  throughput_cost_eur_per_kwh: 0.0
+  # Wear convention: EUR per AC kWh charged and per AC kWh discharged (planning only, never in
+  # reported cost).  0.01 is the knee of the rolling-horizon sweep (largest value that keeps the
+  # saving within 5% of the 0-cost saving in S2 winter, S3 winter and summer);
+  # see docs/components/battery-model.md.  Re-run hack/throughput_sweep.py on real battery data.
+  throughput_cost_eur_per_kwh: 0.01
   replan:
     soc_change_frac: 0.05
     debounce_s: 30

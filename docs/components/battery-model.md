@@ -29,7 +29,7 @@ is no telemetry. Confirmed from specification or contract: capacity 5.12 kWh nam
 | SOC window | 0.20 to 0.95 (3.84 kWh usable) | Owner's life-extension choice; real controller limits not read |
 | Initial SOC | 0.20 | Floor, so no free stored energy |
 | Idle draw | 0, not modelled | `battery.py`; unmeasured |
-| Wear / throughput cost | 0.0 EUR/kWh | Roadmap keeps 0 until substantiated; **not sensible for a live planner** |
+| Wear / throughput cost | 0.01 EUR/kWh per AC kWh and direction (`planning.throughput_cost_eur_per_kwh`, set 2026-10-31) | Knee of the rolling-horizon sweep, see [Wear cost decision](#wear-cost-decision-2026-10-31); a planning convention, not a measured aging rate |
 | Import limit | 5.0 kW; the model uses a 15-minute average with no margin, which is **insufficient** | Contract; enforced by the smart meter, which cuts supply on overload (owner-confirmed 2026-10-30, has happened); the trip is **instantaneous** (owner-confirmed 2026-10-31, no distributor document yet) |
 | Export | none, no credit | Invariant of the kernel; no PV |
 
@@ -40,6 +40,7 @@ Evidence: [`config/tariff.yaml`](../../config/tariff.yaml), [benchmark](../bench
 - The battery is commissioned and a measurement disagrees with any row above (RTE vs power, idle draw,
   usable window, latency, firmware limits).
 - The Omnibattery or firmware configuration changes limits; the warranty terms change the wear value.
+- The wear cost is changed, or measured cycle ageing or the warranty terms disagree with it (below).
 - Any edit to the battery block of `config/tariff.yaml`: every `dataset_id` is re-minted and the old
   datasets and benchmark results are superseded (record it).
 - The import-limit basis turns out to be an instantaneous trip: the averaged constraint is then not a
@@ -52,12 +53,56 @@ Evidence: [`config/tariff.yaml`](../../config/tariff.yaml), [benchmark](../bench
    cycles. Do not infer RTE from an unbalanced partial cycle.
 2. Update the battery block in `config/tariff.yaml`, rebuild datasets, supersede the old ones, re-run
    `uv run battery-optimizer benchmark ...` ([benchmark](../benchmark.md)).
-3. Wear: run the throughput-cost sweep of `economic_sensitivity` on new-regime data, pick the knee and set
+3. Wear: re-run `hack/throughput_sweep.py` (command below) on new-regime data, pick the knee and set
    `planning.throughput_cost_eur_per_kwh` (a service value; no dataset re-mint).
 4. Acceptance: predicted against measured Wh and SOC on held-out physical intervals, by power band;
    a model refinement is rejected if the measured gain is negligible or it breaks MILP feasibility.
 
+## Wear cost decision (2026-10-31)
+
+**Convention.** `tp` is EUR per AC kWh, charged and discharged each (objective `(price + tp) * charge -
+(price - tp) * discharge`), so a cycle of E kWh in and 0.8 E out costs `1.8 tp E`. Planning only: it never
+enters the reported cost, so the savings below are real meter-bill savings of a plan made with that `tp`.
+EFC is DC discharge over the 3.84 kWh usable window; nameplate cycles are EFC x 0.75.
+
+Rolling horizon (benchmark policy, causal load forecast), observed load, dataset `cdd448abb006`, each window
+against its own `no_battery`. Saving lost is relative to `tp` 0; the saving at `tp` 0 is 13.7% (S2), 16.0%
+(S3) and 15.8% (summer 2025) of no-battery cost.
+
+| tp | S2 lost | S2 EFC/day | S3 lost | S3 EFC/day | Summer lost | Summer EFC/day |
+|---|---|---|---|---|---|---|
+| 0 | 0% | 1.16 | 0% | 1.19 | 0% | 1.06 |
+| 0.005 | 0.3% | 1.04 | 0.2% | 1.09 | -0.2% | 0.97 |
+| **0.01** | **2.3%** | **0.91** | **1.7%** | **0.99** | **0.8%** | **0.89** |
+| 0.015 | 5.8% | 0.80 | 4.8% | 0.88 | 2.8% | 0.82 |
+| 0.02 | 10.4% | 0.70 | 11.3% | 0.73 | 5.7% | 0.74 |
+| 0.03 | 21.5% | 0.52 | 21.2% | 0.57 | 15.3% | 0.59 |
+| 0.05 | 44.3% | 0.28 | 44.1% | 0.33 | 44.5% | 0.29 |
+
+Windows: S2 and S3 are 2024-10-01 to 2025-04-30 and 2025-10-01 to 2026-04-30, summer 2025-05-01 to 2025-09-30.
+The oracle gives the same picture (knee 0.01 in S2, 0.015 in S3 and summer); its solves at `tp` above 0 end as
+time-limited incumbents at 600 s, so its savings there are lower bounds.
+
+**Knee** (largest `tp` before the saving falls by more than 5%): 0.01 in S2, 0.015 in S3 and summer. The
+setting is **0.01**, the binding (S2) value: it gives up 1 to 2% of the saving and removes 16 to 21% of the
+cycling. 0.015 is past the knee in S2.
+
+**Warranty budget.** Marstek states a 10-year warranty and a cycle life above 6000 cycles at 25 degC (80%
+retention per retailers; a trade-press report gives 70% residual capacity at 10 years; not verified in the
+warranty card, and no throughput cap was found). 6000 cycles in 10 years is 1.64 nameplate cycles per day.
+The sweep needs at most 0.89 nameplate cycles per day at `tp` 0 and at most 0.74 at 0.01, so the cycle budget
+does not bind at any value: `tp` is an economic proxy for wear, not a warranty guard. Replacement-cost
+amortisation gives `tp = price / (2 x N x usable kWh)` per direction for a battery replaced after N usable
+cycles with no residual value; it is an upper bound because the battery also ages with calendar time.
+
+**Reproduce** (outputs under `<store>/analysis/v1/throughput-sweep/<run-id>/`, fresh run id each time):
+
+```bash
+uv run python hack/throughput_sweep.py --dataset <store>/analysis/v1/<dataset_id> \
+  --data-dir <store> --run-id <fresh-name>
+```
+
 ## Status
 
-**provisional** (2026-10-30): RTE, SOC window, idle draw and wear cost are assumptions. Idle draw and wear
-must be set before go-live.
+**provisional** (2026-10-31): RTE, SOC window and idle draw are assumptions, and the wear cost (set to 0.01) is a
+planning convention to be re-checked on measured data. Idle draw must be set before go-live.
