@@ -1405,6 +1405,9 @@ class TestClimateRegistry:
             "sensor.esios_pvpc",  # default entity
             "sensor.aquarea_outside_ambient_temperature",  # earlier feature entity
             "sensor.aquarea_heat_power_consumed",  # earlier feature entity
+            "sensor.shellypmmini_servers_power",  # earlier feature entity
+            "sensor.esios_pvpc_2",  # dead duplicate: registered, but in no group
+            "sensor.foo:hass_sensor_state:x",  # unregistered explicit triple
         ],
     )
     def test_mixing_the_climate_group_with_another_group_is_refused_before_any_request(
@@ -1412,7 +1415,7 @@ class TestClimateRegistry:
     ) -> None:
         fake = FakePrometheus([])
         for entities in ([other, self.ROOM], [self.SETPOINT, other]):
-            with pytest.raises(ValueError, match="must not mix climate entities"):
+            with pytest.raises(ValueError, match="must not include any other entity"):
                 run_extract(tmp_path, fake.client, config, entities=entities)
         assert fake.requests == []
         assert not (tmp_path / "data" / "manifests").exists()

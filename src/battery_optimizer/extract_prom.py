@@ -509,26 +509,27 @@ def resolve_entity_specs(entities: Iterable[str] | None) -> tuple[EntitySpec, ..
 
 
 def refuse_mixed_lineage(specs: Iterable[EntitySpec]) -> None:
-    """Refuse an extraction that mixes the climate group with any other group.
+    """Refuse an extraction that names a climate entity together with anything else.
 
-    A raw manifest that names a default entity enters the canonical lineage, so climate parts in
-    it would change the ``dataset_id``.  A manifest that names an earlier feature entity (outdoor
-    temperature, heat-pump power, control states) is read by the default feature set, so climate
-    parts in it would change the default ``feature_set_id``.  Extract the groups separately; the
-    climate feature set reads the shared entities from the earlier feature extraction.  Mixes
-    among the default and earlier feature entities are not restricted here.
+    A raw manifest that names a default entity, or an entity that is in no feature group (an
+    unregistered ``entity:metric:unit`` triple, the dead duplicate price), enters the canonical
+    lineage, so climate parts in it would change the ``dataset_id``.  A manifest that names an
+    earlier feature entity (outdoor temperature, heat-pump power, control states) is read by the
+    default feature set, so climate parts in it would change the default ``feature_set_id``.  The
+    climate group is therefore extracted alone; the climate feature set reads the shared entities
+    from the earlier feature extraction.  Other mixes are not restricted here.
 
     Raises:
-        ValueError: a climate entity was requested with a default or earlier feature entity.
+        ValueError: a climate entity was requested with an entity outside the climate group.
     """
     ids = {s.entity_id for s in specs}
     climate = sorted(ids.intersection(CLIMATE_ENTITY_IDS))
-    other = sorted(ids.intersection((*DEFAULT_ENTITY_IDS, *FEATURE_ENTITY_IDS)) - set(climate))
+    other = sorted(ids.difference(CLIMATE_ENTITY_IDS))
     if climate and other:
         raise ValueError(
-            "an extraction must not mix climate entities with default or other feature "
-            "entities: it would change the canonical dataset_id or the default feature_set_id; "
-            f"run separate extractions (climate: {', '.join(climate)}; other: {', '.join(other)})"
+            "an extraction of climate entities must not include any other entity: it would "
+            "change the canonical dataset_id or the default feature_set_id; run separate "
+            f"extractions (climate: {', '.join(climate)}; other: {', '.join(other)})"
         )
 
 
