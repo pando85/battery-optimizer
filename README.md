@@ -154,7 +154,7 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/), are
 - [Configuration](docs/configuration.md): environment variables, data directory, Home Assistant authentication, secrets policy
 - [CLI reference](docs/cli.md) and [benchmark reference](docs/benchmark.md)
 - [Architecture](docs/architecture.md) and the [shadow service](docs/service.md)
-- [Proposed shared-runtime climate optimizer plan](docs/planning/climate-optimizer-implementation.md), [optional flow-temperature calibration extension (C7-F)](docs/planning/climate-flow-calibration-optimization.md), and [ADR-0005](docs/adr/0005-shared-energy-planning-climate.md) (documentation only; no climate or battery actuation change)
+- [Climate implementation plan](docs/planning/climate-optimizer-implementation.md) (**C2 thermal models UNDETERMINED/no-go**, not authorized for active planning), [diagnostic-first C2 recovery roadmap](docs/planning/climate-c2-recovery.md), [optional flow-temperature calibration extension (C7-F)](docs/planning/climate-flow-calibration-optimization.md), and [ADR-0005](docs/adr/0005-shared-energy-planning-climate.md) (no climate or battery actuation change)
 - [Container image](docs/container.md)
 - [Known issues](docs/known-issues.md)
 - [ADRs](docs/adr/), [planning notes](docs/planning/) and [provenance](docs/provenance.md)
