@@ -261,6 +261,15 @@ stay in the data dir.
 `<data_dir>/analysis/v1/system-sim/<run-id>/`; method, results and the exact command are in the
 [system replay](planning/system-replay.md).
 
+`hack/comfort_history.py` (read-only) writes `report.json` and `report.md` into
+`<data_dir>/analysis/v1/comfort-history/<run-id>/`: per winter, the hall-kitchen temperature and
+setpoint in the weekday, weekend and night windows, the share of time at or above 25 and 23.5 degC,
+and each room's share below 21 degC. `hack/cheap_price_windows.py` (read-only) writes the same pair
+into `<data_dir>/analysis/v1/cheap-price-windows/<run-id>/`: per month, the hours at or below price
+thresholds and the days with a long cheap run, split weekday / weekend. Results and the exact
+commands are in [heat-pump-controller](components/heat-pump-controller.md) and
+[boost-mode](components/boost-mode.md).
+
 ### Fused outdoor temperature (`station.py`, `tout.py`)
 
 The heat pump's outdoor sensor reads 1.5 to 2.5 K low while the compressor runs and warm in the sun,

@@ -24,6 +24,25 @@ Nothing. The [whole-system replay](../planning/system-replay.md) did not simulat
 used came from 15 h price-chosen days. The ordering argument is arithmetic only: the usable 3.84 kWh
 fills in about 1.7 h at 2.5 kW, so a window of 3 h or more holds both.
 
+How often such windows exist is measured on the realised pre-tax PVPC price (dataset `cdd448abb006`, usable
+intervals 2024-01 to 2026-10, local time; unit prices in EUR/kWh; a qualifying day has a run of at least 3 h
+at or below the threshold):
+
+| | Heating months (Nov to Mar) | Other months (Apr to Oct) |
+|---|---|---|
+| Hours at or below 0 / 0.02 / 0.04 / 0.06 | 0 / 0 / 51 / 607 | 26 / 161 / 713 / 1817 |
+| Hours below 25% of the day's mean | 15 | 336 |
+| Qualifying days at 0.04 (weekday / weekend) | 7 (2 / 5) | 99 (17 / 82) |
+| Median start and end of the longest run | 11:00 to 16:00 | 10:00 to 18:00 |
+| Longest run, median / maximum | 5 h / 8 h | 7 h / 10 h |
+| Minimum price | 0.0206 | -0.0126 |
+
+Windows are weekend middays from April to October; in winter they are rare. The 26 h at or below 0 are 8 h
+at exactly 0 (2024-04) and 18 h below 0 (2026-09). Reproduce: `uv run python hack/cheap_price_windows.py
+--dataset <store>/analysis/v1/cdd448abb006d401854b193f7a240c367c92908ecfa75a76d76a413828e80e9d
+--data-dir <store>` (thresholds are `--thresholds`, the run length `--min-run-hours`; writes
+`<store>/analysis/v1/cheap-price-windows/<run-id>/`).
+
 ## Assumptions
 
 - Battery first, then space-heating soak, then hot water last; the order comes from the heat pump

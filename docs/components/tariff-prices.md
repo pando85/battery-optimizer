@@ -31,6 +31,9 @@ Home Assistant PVPC sensor, fed by the homelab deployment. Roadmap: [Price Outlo
   overstates the peak share.
 - Published equals realised price (owner-asserted, not verified); no export credit, no standing or power
   charges are modelled.
+- The price can be negative (26 h at or below 0, minimum -0.0126 EUR/kWh pre-tax, 2024-01 to 2026-10) and
+  every consumer must keep it as is; the optimiser does, see
+  [battery-optimizer](battery-optimizer.md) for the code references.
 - The service never forecasts unpublished prices; its horizon ends at the last published slot.
 - **Hard constraint (owner-confirmed 2026-10-30):** the 5.0 kW contracted import limit is enforced by the
   smart meter, which cuts supply on overload, and this has happened. It is not a cost term and must not be
