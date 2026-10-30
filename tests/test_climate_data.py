@@ -25,6 +25,7 @@ from battery_optimizer.climate.data import (
     Site,
     build_climate_data,
     dataset_prices,
+    debias_outdoor,
     load_climate_data,
     load_site,
     room_offsets,
@@ -125,30 +126,42 @@ def test_room_offsets_are_hourly_medians_over_the_chosen_slots():
     data = _build(table)
     t_air = (bedroom + hall + office) / 3.0
     assert np.allclose(data.t_air, t_air)
+    rooms = ("bedroom", "hall_kitchen", "office_t")
+    temps = {r: data.room_temp[r] for r in rooms}
+    offsets = room_offsets(temps, rooms, data.t_air, data.local_hour, data.train)
+    assert offsets.shape == (3, 24)
     # t_air - room offsets sum to zero at every hour
-    assert np.allclose(data.room_offsets.sum(axis=0), 0.0)
-    assert np.allclose(data.room_offsets[0, :12], -0.5 - (-0.5 + 0.5) / 3)
-    # an outlier minority does not move the median; masked-out slots are ignored
+    assert np.allclose(offsets.sum(axis=0), 0.0)
+    assert np.allclose(offsets[0, :12], -0.5 - (-0.5 + 0.5) / 3)
+    # an outlier minority does not move the median
     spiked = bedroom.copy()
     spiked[hour == 3] += 5.0 * (np.arange(n)[hour == 3] % 4 == 0)
-    mask = np.ones(n, dtype=bool)
     out = room_offsets(
         {"bedroom": spiked, "hall_kitchen": hall, "office_t": office},
-        ("bedroom", "hall_kitchen", "office_t"),
+        rooms,
         (spiked + hall + office) / 3,
         data.local_hour,
-        mask,
+        np.ones(n, dtype=bool),
     )
-    assert out.shape == (3, 24)
-    assert np.isclose(out[0, 3], data.room_offsets[0, 3], atol=1e-6)
-    none = room_offsets(
-        {"bedroom": bedroom, "hall_kitchen": hall, "office_t": office},
-        ("bedroom", "hall_kitchen", "office_t"),
-        t_air,
-        data.local_hour,
-        np.zeros(n, dtype=bool),
-    )
+    assert np.isclose(out[0, 3], offsets[0, 3], atol=1e-6)
+    none = room_offsets(temps, rooms, t_air, data.local_hour, np.zeros(n, dtype=bool))
     assert np.isnan(none).all()
+
+
+def test_offsets_are_not_a_loader_output_and_only_see_the_mask():
+    """A fold fits offsets on its own mask: nothing held out may reach them."""
+    starts = _grid(date(2025, 12, 1), 4)
+    n = starts.size
+    data = _build(make_table(starts))
+    assert not hasattr(data, "room_offsets")
+    rooms = ("bedroom", "hall_kitchen", "office_t")
+    temps = {r: np.full(n, 21.0) for r in rooms}
+    temps["bedroom"][2 * SLOTS_DAY :] += 3.0  # the "held-out" half is different
+    t_air = np.mean([temps[r] for r in rooms], axis=0)
+    fit = np.zeros(n, dtype=bool)
+    fit[: 2 * SLOTS_DAY] = True
+    offsets = room_offsets(temps, rooms, t_air, data.local_hour, fit)
+    assert np.allclose(offsets, 0.0)  # unchanged by the later, hotter bedroom
 
 
 def test_q_heat_and_the_daily_counter_cross_check():
@@ -191,8 +204,8 @@ def test_dhw_cooling_masks_and_valve_state():
     assert list(np.flatnonzero(data.dhw)) == [10, 20, 30]
     assert list(np.flatnonzero(data.cooling)) == [40]
     assert list(np.flatnonzero(data.drop["cooling"])) == [40]
-    assert data.valve_open["bedroom"][49] and not data.valve_open["bedroom"][50]
-    assert data.valve_open["office_a"].all()
+    assert data.valve_open_inferred["bedroom"][49] and not data.valve_open_inferred["bedroom"][50]
+    assert data.valve_open_inferred["office_a"].all()
 
 
 def test_unknown_dhw_is_not_silently_zero():
@@ -248,7 +261,7 @@ def test_valves_shut_when_two_comfort_rooms_are_at_or_above_setpoint():
             room_office_a_temp_mean_c=30.0,
         )
     )
-    assert list(np.flatnonzero(~data.drop["valves_shut"])) == list(range(8)) == list(range(8))
+    assert list(np.flatnonzero(~data.drop["valves_shut"])) == list(range(8))
     assert data.drop["valves_shut"][8:].all()
 
 
@@ -264,11 +277,15 @@ def test_train_is_the_slots_no_filter_drops():
     starts = _grid(date(2025, 12, 1), 1)
     cool = np.zeros(starts.size)
     cool[3] = 1.0
-    outdoor = np.full(starts.size, 5.0)
-    outdoor[9] = np.nan
-    data = _build(make_table(starts, hp_cool_kwh=cool, outdoor_temp_mean_c=outdoor))
-    assert not data.train[3] and not data.train[9] and data.train[0]
-    assert data.train.sum() == starts.size - 2
+    freq = np.zeros(starts.size)
+    freq[20:80] = 40.0  # a 15 h run: longer than the interpolation cap, so T_out is unknown
+    data = _build(make_table(starts, hp_cool_kwh=cool, compressor_freq_mean=freq))
+    assert not data.train[3] and data.train[5]
+    unknown = ~np.isfinite(data.t_out_debiased)
+    assert unknown[20:80].all() and not unknown[2:20].any()
+    assert not data.train[unknown].any()
+    assert data.drop["outdoor_unknown"][unknown].all()
+    assert not data.drop["unknown_quality"][20:80].any()  # a separate reason, not "unknown"
 
 
 def test_filters_can_be_switched_off_by_configuration(tmp_path):
@@ -281,10 +298,10 @@ def test_filters_can_be_switched_off_by_configuration(tmp_path):
     starts = _grid(date(2025, 12, 1), 1)
     cool = np.zeros(starts.size)
     cool[3] = 1.0
-    outdoor = np.full(starts.size, 5.0)
-    outdoor[9] = np.nan
+    heat = np.full(starts.size, 0.4)
+    heat[9] = np.nan
     data = build_climate_data(
-        make_table(starts, hp_cool_kwh=cool, outdoor_temp_mean_c=outdoor), config=cfg, site=SITE
+        make_table(starts, hp_cool_kwh=cool, hp_heat_out_kwh=heat), config=cfg, site=SITE
     )
     assert data.cooling[3] and data.train[3] and data.train[9]
 
@@ -441,7 +458,7 @@ def test_without_prices_there_is_no_u_and_no_disabled_filter():
     data = _build(make_table(starts))
     assert np.isnan(data.u).all()
     assert set(data.u_reason) <= {"prices_incomplete", "price_history_short"}
-    assert data.train.all()
+    assert data.train[2:].all()  # the first two slots have no 30 minutes of compressor history
 
 
 # ---------------------------------------------------------------------------
@@ -533,3 +550,124 @@ def test_load_climate_data_refuses_a_default_feature_set(tmp_path):
             data_dir=str(root),
             site=Site(40.0, 0.0, None, "x"),
         )
+
+
+# ---------------------------------------------------------------------------
+# Outdoor temperature de-biasing
+# ---------------------------------------------------------------------------
+
+
+def _biased_series(n=120):
+    truth = 5.0 + 0.01 * np.arange(n)
+    freq = np.zeros(n)
+    freq[10:14] = 40.0  # four running slots
+    raw = truth.copy()
+    raw[10:14] -= 2.0  # the unit cools its own sensor ...
+    raw[14:16] -= 1.0  # ... and the reading recovers over the next half hour
+    return truth, raw, freq
+
+
+def test_debias_keeps_slots_off_for_the_minimum_and_interpolates_the_rest():
+    truth, raw, freq = _biased_series()
+    out, valid, interpolated = debias_outdoor(raw, freq, min_off_slots=2, max_gap_slots=8)
+    # 14 and 15 have been off for less than 30 min; 0 and 1 have no history yet
+    assert list(np.flatnonzero(~valid)) == [0, 1, 10, 11, 12, 13, 14, 15]
+    assert list(np.flatnonzero(interpolated)) == [10, 11, 12, 13, 14, 15]
+    assert np.allclose(out[2:], truth[2:])  # a linear truth is recovered exactly
+    assert np.isnan(out[:2]).all() and valid[16]
+
+
+def test_debias_leaves_long_runs_unknown_and_never_extrapolates():
+    truth, raw, freq = _biased_series(n=60)
+    freq[10:30] = 40.0  # 20 slots (5 h)
+    capped, valid, interpolated = debias_outdoor(raw, freq, min_off_slots=2, max_gap_slots=8)
+    assert np.isnan(capped[10:32]).all() and not interpolated.any()
+    filled, _v, interp = debias_outdoor(raw, freq, min_off_slots=2, max_gap_slots=24)
+    assert np.isfinite(filled[10:32]).all() and interp[10:32].all()
+    # nothing before the first valid slot or after the last one
+    freq = np.zeros(60)
+    freq[:5] = 40.0
+    freq[-5:] = 40.0
+    edge, valid, _i = debias_outdoor(np.full(60, 5.0), freq, min_off_slots=2, max_gap_slots=100)
+    assert np.isnan(edge[:7]).all() and np.isnan(edge[-5:]).all() and np.isfinite(edge[7:-5]).all()
+    assert not valid[:7].any()
+
+
+def test_debias_treats_unknown_frequency_and_unknown_readings_as_not_valid():
+    raw = np.full(30, 5.0)
+    freq = np.zeros(30)
+    freq[8] = np.nan
+    raw[20] = np.nan
+    out, valid, interpolated = debias_outdoor(raw, freq, min_off_slots=1, max_gap_slots=4)
+    assert not valid[8] and not valid[9] and valid[10]  # a known off period is needed first
+    assert not valid[20] and interpolated[20] and out[20] == 5.0
+
+
+def test_loader_exposes_raw_and_debiased_outdoor_temperature():
+    starts = _grid(date(2025, 12, 1), 2)
+    n = starts.size
+    truth = 5.0 + 0.005 * np.arange(n)
+    freq = np.zeros(n)
+    freq[40:44] = 40.0
+    raw = truth.copy()
+    raw[40:46] -= 2.0
+    data = _build(make_table(starts, outdoor_temp_mean_c=raw, compressor_freq_mean=freq))
+    assert np.array_equal(data.t_out, raw)  # raw stays for diagnostics
+    assert np.allclose(data.t_out_debiased[30:60], truth[30:60])
+    assert data.t_out_interpolated[40:46].all() and data.t_out_valid[46]
+    assert data.drop["outdoor_unknown"].sum() == 2 and data.train[44]  # no history at the start
+    # the configured thresholds drive the function: 30 min is two slots, 6 h is 24 slots
+    assert CONFIG.signals.t_out_debias.min_off_minutes == 30
+    assert CONFIG.signals.t_out_debias.max_gap_hours == 6.0
+
+
+# ---------------------------------------------------------------------------
+# Causality of the replayed u
+# ---------------------------------------------------------------------------
+
+
+def test_replayed_u_of_a_day_does_not_depend_on_later_prices_or_flags():
+    first, n_days = date(2025, 12, 1), 16
+    starts = _grid(first, n_days)
+    prices = _price_pattern(n_days, first)
+    enable = np.ones(starts.size)
+    hours = np.full(starts.size, 6.0)
+    base = _build(
+        make_table(starts, climate_enable_at_start=enable, climate_min_hours_at_start=hours), prices
+    )
+    rng = np.random.default_rng(11)
+    for j in (11, 12, 14):
+        _d, lo, hi = base.days[j]
+        later_prices = prices.copy()
+        later_prices[hi:] = rng.uniform(0.01, 0.5, later_prices.size - hi)
+        later_enable = enable.copy()
+        later_enable[lo + 1 :] = 0.0  # the flag flips right after the decision
+        later_hours = hours.copy()
+        later_hours[lo + 1 :] = 20.0
+        changed = _build(
+            make_table(
+                starts, climate_enable_at_start=later_enable, climate_min_hours_at_start=later_hours
+            ),
+            later_prices,
+        )
+        assert np.array_equal(changed.u[:hi], base.u[:hi], equal_nan=True)
+    # the other direction: a change before the day does change it
+    earlier = prices.copy()
+    earlier[: 10 * SLOTS_DAY] = 0.9
+    assert not np.array_equal(
+        _build(make_table(starts), earlier).u, _build(make_table(starts), prices).u, equal_nan=True
+    )
+
+
+def test_u_known_marks_exactly_the_replayed_slots():
+    first, n_days = date(2025, 12, 1), 14
+    starts = _grid(first, n_days)
+    enable = np.ones(starts.size)
+    enable[12 * SLOTS_DAY : 13 * SLOTS_DAY] = 0.0
+    data = _build(make_table(starts, climate_enable_at_start=enable), _price_pattern(n_days, first))
+    assert np.array_equal(data.u_known, np.isfinite(data.u))
+    for j, (_label, lo, hi) in enumerate(data.days):
+        assert data.u_known[lo:hi].all() == bool(data.day_u_known[j])
+        assert data.u_known[lo:hi].any() == bool(data.day_u_known[j])
+    assert not data.day_u_known[12] and data.day_u_known[11]
+    assert data.u_reason[12] == "rule_disabled"

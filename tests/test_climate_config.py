@@ -54,6 +54,21 @@ def test_shipped_config_holds_the_plan_values():
     assert cfg.gate.hard.starts_per_day_ratio_max == 1.10
     assert cfg.gate.hard.max_starts_per_day == 30
     assert cfg.gate.hard.max_blocks_per_day == 4
+    assert cfg.signals.t_out_debias.min_off_minutes == 30
+    assert cfg.signals.valve.inferred_state_margin_k == 0.0
+    assert cfg.model.response.plant_valve_cap_margin_k == 0.25
+    assert cfg.timezone == "Europe/Madrid"
+
+
+def test_preregistered_gate_rows_are_constants():
+    cfg = load_climate_config(SHIPPED)
+    assert cfg.gate.hard.model_accepted is True
+    assert cfg.gate.hard.mismatch_run_keeps_sign is True
+    assert cfg.gate.cost.saving_exceeds_replay_error is True
+    assert cfg.gate.comfort.reduction_exceeds_replay_error is True
+    assert cfg.gate.hard.max_kh_above_high == 0.0
+    assert cfg.gate.cost.bootstrap_lower_bound_above == 0.0
+    assert cfg.acceptance.max_iterations == 1
 
 
 def test_statistics_follow_forecast_eval():
@@ -135,6 +150,32 @@ def _mutations() -> list[tuple[str, Any]]:
                 "windows",
             ),
         ),
+        ("gate off: model not required accepted", put(False, "gate", "hard", "model_accepted")),
+        ("gate off: mismatch run", put(False, "gate", "hard", "mismatch_run_keeps_sign")),
+        (
+            "gate off: replay error (cost)",
+            put(False, "gate", "cost", "saving_exceeds_replay_error"),
+        ),
+        (
+            "gate off: replay error (comfort)",
+            put(False, "gate", "comfort", "reduction_exceeds_replay_error"),
+        ),
+        ("gate bound loosened", put(0.1, "gate", "cost", "bootstrap_lower_bound_above")),
+        (
+            "gate bound loosened (comfort)",
+            put(-1.0, "gate", "comfort", "bootstrap_lower_bound_above"),
+        ),
+        ("kh above band tolerated", put(5.0, "gate", "hard", "max_kh_above_high")),
+        ("comfort cost delta loosened", put(0.01, "gate", "comfort", "cost_point_delta_max")),
+        ("zero saving threshold", put(0.0, "gate", "cost", "min_saving")),
+        ("negative saving threshold", put(-0.1, "gate", "cost", "min_saving")),
+        ("zero comfort threshold", put(0.0, "gate", "comfort", "min_kh_reduction")),
+        ("more model iterations", put(2, "acceptance", "max_iterations")),
+        ("unknown time zone", put("Mars/Olympus_Mons", "timezone")),
+        ("time zone not a string", put(3, "timezone")),
+        ("debias off a slot grid", put(20, "signals", "t_out_debias", "min_off_minutes")),
+        ("debias without gap cap", put(0.0, "signals", "t_out_debias", "max_gap_hours")),
+        ("old valve field name", put(0.0, "signals", "valve", "open_margin_k")),
         (
             "more rooms at setpoint than comfort rooms",
             put(4, "filters", "valves_shut", "min_rooms_at_setpoint"),

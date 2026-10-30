@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from datetime import UTC, datetime
@@ -92,6 +93,12 @@ def _pct(values: np.ndarray, qs=(5, 25, 50, 75, 95)) -> dict[str, float | None]:
     if v.size == 0:
         return {f"p{q}": None for q in qs} | {"n": 0}
     return {f"p{q}": float(np.percentile(v, q)) for q in qs} | {"n": int(v.size)}
+
+
+def _mean(values: np.ndarray) -> float | None:
+    v = np.asarray(values, dtype=float)
+    v = v[np.isfinite(v)]
+    return float(v.mean()) if v.size else None
 
 
 def _rate(num: float, den: float) -> float | None:
@@ -264,19 +271,43 @@ def daily_counter_agreement(d: ClimateData, min_daily_kwh: float) -> dict[str, A
     return out
 
 
-def return_temperature_proxy(d: ClimateData, min_flow: float) -> dict[str, Any]:
+def diagnostic_train(d: ClimateData) -> np.ndarray:
+    """The training mask without the outdoor-temperature requirement (diagnostics that do not
+    use T_out must not lose the slots in which the compressor ran)."""
+    drop = [v for k, v in d.drop.items() if k != "outdoor_unknown"]
+    return ~np.logical_or.reduce(drop)
+
+
+def steady_circulation(
+    circulating: np.ndarray, min_minutes: float, step_minutes: float = 15.0
+) -> np.ndarray:
+    """Slots at least *min_minutes* into a circulation run, guaranteed at the slot's start.
+
+    A slot with ``k`` consecutive circulating slots before it has been running for at least
+    ``k * step_minutes`` when it begins (the run may have started earlier inside the first slot),
+    so it qualifies when ``k * step_minutes >= min_minutes``.
+    """
+    need = max(int(np.ceil(min_minutes / step_minutes)), 0)
+    steady = np.asarray(circulating, dtype=bool).copy()
+    for k in range(1, need + 1):
+        before = np.zeros(steady.size, dtype=bool)
+        before[k:] = circulating[:-k]
+        steady &= before
+    return steady
+
+
+def return_temperature_proxy(d: ClimateData, min_flow: float, min_minutes: float) -> dict[str, Any]:
     """Return temperature in steady circulation as a slab proxy (S1/S2/S3, gate months)."""
     c = d.columns
     flow_rate = c["pump_flow_mean"]
     ret, supply = c["return_temp_mean_c"], c["flow_temp_mean_c"]
     with np.errstate(invalid="ignore"):
         circulating = (flow_rate >= min_flow) & ~d.dhw & ~d.cooling
-    out: dict[str, Any] = {"min_flow_l_per_min": min_flow}
-    prev = np.zeros(d.n, dtype=bool)
-    prev[1:] = circulating[:-1]
-    steady = circulating & prev  # at least one full slot (15 min) into a circulation run
+    out: dict[str, Any] = {"min_flow_l_per_min": min_flow, "min_minutes_into_run": min_minutes}
+    steady = steady_circulation(circulating, min_minutes)
+    train = diagnostic_train(d)
     for season in SEASONS:
-        sel = _season_slots(d, season) & d.train
+        sel = _season_slots(d, season) & train
         s = sel & steady & np.isfinite(ret) & np.isfinite(d.t_air) & np.isfinite(supply)
         gate = sel & np.isfinite(d.t_air)
         entry: dict[str, Any] = {
@@ -329,12 +360,12 @@ def return_temperature_proxy(d: ClimateData, min_flow: float) -> dict[str, Any]:
     return out
 
 
-def heating_curve(d: ClimateData, min_flow: float) -> dict[str, Any]:
+def heating_curve(d: ClimateData) -> dict[str, Any]:
     """Flow target (and measured flow) against outdoor temperature in heating slots."""
     c = d.columns
     target, supply = c["flow_target_temp_mean_c"], c["flow_temp_mean_c"]
     heat_on = (d.q_heat_kwh >= HEAT_ON_KWH) & ~d.dhw & ~d.cooling
-    ok = heat_on & np.isfinite(target) & np.isfinite(d.t_out) & d.train
+    ok = heat_on & np.isfinite(target) & np.isfinite(d.t_out) & diagnostic_train(d)
     edges = np.arange(-6.0, 22.0, 2.0)
     out: dict[str, Any] = {"bin_k": 2.0, "slots": int(ok.sum()), "bins": []}
     for lo in edges:
@@ -483,14 +514,18 @@ def outdoor_sensor_sun(d: ClimateData) -> dict[str, Any]:
         day_sun.append(float(d.solar[lo:hi].sum() * SLOT_H))
     out: dict[str, Any] = {"days": len(day_amp)}
     ok = np.isfinite(anomaly)
+    if not ok.any():  # no qualifying day: nothing to report
+        return out | {"peak_hour_local": None, "solar_peak_hour_local": None}
     out["anomaly_vs_solar"] = _ols(d.solar[ok], anomaly[ok])
     profile = []
     for hour in range(24):
         s = ok & (d.local_hour == hour)
         profile.append(float(np.median(anomaly[s])) if s.any() else None)
     out["median_anomaly_by_local_hour_k"] = profile
-    peak_hour = int(np.nanargmax(np.array([np.nan if p is None else p for p in profile])))
-    out["peak_hour_local"] = peak_hour
+    known_profile = np.array([np.nan if p is None else p for p in profile])
+    out["peak_hour_local"] = (
+        int(np.nanargmax(known_profile)) if np.isfinite(known_profile).any() else None
+    )
     # when does the sun peak?  the mean solar proxy by local hour in the same days
     sun_by_hour = [float(d.solar[ok & (d.local_hour == h)].mean()) for h in range(24)]
     out["solar_peak_hour_local"] = int(np.argmax(sun_by_hour))
@@ -541,7 +576,7 @@ def thermostat_signal(d: ClimateData) -> dict[str, Any]:
     """Slot-level behaviour of T_air: step sizes, stalls and the daily swing (gate months)."""
     out: dict[str, Any] = {}
     for season in SEASONS:
-        sel = _season_slots(d, season) & d.train
+        sel = _season_slots(d, season) & diagnostic_train(d)
         step = np.full(d.n, np.nan)
         step[1:] = d.t_air[1:] - d.t_air[:-1]
         both = sel.copy()
@@ -587,6 +622,93 @@ def comfort_realized(d: ClimateData, low: float) -> dict[str, Any]:
     return out
 
 
+def interpolation_error(
+    t_out: np.ndarray, valid: np.ndarray, lengths: tuple[int, ...], samples: int = 2000
+) -> dict[str, Any]:
+    """Leave-a-block-out error of the linear interpolation, by block length (the gap cap's basis).
+
+    A block of *length* valid slots, bracketed by two valid slots, is hidden, interpolated and
+    compared with its own readings.  Deterministic (fixed seed).
+    """
+    rng = np.random.default_rng(20260430)
+    n = t_out.size
+    out: dict[str, Any] = {}
+    starts = np.flatnonzero(valid)
+    for length in lengths:
+        errs = []
+        for s in rng.choice(starts, size=min(samples, starts.size), replace=False):
+            if s < 1 or s + length >= n or not valid[s - 1 : s + length + 1].all():
+                continue
+            x0, x1 = t_out[s - 1], t_out[s + length]
+            guess = x0 + (x1 - x0) * np.arange(1, length + 1) / (length + 1)
+            errs.append(float(np.sqrt(np.mean((guess - t_out[s : s + length]) ** 2))))
+        out[f"{length * SLOT_H:g}h"] = {
+            "blocks": len(errs),
+            "rmse_median_k": float(np.median(errs)) if errs else None,
+            "rmse_p90_k": float(np.percentile(errs, 90)) if errs else None,
+        }
+    return out
+
+
+def outdoor_debias(d: ClimateData, cfg) -> dict[str, Any]:
+    """What the de-biased outdoor series changes: difference to raw, residual start step, shares."""
+    freq = d.columns["compressor_freq_mean"]
+    raw, deb = d.t_out, d.t_out_debiased
+    out: dict[str, Any] = {
+        "min_off_minutes": cfg.signals.t_out_debias.min_off_minutes,
+        "max_gap_hours": cfg.signals.t_out_debias.max_gap_hours,
+    }
+    with np.errstate(invalid="ignore"):
+        running = np.isfinite(freq) & (freq > 0)
+        off = np.isfinite(freq) & (freq == 0)
+    for season in (*SEASONS, "all"):
+        sel = np.ones(d.n, dtype=bool) if season == "all" else _season_slots(d, season, "fit")
+        known_raw = sel & np.isfinite(raw)
+        diff = deb - raw
+        out[season] = {
+            "slots": int(sel.sum()),
+            "share_valid": float((sel & d.t_out_valid).sum() / max(sel.sum(), 1)),
+            "share_interpolated": float((sel & d.t_out_interpolated).sum() / max(sel.sum(), 1)),
+            "share_nan": float((sel & ~np.isfinite(deb)).sum() / max(sel.sum(), 1)),
+            "debiased_minus_raw_k_mean_all": _mean(diff[known_raw]),
+            "debiased_minus_raw_k_mean_compressor_running": _mean(diff[known_raw & running]),
+            "debiased_minus_raw_k_mean_compressor_off": _mean(diff[known_raw & off]),
+            "debiased_minus_raw_k_when_running": _pct(diff[known_raw & running]),
+        }
+    # the start / stop steps of two slots in the dark, raw against de-biased
+    dark = np.zeros(d.n, dtype=bool)
+    dark[1:-1] = (d.solar[:-2] == 0) & (d.solar[1:-1] == 0) & (d.solar[2:] == 0)
+    prev_on = np.zeros(d.n, dtype=bool)
+    prev_on[1:] = running[:-1]
+    with np.errstate(invalid="ignore"):
+        start = dark & ~prev_on & running
+        stop = dark & prev_on & off
+    steps: dict[str, Any] = {}
+    for name, series in (("raw", raw), ("debiased", deb)):
+        change = np.full(d.n, np.nan)
+        change[1:-1] = series[2:] - series[:-2]
+        steps[name] = {
+            "at_compressor_start": _pct(change[start], (25, 50, 75)),
+            "at_compressor_stop": _pct(change[stop], (25, 50, 75)),
+        }
+    out["night_change_over_two_slots_k"] = steps
+    out["interpolation_leave_block_out"] = interpolation_error(
+        raw, d.t_out_valid, (2, 4, 8, 12, 16, 24, 32, 48)
+    )
+    runs = [n for _s, n in _runs(~d.t_out_valid)]
+    out["invalid_run_hours"] = _pct(np.array(runs) * SLOT_H, (50, 75, 90, 95, 99))
+    # outdoor anomaly against the clear-sky proxy after de-biasing (the sun term is not removed)
+    anomaly = np.full(d.n, np.nan)
+    for j, (_label, lo, hi) in enumerate(d.days):
+        if d.day_complete[j] and d.day_gate_month[j] and d.day_season[j]:
+            x = deb[lo:hi]
+            if np.isfinite(x).mean() >= 0.5:
+                anomaly[lo:hi] = x - np.nanmean(x)
+    ok = np.isfinite(anomaly)
+    out["debiased_anomaly_vs_solar"] = _ols(d.solar[ok], anomaly[ok])
+    return out
+
+
 def filter_survival(d: ClimateData) -> dict[str, Any]:
     """Share of slots surviving the training filters, per season (fit and gate months)."""
     out: dict[str, Any] = {}
@@ -600,6 +722,7 @@ def filter_survival(d: ClimateData) -> dict[str, Any]:
             for name in FILTERS:
                 entry[f"drops_{name}"] = float(d.drop[name][sel].mean())
             survive = sel & d.train
+            entry["survive_ignoring_outdoor"] = float((sel & diagnostic_train(d)).sum() / total)
             entry["survive"] = float(survive.sum() / total)
             entry["survive_with_u"] = float((survive & np.isfinite(d.u)).sum() / total)
             entry["survive_not_dhw"] = float((survive & ~d.dhw).sum() / total)
@@ -710,14 +833,15 @@ def run_audit(d: ClimateData, raw: dict[str, RawSeries], coverage, cfg) -> dict[
             ),
         },
         "return_temperature_slab_proxy": return_temperature_proxy(
-            d, cfg.model.slab_proxy.min_flow_l_per_min
+            d, cfg.model.slab_proxy.min_flow_l_per_min, cfg.model.slab_proxy.min_minutes_into_run
         ),
-        "heating_curve": heating_curve(d, cfg.model.slab_proxy.min_flow_l_per_min),
+        "heating_curve": heating_curve(d),
         "thermostat_signal": thermostat_signal(d),
         "comfort_realized_by_legacy": comfort_realized(d, cfg.comfort.low_c),
         "legacy_mask_hit_rate": legacy_mask_hit_rate(d),
         "channel2_over_heishamon": channel2_ratio(d),
         "outdoor_sensor_sun": outdoor_sensor_sun(d),
+        "outdoor_debias": outdoor_debias(d, cfg),
         "filter_survival": filter_survival(d),
         "min_hours_regimes": min_hours_regimes(d),
     }
@@ -754,6 +878,13 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _report_name(value: str) -> str:
+    """A report directory suffix: letters, digits, dot, underscore and dash, never ``..``."""
+    if value and (not re.fullmatch(r"[A-Za-z0-9._-]+", value) or ".." in value):
+        raise argparse.ArgumentTypeError(f"{value!r}: use only [A-Za-z0-9._-] and no '..'")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter
@@ -762,7 +893,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", required=True, help="canonical dataset directory (prices)")
     parser.add_argument("--config", default="config/climate.yaml")
     parser.add_argument("--data-dir", default=None)
-    parser.add_argument("--name", default="", help="suffix of the report directory")
+    parser.add_argument(
+        "--name", default="", type=_report_name, help="suffix of the report directory"
+    )
     args = parser.parse_args(argv)
 
     root = resolve_data_dir(args.data_dir)

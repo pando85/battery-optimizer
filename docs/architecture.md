@@ -147,11 +147,17 @@ canonical dataset, and never writes into either.
   inconsistent ranges are errors) and the file's SHA-256 identifies it in every result.
 - `data.py`: `load_climate_data` verifies the feature set through its manifest and returns
   `ClimateData`, numpy arrays on the 15-minute UTC grid with a local-day partition (92 / 96 / 100
-  slots): `T_air` (comfort-room mean) and per-room hourly offsets, `Q_heat` with its daily
+  slots): `T_air` (comfort-room mean), `Q_heat` with its daily
   cross-check against the energy counter, the DHW and cooling masks, the inferred valve state, the
   clear-sky solar proxy, the legacy permission `u` replayed through
   `structured_forecast.replay_mask_for_day` (decided 40 s into each local day) and one boolean per
-  training filter. A day on which the climate rule was disabled has no `u` and is excluded.
+  training filter. `u` is `NaN` (and `u_known` false) on every day without a replayed schedule,
+  including disabled-rule days, which are excluded; u-driven code must use `u_known` only.
+  The Aquarea outdoor sensor reads low while the compressor runs, so the model's `t_out_debiased`
+  keeps only slots with the compressor off for at least 30 minutes and interpolates linearly across
+  running periods up to a configured cap (longer ones are unknown); raw `t_out` stays for
+  diagnostics. Per-room offsets are the function `room_offsets(..., mask)`, not a field, so a fold
+  fits them on its own training mask and nothing held out can leak.
 - The site coordinates (and an optional always-open valve share `phi`) are read from
   `<data_dir>/climate/site.yaml` (`latitude`, `longitude`, optional `phi`). The file is private,
   never committed, and its hash is recorded with the data.

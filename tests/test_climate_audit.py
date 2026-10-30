@@ -55,9 +55,7 @@ def test_resolution_reports_the_reading_grid_and_update_rate():
 
 def test_counter_quantum_finds_the_step_and_rollbacks():
     q = audit.counter_quantum(_raw([0, 0.01, 0.01, 0.02, 0.0195, 0.0295, 0.0395]))
-    assert (
-        q["increments"] == 5 and q["smallest_increment"] == 0.005 or q["smallest_increment"] == 0.01
-    )
+    assert q["increments"] == 4 and q["smallest_increment"] == 0.01
     assert q["rollbacks"] == 1
     assert audit.counter_quantum(_raw([1.0, 1.0, 1.0]))["increments"] == 0
 
@@ -153,3 +151,105 @@ def test_run_audit_smoke_and_report_is_json(tmp_path):
     parsed = json.loads(json_bytes(report))
     assert parsed["gaps_per_signal"]["outdoor_temp"]["unknown_share"] == 0.0
     assert "# Climate data audit" in audit.render_markdown(report)
+
+
+def test_steady_circulation_honours_the_minutes_into_the_run():
+    circ = np.array([0, 1, 1, 1, 0, 1, 0, 1, 1], dtype=bool)
+    # 10 min: at least one full slot of circulation before the slot (15 min)
+    expected = [False, False, True, True, False, False, False, False, True]
+    assert list(audit.steady_circulation(circ, 10)) == expected
+    # 30 min: two full slots before it
+    assert list(np.flatnonzero(audit.steady_circulation(circ, 30))) == [3]
+    # 0 min: every circulating slot
+    assert np.array_equal(audit.steady_circulation(circ, 0), circ)
+
+
+def test_report_name_is_sanitised():
+    import argparse
+
+    import pytest
+
+    for good in ("", "v2", "run-1.final_x"):
+        assert audit._report_name(good) == good
+    for bad in ("../x", "a/b", "a..b", "x y", "..", "a\\b", "é"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            audit._report_name(bad)
+
+
+def test_sun_section_without_a_qualifying_day_does_not_crash():
+    starts = grid(date(2025, 7, 1), 3)  # outside every season: no day qualifies
+    data = build(make_table(starts))
+    sun = audit.outdoor_sensor_sun(data)
+    assert sun["days"] == 0 and sun["peak_hour_local"] is None
+
+
+def test_outdoor_debias_section_reports_difference_shares_and_the_residual_step():
+    first, n_days = date(2025, 12, 1), 12
+    starts = grid(first, n_days)
+    n = starts.size
+    truth = 5.0 + 0.0 * np.arange(n)
+    freq = np.zeros(n)
+    raw = truth.copy()
+    for k in range(n_days):  # a 3 h night run every day at 02:00, cooling the sensor by 2 K
+        s = k * SLOTS_DAY + 2 * 4
+        freq[s : s + 12] = 40.0
+        raw[s : s + 12] -= 2.0
+        raw[s + 12 : s + 14] -= 1.0
+    data = build(make_table(starts, outdoor_temp_mean_c=raw, compressor_freq_mean=freq))
+    rep = audit.outdoor_debias(data, CONFIG)["all"]
+    assert rep["debiased_minus_raw_k_mean_compressor_running"] > 1.9
+    assert abs(rep["debiased_minus_raw_k_mean_compressor_off"]) < 0.5
+    assert 0.0 < rep["share_interpolated"] < 0.2 and 0.0 < rep["share_nan"] < 0.01
+    steps = audit.outdoor_debias(data, CONFIG)["night_change_over_two_slots_k"]
+    assert steps["raw"]["at_compressor_start"]["p50"] < -1.5
+    assert abs(steps["debiased"]["at_compressor_start"]["p50"]) < 0.1
+    assert abs(steps["debiased"]["at_compressor_stop"]["p50"]) < 0.1
+
+
+def test_main_writes_only_under_the_data_dir(tmp_path, monkeypatch):
+    import hashlib
+
+    import pyarrow.parquet as pq
+
+    root = tmp_path / "store"
+    directory = root / "analysis" / "v1" / "features" / "abc123"
+    (directory / "parts").mkdir(parents=True)
+    (root / "manifests").mkdir()
+    table = make_table(grid(date(2025, 12, 1), 6))
+    part = directory / "parts" / "part.parquet"
+    pq.write_table(table, part)
+    entry = {
+        "path": "parts/part.parquet",
+        "sha256": hashlib.sha256(part.read_bytes()).hexdigest(),
+        "rows": table.num_rows,
+    }
+    window = {"start": "2025-11-30T23:00:00Z", "end": "2025-12-06T23:00:00Z"}
+    (directory / "features_manifest.json").write_text(
+        json.dumps({"feature_set_id": "abc123", "part_files": [entry], "window": window})
+    )
+    (root / "climate").mkdir()
+    (root / "climate" / "site.yaml").write_text("latitude: 40\nlongitude: 0\n")
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    real_load = audit.load_climate_data
+    monkeypatch.setattr(
+        audit, "load_climate_data", lambda cfg, **kw: real_load(cfg, **{**kw, "dataset": None})
+    )
+    before = {p for p in tmp_path.rglob("*")}
+    code = audit.main(
+        [
+            "--feature-set", "abc",
+            "--dataset", str(tmp_path / "unused"),
+            "--config", str(CONFIG.path),
+            "--data-dir", str(root),
+            "--name", "t",
+        ]
+    )  # fmt: skip
+    assert code == 0
+    created = {p for p in tmp_path.rglob("*")} - before
+    report_dir = root / "analysis" / "v1" / "climate-audit"
+    assert created and all(p == report_dir or report_dir in p.parents for p in created)
+    assert {p.name for p in created if p.is_file()} == {"report.json", "report.md"}
+    assert list(cwd.iterdir()) == []
+    assert not (CONFIG.path.parent / "report.json").exists()

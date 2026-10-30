@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterator, Mapping
 from datetime import date
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -109,6 +110,33 @@ def boolean(value: Any, path: str) -> bool:
     return value
 
 
+def const(expected: bool | float) -> Spec:
+    """A value fixed by the preregistration: any other value is an error."""
+
+    def check(value: Any, path: str) -> bool | float:
+        if isinstance(expected, bool):
+            ok = isinstance(value, bool) and value is expected
+        else:
+            ok = (
+                not isinstance(value, bool) and isinstance(value, int | float) and value == expected
+            )
+        if not ok:
+            raise _fail(path, f"is fixed by the preregistration at {expected!r}, got {value!r}")
+        return expected
+
+    return check
+
+
+def timezone(value: Any, path: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise _fail(path, f"expected a time zone name, got {value!r}")
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError, OSError) as exc:
+        raise _fail(path, f"unknown time zone {value!r}") from exc
+    return value
+
+
 def text(*choices: str) -> Spec:
     def check(value: Any, path: str) -> str:
         if not isinstance(value, str) or not value:
@@ -197,7 +225,7 @@ _HOURS = seq(integer(1, 48), min_len=1, unique=True)
 SCHEMA: Spec = section(
     {
         "config_version": integer(CONFIG_VERSION, CONFIG_VERSION),
-        "timezone": text(),
+        "timezone": timezone,
         "comfort": section(
             {
                 "band": text(),
@@ -234,7 +262,11 @@ SCHEMA: Spec = section(
                     }
                 ),
                 "cooling": section({"min_electric_kwh": _POSITIVE, "min_thermal_kwh": _POSITIVE}),
-                "valve": section({"open_margin_k": num(0.0, 5.0)}),
+                # inferred valve state (room below setpoint - margin), not the plant response
+                "valve": section({"inferred_state_margin_k": num(0.0, 5.0)}),
+                "t_out_debias": section(
+                    {"min_off_minutes": integer(15, 240), "max_gap_hours": num(0.25, 48.0)}
+                ),
                 "counter_check": section({"min_daily_kwh": _POSITIVE}),
             }
         ),
@@ -267,7 +299,7 @@ SCHEMA: Spec = section(
                     {"min_flow_l_per_min": _POSITIVE, "min_minutes_into_run": integer(0, 240)}
                 ),
                 "response": section(
-                    {"phi_default": _FRACTION, "valve_open_margin_k": num(0.0, 5.0)}
+                    {"phi_default": _FRACTION, "plant_valve_cap_margin_k": num(0.0, 5.0)}
                 ),
                 "selection": section({"b_min_rmse_gain": _FRACTION, "horizons_hours": _HOURS}),
             }
@@ -300,7 +332,7 @@ SCHEMA: Spec = section(
                     }
                 ),
                 "parameters": section({"fold_rel_diff": _FRACTION}),
-                "max_iterations": integer(0, 10),
+                "max_iterations": const(1),
             }
         ),
         "cop": section(
@@ -333,29 +365,29 @@ SCHEMA: Spec = section(
                 "band": text(),
                 "hard": section(
                     {
-                        "max_kh_above_high": num(0.0),
+                        "max_kh_above_high": const(0.0),
                         "starts_per_day_ratio_max": num(1.0),
                         "max_starts_per_day": integer(1, 96),
                         "max_blocks_per_day": integer(1, 24),
-                        "mismatch_run_keeps_sign": boolean,
-                        "model_accepted": boolean,
+                        "mismatch_run_keeps_sign": const(True),
+                        "model_accepted": const(True),
                     }
                 ),
                 "cost": section(
                     {
-                        "min_saving": _FRACTION,
-                        "bootstrap_lower_bound_above": num(),
-                        "saving_exceeds_replay_error": boolean,
+                        "min_saving": num(1e-9, 1.0),
+                        "bootstrap_lower_bound_above": const(0.0),
+                        "saving_exceeds_replay_error": const(True),
                         "comfort_kh_tolerance_per_room": num(0.0),
                         "worst_excursion_floor_c": num(-50, 60),
                     }
                 ),
                 "comfort": section(
                     {
-                        "min_kh_reduction": _FRACTION,
-                        "bootstrap_lower_bound_above": num(),
-                        "reduction_exceeds_replay_error": boolean,
-                        "cost_point_delta_max": num(),
+                        "min_kh_reduction": num(1e-9, 1.0),
+                        "bootstrap_lower_bound_above": const(0.0),
+                        "reduction_exceeds_replay_error": const(True),
+                        "cost_point_delta_max": const(0.0),
                         "cost_bootstrap_upper_bound_max": num(0.0, 1.0),
                     }
                 ),
@@ -379,6 +411,8 @@ def _cross_checks(cfg: Section) -> None:
         raise _fail("comfort", f"rooms and excluded_rooms must cover exactly {list(KNOWN_ROOMS)}")
     if cfg.gate.band != comfort.band:
         raise _fail("gate.band", "must match comfort.band")
+    if cfg.signals.t_out_debias.min_off_minutes % (cfg.signals.step_seconds // 60):
+        raise _fail("signals.t_out_debias.min_off_minutes", "must be a whole number of slots")
     if cfg.filters.valves_shut.min_rooms_at_setpoint > len(comfort.rooms):
         raise _fail("filters.valves_shut", "min_rooms_at_setpoint exceeds the comfort rooms")
     seasons = [cfg.seasons[name] for name in ("S1", "S2", "S3")]

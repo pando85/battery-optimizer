@@ -42,9 +42,14 @@ signals:
     min_electric_kwh: 0.02
     min_thermal_kwh: 0.05
   valve:
-    open_margin_k: 0.0 # a room's valve is inferred open when its temperature < setpoint - margin
+    # inferred valve state of a room: open when its temperature < setpoint - margin (data only; the
+    # plant response uses model.response.plant_valve_cap_margin_k)
+    inferred_state_margin_k: 0.0
   counter_check:
     min_daily_kwh: 1.0 # a day enters the Q_heat vs counter cross-check above this thermal energy
+  t_out_debias: # the Aquarea outdoor sensor reads 1.5 to 2.5 K low while the compressor runs
+    min_off_minutes: 30 # a slot is a valid reading once the compressor has been off this long
+    max_gap_hours: 6.0 # a longer run is not interpolated: unknown (chosen from the data, see PR)
 
 # --- training filters -----------------------------------------------------------------------------
 filters:
@@ -77,7 +82,7 @@ model:
     min_minutes_into_run: 10
   response:
     phi_default: 0.3 # always-open share until floor areas are supplied
-    valve_open_margin_k: 0.25 # open = T_air < setpoint - margin
+    plant_valve_cap_margin_k: 0.25 # plant cap: open = T_air < setpoint - margin
   selection:
     b_min_rmse_gain: 0.10 # use B only if it beats A by this much at 12 h and 24 h
     horizons_hours: [12, 24]

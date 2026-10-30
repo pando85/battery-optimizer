@@ -44,6 +44,7 @@ def make_table(starts_us: np.ndarray, **overrides: np.ndarray | float) -> pa.Tab
         "hp_heat_energy_out_delta": 0.4,
         "hp_heat_energy_delta": 0.1,
         "dhw_force_mean": 0.0,
+        "compressor_freq_mean": 0.0,
         "climate_enable_at_start": 1.0,
         "climate_min_hours_at_start": 6.0,
     }

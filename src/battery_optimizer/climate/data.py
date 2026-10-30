@@ -3,24 +3,34 @@
 Input: the climate feature table (``build-features --signal-set climate``: a uniform 15-minute UTC
 grid, every column the mean or integral over its slot, ``NaN`` where the slot is unknown) and,
 optionally, a canonical dataset's PVPC prices.  Output: :class:`ClimateData`, one array per signal
-on the feature grid plus a local-day partition.  Nothing is written, nothing is interpolated and
-nothing is zero-filled.
+on the feature grid plus a local-day partition.  Nothing is written and nothing is zero-filled; the
+only interpolation is the outdoor-temperature de-biasing below.
 
 Derived signals
 ---------------
 * ``t_air``: mean temperature of the comfort rooms (``NaN`` unless all of them are known, so the
-  composition never jumps); :func:`room_offsets` gives each room's median offset from it by local
-  hour, for a caller-chosen set of training slots.
+  composition never jumps).  :func:`room_offsets` gives each room's median offset from it by local
+  hour; it is a function, not a field, so a fold fits it on its own training mask and no held-out
+  or reserved slot can leak into it.
 * ``q_heat_kwh``: the power-integrated thermal heating output of a slot; :meth:`ClimateData.
   counter_check` compares its daily sum with the heat-produced energy counter.
 * ``dhw`` and ``cooling``: slots in which the pump produced hot water or cooling.
-* ``valve_open``: inferred from room temperature and setpoint (a room below its setpoint wants
-  heat); ``climate_action`` has no history before 2026-10-30.
+* ``t_out`` and ``t_out_debiased``: the Aquarea outdoor sensor reads 1.5 to 2.5 K low while the
+  compressor runs and recovers after it stops, so ``t_out_debiased`` (the model's T_out input) keeps
+  only slots in which the compressor has been off at least ``signals.t_out_debias.min_off_minutes``
+  and interpolates linearly in time across running periods up to ``max_gap_hours``; longer
+  periods are ``NaN``.  The raw ``t_out`` stays for diagnostics.
+* ``valve_open_inferred``: from room temperature and setpoint (a room below its setpoint wants
+  heat); ``climate_action`` has no history before 2026-10-30.  Not the plant's valve cap.
 * ``solar``: clear-sky proxy, the positive part of the sine of the solar elevation at the slot
   midpoint (:func:`solar_proxy`); the site coordinates come from a private YAML in the data dir.
 * ``u``: the legacy ``climate_control`` permission replayed per local hour through
   :func:`battery_optimizer.structured_forecast.replay_mask_for_day`, decided at the start of each
-  local day; ``NaN`` where the rule has no schedule (disabled, flags or prices unknown, ...).
+  local day.  ``u`` is ``NaN`` on every local day without a replayed schedule: ``partial_day``,
+  ``rule_disabled``, ``enable_unknown``, ``min_hours_unknown``, ``rule_not_deployed``,
+  ``prices_incomplete``, ``price_history_short``, ``rule_error_negative_price`` (see
+  :attr:`ClimateData.u_reason`).  ``u_known`` marks the slots that have one; u-driven code must
+  use only those and never treat ``NaN`` as "not permitted".
 * ``drop``: one boolean array per training filter of ``config/climate.yaml``; ``train`` is the
   slots no filter drops.  Season and month membership is per local day and left to the caller.
 
@@ -53,6 +63,7 @@ __all__ = [
     "ClimateDataError",
     "Site",
     "build_climate_data",
+    "debias_outdoor",
     "dataset_prices",
     "load_climate_data",
     "load_site",
@@ -73,6 +84,7 @@ REASON_RULE_DISABLED = "rule_disabled"
 #: Training filters, in the order of the plan.
 FILTERS = (
     "unknown_quality",
+    "outdoor_unknown",
     "window_open",
     "valves_shut",
     "thermostat_outage",
@@ -225,15 +237,21 @@ class ClimateData:
     room_temp: dict[str, np.ndarray]
     room_setpoint: dict[str, np.ndarray]
     t_air: np.ndarray
-    room_offsets: np.ndarray
+    #: Raw Aquarea outdoor temperature (diagnostics); models read ``t_out_debiased``.
     t_out: np.ndarray
+    t_out_debiased: np.ndarray
+    #: Slots whose raw reading is trusted (compressor off long enough).
+    t_out_valid: np.ndarray
+    #: Slots of ``t_out_debiased`` that were interpolated across a running period.
+    t_out_interpolated: np.ndarray
     q_heat_kwh: np.ndarray
     e_heat_kwh: np.ndarray
     dhw: np.ndarray
     cooling: np.ndarray
-    valve_open: dict[str, np.ndarray]
+    valve_open_inferred: dict[str, np.ndarray]
     solar: np.ndarray
     price: np.ndarray
+    #: Replayed legacy permission (1.0 / 0.0); ``NaN`` where there is none, see ``u_known``.
     u: np.ndarray
     #: Why the replay gave no ``u`` for a local day (``""`` when it did).
     u_reason: list[str]
@@ -245,6 +263,16 @@ class ClimateData:
     @property
     def n(self) -> int:
         return int(self.starts_us.size)
+
+    @property
+    def u_known(self) -> np.ndarray:
+        """Slots with a replayed ``u``; the only slots on which u-driven code may read it."""
+        return np.isfinite(self.u)
+
+    @property
+    def day_u_known(self) -> np.ndarray:
+        """Per local day: ``True`` when the replay gave a schedule."""
+        return np.array([r == "" for r in self.u_reason], dtype=bool)
 
     @property
     def q_heat_kw(self) -> np.ndarray:
@@ -313,6 +341,49 @@ def room_offsets(
             if sel.any():
                 out[i, hour] = float(np.median(diff[sel]))
     return out
+
+
+def debias_outdoor(
+    t_out: np.ndarray,
+    compressor_freq: np.ndarray,
+    *,
+    min_off_slots: int,
+    max_gap_slots: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Outdoor temperature without the compressor's own influence.
+
+    A slot is *valid* when the compressor was off (mean frequency exactly 0, known) in the slot and
+    in the *min_off_slots* slots before it, and the reading is known.  Between valid slots the
+    series is interpolated linearly in time when at most *max_gap_slots* slots lie between them;
+    a longer run, and anything before the first or after the last valid slot, is ``NaN``.
+
+    Returns ``(debiased, valid, interpolated)``.
+    """
+    t = np.asarray(t_out, dtype=np.float64)
+    freq = np.asarray(compressor_freq, dtype=np.float64)
+    n = t.size
+    with np.errstate(invalid="ignore"):
+        off = np.isfinite(freq) & (freq == 0.0)
+    ok = off.copy()
+    for k in range(1, min_off_slots + 1):
+        before = np.zeros(n, dtype=bool)
+        before[k:] = off[:-k]
+        ok &= before
+    valid = ok & np.isfinite(t)
+    out = np.full(n, np.nan)
+    out[valid] = t[valid]
+    idx = np.flatnonzero(valid)
+    if idx.size >= 2:
+        slots = np.arange(n)
+        nxt = np.searchsorted(idx, slots)
+        inside = (nxt > 0) & (nxt < idx.size) & ~valid
+        gap = np.zeros(n, dtype=np.int64)
+        gap[inside] = idx[nxt[inside]] - idx[nxt[inside] - 1] - 1
+        fill = inside & (gap <= max_gap_slots)
+        out[fill] = np.interp(slots[fill], idx, t[idx])
+    else:
+        fill = np.zeros(n, dtype=bool)
+    return out, valid, fill
 
 
 def dataset_prices(dataset_table: pa.Table, starts_us: np.ndarray) -> np.ndarray:
@@ -491,21 +562,32 @@ def build_climate_data(
         "hp_cool_kwh", "hp_cool_out_kwh", sig.cooling.min_electric_kwh, sig.cooling.min_thermal_kwh
     )
 
-    margin = sig.valve.open_margin_k
+    margin = sig.valve.inferred_state_margin_k
     with np.errstate(invalid="ignore"):
         valve_open = {r: room_temp[r] < room_setpoint[r] - margin for r in ROOMS}
+    step_min = SLOT_SECONDS // 60
+    t_out_debiased, t_out_valid, t_out_interpolated = debias_outdoor(
+        t_out,
+        col("compressor_freq_mean"),
+        min_off_slots=sig.t_out_debias.min_off_minutes // step_min,
+        max_gap_slots=int(sig.t_out_debias.max_gap_hours * 60 // step_min),
+    )
 
     # --- training filters (True = drop the slot) ----------------------------------------------
     flt = config.filters
     required = [
         np.isfinite(t_air),
         np.isfinite(comfort_sp).all(axis=0),
-        np.isfinite(t_out),
         np.isfinite(q_heat),
         dhw_known,
         cooling_known,
     ]
     unknown = ~np.logical_and.reduce(required) if flt.drop_unknown_quality else np.zeros(n, bool)
+    # kept apart from unknown_quality: a long compressor run leaves T_out unknown by design, and
+    # diagnostics that do not need T_out must not inherit that
+    outdoor_unknown = (
+        ~np.isfinite(t_out_debiased) if flt.drop_unknown_quality else np.zeros(n, bool)
+    )
 
     window_open = np.zeros(n, dtype=bool)
     k = flt.window_open.slots
@@ -539,6 +621,7 @@ def build_climate_data(
 
     drop = {
         "unknown_quality": unknown,
+        "outdoor_unknown": outdoor_unknown,
         "window_open": window_open,
         "valves_shut": valves_shut,
         "thermostat_outage": outage,
@@ -566,13 +649,15 @@ def build_climate_data(
         room_temp=room_temp,
         room_setpoint=room_setpoint,
         t_air=t_air,
-        room_offsets=room_offsets(room_temp, comfort, t_air, local_hour, train),
         t_out=t_out,
+        t_out_debiased=t_out_debiased,
+        t_out_valid=t_out_valid,
+        t_out_interpolated=t_out_interpolated,
         q_heat_kwh=q_heat,
         e_heat_kwh=e_heat,
         dhw=dhw,
         cooling=cooling,
-        valve_open=valve_open,
+        valve_open_inferred=valve_open,
         solar=solar_proxy(starts_us + SLOT_US // 2, site.latitude, site.longitude),
         price=price,
         u=u,
