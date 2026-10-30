@@ -21,6 +21,7 @@ from battery_optimizer.extract_prom import (
     ENTITY_SPECS,
     FEATURE_ENTITY_IDS,
     compute_series_key,
+    resolve_entity_specs,
 )
 from battery_optimizer.features import (
     FeatureError,
@@ -685,8 +686,10 @@ class TestCounterDelta:
         )
         assert cols["starts_quality"][1] == "unknown"
         assert np.isnan(cols["starts_delta"][1])
-        # the 485 increase accrued across the gap is attributed to no slot
-        assert np.nansum(cols["starts_delta"]) < 40.0
+        # slot 0 holds the 15 increases of its 15 covered minutes; slot 3 has 9 of its 15
+        # minutes covered (unknown), and the 485 increase accrued across the gap is in no slot
+        assert np.nansum(cols["starts_delta"]) == pytest.approx(15.0)
+        assert cols["starts_delta"][0] == pytest.approx(15.0)
 
     def test_no_samples_is_unknown(self) -> None:
         cols = signal_columns(
@@ -784,7 +787,9 @@ class TestBuildClimateFeatures:
         assert table.column("hp_cool_kwh").null_count == table.num_rows
         assert set(table.column("hp_cool_quality").to_pylist()) == {"unknown"}
         missing = manifest["quality"]["entities_without_samples"]
-        assert f"{OFFICE_A}#{TARGET}" in missing
+        assert f"{OFFICE_A}#setpoint" in missing
+        # every name is a token `extract --entities` accepts
+        assert resolve_entity_specs(missing)
         assert "sensor.aquarea_cool_power_consumed" in missing
         assert ROOM not in missing
 
@@ -827,6 +832,7 @@ class TestBuildClimateFeatures:
         assert table.column("compressor_freq_mean").to_pylist()[1] == pytest.approx(40.0)
         # from the earlier feature extraction (heat power 0 W, then 800 W; climate_enable on)
         assert table.column("hp_heat_kwh").to_pylist()[5] == pytest.approx(0.2)
+        assert table.column("servers_kwh").to_pylist()[1] == pytest.approx(0.06)
         assert table.column("climate_enable_at_start").to_pylist()[1] == 1.0
         assert len(manifest["inputs"]["raw_extraction_ids"]) == 2
         assert (
@@ -849,9 +855,19 @@ class TestBuildClimateFeatures:
         _table, manifest = load_features(self._build(climate_dir))
         assert set(manifest["quality"]["cop_check"]) == {"heat", "dhw", "cool"}
 
-    def test_the_main_meter_check_needs_the_default_set(self, climate_dir: Path) -> None:
-        with pytest.raises(FeatureError, match="default signal set"):
-            self._build(climate_dir, dataset=str(climate_dir))
+    def test_the_main_meter_check_needs_the_servers_and_heat_pump_signals(
+        self, climate_dir: Path
+    ) -> None:
+        needed = {"servers_kwh", "hp_heat_kwh", "hp_dhw_kwh", "hp_cool_kwh"}
+        assert needed <= set(features.feature_schema(features.CLIMATE_SIGNALS).names)
+        with pytest.raises(FeatureError, match="servers and heat-pump power"):
+            build_features(
+                data_dir=str(climate_dir),
+                start=self.WINDOW[0],
+                end=self.WINDOW[1],
+                signals=features.CLIMATE_SIGNALS[:2],
+                dataset=str(climate_dir),
+            )
 
     def test_cli_selects_the_climate_set(
         self, climate_dir: Path, capsys: pytest.CaptureFixture[str]

@@ -147,6 +147,15 @@ class Signal:
         """Key of this signal's raw series: the entity, or ``entity#metric`` when pinned."""
         return self.entity if self.metric is None else f"{self.entity}#{self.metric}"
 
+    @property
+    def extract_key(self) -> str:
+        """The ``extract --entities`` token for this signal's series (e.g. ``entity#setpoint``)."""
+        if self.metric is not None:
+            for key, spec in ENTITY_SPECS.items():
+                if spec.entity_id == self.entity and spec.metric == self.metric:
+                    return key
+        return self.entity
+
     def columns(self) -> tuple[str, ...]:
         if self.kind == KIND_POWER:
             return (f"{self.alias}_kwh", f"{self.alias}_coverage", f"{self.alias}_quality")
@@ -205,8 +214,9 @@ def _room_signals() -> tuple[Signal, ...]:
 
 
 #: The climate feature set: rooms, heat-pump water side, compressor, thermal and electric energy
-#: (heating, hot water and cooling), the aerothermal branch and the control states.  The power
-#: signals reuse the default aliases; a ``*_delta`` column is a counter's increase per slot.
+#: (heating, hot water and cooling), the aerothermal branch, the servers circuit (an internal
+#: gain of office A) and the control states.  The power signals reuse the default aliases;
+#: a ``*_delta`` column is a counter's increase per slot.
 CLIMATE_SIGNALS: tuple[Signal, ...] = (
     *_room_signals(),
     Signal("sensor.aquarea_outside_ambient_temperature", "outdoor_temp", KIND_TEMPERATURE),
@@ -217,6 +227,7 @@ CLIMATE_SIGNALS: tuple[Signal, ...] = (
     Signal("sensor.aquarea_compressor_frequency", "compressor_freq", KIND_GAUGE),
     Signal("sensor.aquarea_compressor_start_stop_counter", "compressor_starts", KIND_COUNTER_DELTA),
     Signal("sensor.aquarea_pump_flow", "pump_flow", KIND_GAUGE),
+    Signal("sensor.shellypmmini_servers_power", "servers", KIND_POWER),
     Signal("sensor.aquarea_heat_power_consumed", "hp_heat", KIND_POWER),
     Signal("sensor.aquarea_dhw_power_consumed", "hp_dhw", KIND_POWER),
     Signal("sensor.aquarea_cool_power_consumed", "hp_cool", KIND_POWER),
@@ -338,6 +349,9 @@ def counter_rates(t: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, int, i
     is the value read after it, as in Prometheus ``increase``.  Any other decrease is a
     **rollback** (the energy counters of the live archive slip back by 0.03 to 0.6 kWh at a
     time): the span adds nothing, and treating it as a reset would add the whole counter value.
+    A rollback is taken as a permanent correction, not a glitch: in the live archive each one is
+    a single step down, after which the counter climbs again in its normal small steps (it needs
+    8 to 449 minutes to regain the old level), so the climb is real consumption and is counted.
     The returned rates have one entry per sample (the last one is unused, like the value of the
     last sample of a power series) so they can be integrated with :func:`integrate_slots`; a
     span's integral is then exactly its increase.
@@ -953,10 +967,11 @@ def build_features(
         raise FeatureError("max_gap_seconds must be > 0")
     if not 0.0 < min_coverage <= 1.0:
         raise FeatureError("min_coverage must be in (0, 1]")
-    if dataset is not None and "servers_kwh" not in feature_schema(signals).names:
+    needed = {"servers_kwh", *(f"{alias}_kwh" for alias in HEAT_PUMP_INPUT_ALIASES)}
+    if dataset is not None and not needed <= set(feature_schema(signals).names):
         raise FeatureError(
-            "--dataset checks servers + heat pump against the main meter and needs the "
-            "default signal set"
+            "--dataset checks servers + heat pump against the main meter and needs the servers "
+            "and heat-pump power signals in the signal set"
         )
     root = resolve_data_dir(data_dir)
     t_start = parse_utc(start, name="start")
@@ -999,7 +1014,7 @@ def build_features(
             for sig in signals
             if sig.source in series
         },
-        "entities_without_samples": [s.source for s in signals if s.source not in series],
+        "entities_without_samples": [s.extract_key for s in signals if s.source not in series],
         "cop_check": cop_check(table),
     }
 
@@ -1032,7 +1047,7 @@ def build_features(
         ],
         "quality": quality,
     }
-    if signals is CLIMATE_SIGNALS:
+    if signals == CLIMATE_SIGNALS:
         manifest["climate"] = {
             "rooms": {
                 room: {"entity": entity, "comfort": room not in COMFORT_EXCLUDED_ROOMS}
