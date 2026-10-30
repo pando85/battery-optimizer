@@ -289,8 +289,24 @@ because the absence of an unregistered metric proves nothing about hardware.
 :func:`build_dataset` therefore takes an explicit ``battery_absent`` assumption
 (default ``True``, the compatibility-preserving configuration) that is recorded
 in the build manifest and reported, never silently derived from detection.  When
-detection *does* find battery telemetry the build refuses: gross load would no
-longer equal the feed meter and reconstruction is unimplemented (ADR-0003).
+detection *does* find battery telemetry with no recorded commissioning instant the build
+refuses: gross load would no longer equal the feed meter (ADR-0003).
+
+Once the battery runs (``battery.commissioned_at`` in ``config/service.yaml``)
+------------------------------------------------------------------------------
+Channel 1 is then **net** grid exchange: charging would be stored as household load and
+discharge would hide inside it.  A window that reaches the commissioning instant therefore
+reads the battery AC charge and discharge energy counters (``entities.battery_charge_energy``
+and ``entities.battery_discharge_energy``, the names the live service already uses) and every
+interval at or after that instant gets ``gross = raw_grid + charge - discharge``
+(:func:`reconstruct_gross_load`, the arithmetic of ``service/history.py``) with
+``battery_absent=False``.  The no-battery assumption never covers such an interval: when a
+counter is unknown the interval is null with ``energy_quality="battery_counters_missing"``
+(or ``"battery_gross_negative"`` when the meters disagree), and when the counters are not
+configured or not in the archive at all the build raises
+:class:`BatteryCountersMissingError` instead of publishing.  A window that ends before the
+commissioning instant is built exactly as before: same rows, same manifest, same
+``dataset_id`` for the same code and archive.
 
 Deterministic output
 --------------------
@@ -326,6 +342,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from battery_optimizer.battery_telemetry import BatteryTelemetry, load_battery_telemetry
 from battery_optimizer.config import (
     TariffPeriods,
     load_config,
@@ -538,13 +555,14 @@ EXPORT_CHANNEL_PROVENANCE_NOTE = (
 """Recorded beside the measured value range so the untested sign is visible."""
 
 BATTERY_TELEMETRY_ENTITIES: tuple[str, ...] = ()
-"""SEAM: battery charge/discharge counters, once a battery exists.
+"""Static registry of battery telemetry entities for windows before commissioning.
 
-Empty because no battery telemetry has been registered.  An empty registry means
-battery presence is **unknown**, not proven absent — see
-:func:`detect_battery_active` and :func:`build_dataset`'s ``battery_absent``
-assumption.  Adding an entity here is not by itself enough; :func:`resolve_gross_load`
-still refuses to equate net grid with gross load.
+Empty because the real counter ids are unknown until installation: they are configuration
+(``entities.battery_charge_energy`` / ``entities.battery_discharge_energy`` of
+``config/service.yaml``, read through :mod:`battery_optimizer.battery_telemetry`) and apply to
+windows that reach ``battery.commissioned_at``.  An empty registry means battery presence is
+**unknown**, not proven absent — see :func:`detect_battery_active` and
+:func:`build_dataset`'s ``battery_absent`` assumption.
 """
 
 # Categorical values (allowed sets documented in ``schemas.py``).
@@ -552,6 +570,8 @@ ENERGY_MEASURED = "measured"
 ENERGY_GAP_PARTIAL = "gap_partial"
 ENERGY_GAP_TOTAL_UNKNOWN = "gap_total_unknown"
 ENERGY_COUNTER_RESET_BRIDGED = "counter_reset_bridged"
+ENERGY_BATTERY_COUNTERS_MISSING = "battery_counters_missing"
+ENERGY_BATTERY_GROSS_NEGATIVE = "battery_gross_negative"
 ALLOCATION_EXACT = "exact"
 ALLOCATION_ESTIMATED_BOUNDARY = "estimated_boundary"
 ALLOCATION_UNKNOWN_GAP = "unknown_gap"
@@ -593,6 +613,15 @@ class ConflictingSampleError(BuildError):
 
 class GridSeriesMissingError(BuildError):
     """No usable whole-home counter samples exist for the requested window."""
+
+
+class BatteryCountersMissingError(BuildError):
+    """The window reaches the battery commissioning instant but its counters cannot cover it.
+
+    After commissioning the whole-home feed is net grid exchange, so the no-battery
+    assumption is refused outright and gross load can only come from the battery AC
+    counters (:func:`reconstruct_gross_load`).
+    """
 
 
 class ReconciliationError(BuildError):
@@ -1996,52 +2025,106 @@ def align_prices(
 # ---------------------------------------------------------------------------
 
 
-def detect_battery_active(entities_seen: Iterable[str]) -> bool | None:
+def detect_battery_active(
+    entities_seen: Iterable[str], registry: Sequence[str] | None = None
+) -> bool | None:
     """SEAM: report battery telemetry presence in the raw archive, or ``None``.
 
     A battery can only be reported *present* (``True``) when a registered
     telemetry entity is actually seen, and *absent* (``False``) only when a
-    non-empty :data:`BATTERY_TELEMETRY_ENTITIES` registry saw **none** of its
-    entities.  With an empty registry the absence of a metric that was never
-    registered proves nothing about the hardware, so this returns ``None``
-    ("unknown") instead of silently asserting the install has no battery.
+    non-empty registry saw **none** of its entities (*registry* defaults to
+    :data:`BATTERY_TELEMETRY_ENTITIES`).  With an empty registry the absence of a
+    metric that was never registered proves nothing about the hardware, so this
+    returns ``None`` ("unknown") instead of silently asserting the install has no
+    battery.
 
     The caller must treat ``None`` as unknown and either accept an explicit
     ``battery_absent`` assumption or refuse to equate gross load with the raw
     grid meter — never invent an absence.
     """
-    if not BATTERY_TELEMETRY_ENTITIES:
+    registry = BATTERY_TELEMETRY_ENTITIES if registry is None else tuple(registry)
+    if not registry:
         return None  # empty registry: battery presence is unknown, not proven absent
     seen = set(entities_seen)
-    return bool(seen & set(BATTERY_TELEMETRY_ENTITIES))
+    return bool(seen & set(registry))
 
 
 def resolve_gross_load(raw_grid_kwh: float | None, *, battery_active: bool) -> float | None:
-    """Reconstruct gross household load from the raw grid reading.
+    """Gross household load for an interval **with no battery**: the raw grid reading.
 
     With **no battery** the feed meter *is* the household load, so gross equals
-    raw grid exactly.  That identity is a property of the current installation,
-    not a general truth: once a battery dispatches, channel 1 measures net grid
-    exchange and gross load must be reconstructed as
-    ``raw_grid + charge - discharge`` from battery AC telemetry (or the interval
-    must be excluded as unusable for gross-load analysis, per ADR-0003 §data
-    contract).  Rather than let that silently become wrong, this seam raises.
+    raw grid exactly.  That identity is a property of the installation before the
+    battery is commissioned, not a general truth: once a battery dispatches,
+    channel 1 measures net grid exchange and gross load is
+    ``raw_grid + charge - discharge`` from the battery AC counters, which is
+    :func:`reconstruct_gross_load`'s job.  Rather than let the identity silently
+    become wrong, this seam raises when asked for it under an active battery.
 
     Nested submeters (channel 2, servers) are **not** added here — they are
     already inside channel 1.
 
     Raises:
-        NotImplementedError: a battery is active and gross-load reconstruction
-            telemetry is not implemented yet.
+        NotImplementedError: a battery is active; use :func:`reconstruct_gross_load`.
     """
     if battery_active:
         raise NotImplementedError(
-            "gross-load reconstruction with an active battery is not implemented: "
-            "channel 1 then measures net grid exchange, so gross_kwh must be rebuilt from "
-            "battery AC charge/discharge telemetry (or the interval flagged unusable). "
-            f"See {__name__}.BATTERY_TELEMETRY_ENTITIES and ADR-0003 §data contract."
+            "gross-load reconstruction with an active battery needs the battery AC "
+            "charge/discharge counters: channel 1 then measures net grid exchange, so "
+            "gross_kwh must come from reconstruct_gross_load(), never from the raw grid "
+            f"reading. See {__name__}.reconstruct_gross_load and ADR-0003 §data contract."
         )
     return raw_grid_kwh
+
+
+_ALLOCATION_RANK = {ALLOCATION_EXACT: 0, ALLOCATION_ESTIMATED_BOUNDARY: 1}
+
+
+def reconstruct_gross_load(
+    grid: IntervalEnergy, charge: IntervalEnergy, discharge: IntervalEnergy
+) -> tuple[float | None, str, str]:
+    """Gross load of one interval once the battery runs: ``raw_grid + charge - discharge``.
+
+    Same convention as ``service/history.py``: the grid counter is net exchange with the
+    grid, the charge counter is AC energy that went into the battery (not house load) and
+    the discharge counter is AC energy it delivered (house load the grid did not supply).
+    All three are counter deltas on the same interval, so an interval where any of them is
+    unknown has no gross load and is never filled from the other two.
+
+    Returns ``(gross_kwh, energy_quality, allocation_quality)``:
+
+    * a grid gap or reset keeps the grid's own quality (that reason is already explicit);
+    * a missing battery counter gives :data:`ENERGY_BATTERY_COUNTERS_MISSING`;
+    * a negative reconstructed load (the three meters disagree about where inside the
+      interval the energy fell) is dropped, like the service does, as
+      :data:`ENERGY_BATTERY_GROSS_NEGATIVE` — never clamped to zero;
+    * otherwise the weakest quality of the three inputs.
+    """
+    if grid.raw_grid_kwh is None:
+        return None, grid.energy_quality, grid.allocation_quality
+    if charge.raw_grid_kwh is None or discharge.raw_grid_kwh is None:
+        return None, ENERGY_BATTERY_COUNTERS_MISSING, grid.allocation_quality
+    gross = grid.raw_grid_kwh + charge.raw_grid_kwh - discharge.raw_grid_kwh
+    if gross < 0.0:
+        return None, ENERGY_BATTERY_GROSS_NEGATIVE, grid.allocation_quality
+    inputs = (grid, charge, discharge)
+    energy = (
+        ENERGY_GAP_PARTIAL
+        if any(i.energy_quality == ENERGY_GAP_PARTIAL for i in inputs)
+        else ENERGY_MEASURED
+    )
+    allocation = max(
+        (i.allocation_quality for i in inputs), key=lambda q: _ALLOCATION_RANK.get(q, 2)
+    )
+    return gross, energy, allocation
+
+
+@dataclass(frozen=True)
+class BatteryAllocation:
+    """The battery AC counters allocated onto the interval grid, from the commissioning instant."""
+
+    commissioned_at: datetime
+    charge: Sequence[IntervalEnergy]
+    discharge: Sequence[IntervalEnergy]
 
 
 # ---------------------------------------------------------------------------
@@ -2345,8 +2428,12 @@ def load_raw_inputs(
     window_start: datetime,
     window_end: datetime,
     lookback: timedelta = DEFAULT_LOOKBACK,
+    battery_entities: Sequence[str] = (),
 ) -> RawInputs:
     """Resolve raw timelines for *entities* through the successful raw manifests.
+
+    *battery_entities* only labels the entity audit (``used_for="battery_counter"``); the
+    caller still lists them in *entities* to have their samples read.
 
     Coverage is read from ``data_dir/manifests/*.json`` (``source ==
     "prometheus"`` only), never by globbing the part directory: an orphaned part
@@ -2509,7 +2596,11 @@ def load_raw_inputs(
         item["used_for"] = (
             "grid"
             if key[0] in GRID_COUNTER_ENTITIES
-            else ("price" if key[0] in PRICE_ENTITIES else "not_used")
+            else (
+                "price"
+                if key[0] in PRICE_ENTITIES
+                else ("battery_counter" if key[0] in battery_entities else "not_used")
+            )
         )
         entity_audit.append(item)
 
@@ -2620,7 +2711,7 @@ def build_interval_table(
     gap_factor: float = DEFAULT_GAP_FACTOR,
     gap_threshold_seconds: float | None = None,
     price_staleness_seconds: float = DEFAULT_PRICE_STALENESS_SECONDS,
-    battery_active: bool = False,
+    battery: BatteryAllocation | None = None,
 ) -> tuple[pa.Table, SpanLedger, PriceLedger]:
     """Assemble the ``ANALYSIS_INTERVAL`` table for one window (no filesystem).
 
@@ -2628,11 +2719,13 @@ def build_interval_table(
     be attributed to a single interval, and the :class:`PriceLedger` of
     per-hour price statistics for the build manifest.
 
-    ``battery_absent`` (the output column) records the caller's decision that no
-    battery is dispatching, so gross load may equal the raw feed reading.  It is
-    always the *inverse* of ``battery_active`` here because a build only reaches
-    this function when absence is either detected as a fact or explicitly assumed
-    (see :func:`build_dataset`).
+    ``battery_absent`` (the output column) records that no battery is dispatching in
+    the interval, so gross load equals the raw feed reading.  Without *battery* that is
+    every interval (absence detected as a fact or explicitly assumed, see
+    :func:`build_dataset`).  With *battery*, every interval at or after
+    ``battery.commissioned_at`` is ``battery_absent=False`` and its gross load is
+    :func:`reconstruct_gross_load`, or null with an explicit ``energy_quality`` reason;
+    earlier intervals are unchanged.
 
     Raises:
         BuildError: ``timezone`` is unknown.
@@ -2669,13 +2762,22 @@ def build_interval_table(
 
     rows: dict[str, list[object]] = {name: [] for name in ANALYSIS_INTERVAL.names}
     dst_cache: dict[date, str | None] = {}
-    for i0, energy, price_align in zip(interval_starts, energies, prices, strict=True):
+    for k, (i0, energy, price_align) in enumerate(
+        zip(interval_starts, energies, prices, strict=True)
+    ):
         i1 = i0 + timedelta(seconds=interval_seconds)
         local = i0.astimezone(timezone)
         local_day = local.date()
         if local_day not in dst_cache:
             dst_cache[local_day] = dst_transition_for(local_day, timezone)
-        gross = resolve_gross_load(energy.raw_grid_kwh, battery_active=battery_active)
+        battery_runs = battery is not None and i0 >= battery.commissioned_at
+        if battery is not None and battery_runs:
+            gross, energy_quality, allocation_quality = reconstruct_gross_load(
+                energy, battery.charge[k], battery.discharge[k]
+            )
+        else:
+            gross = resolve_gross_load(energy.raw_grid_kwh, battery_active=False)
+            energy_quality, allocation_quality = energy.energy_quality, energy.allocation_quality
         rows["interval_start"].append(i0)
         rows["interval_end"].append(i1)
         rows["tz_local"].append(tz_name)
@@ -2684,9 +2786,9 @@ def build_interval_table(
         rows["dst_transition"].append(dst_cache[local_day])
         rows["raw_grid_kwh"].append(energy.raw_grid_kwh)
         rows["gross_kwh"].append(gross)
-        rows["battery_absent"].append(not battery_active)
-        rows["energy_quality"].append(energy.energy_quality)
-        rows["allocation_quality"].append(energy.allocation_quality)
+        rows["battery_absent"].append(not battery_runs)
+        rows["energy_quality"].append(energy_quality)
+        rows["allocation_quality"].append(allocation_quality)
         rows["sample_count"].append(energy.sample_count)
         rows["gap_seconds"].append(energy.gap_seconds)
         rows["price_eur_per_kwh"].append(price_align.value)
@@ -2752,7 +2854,9 @@ def _meter_identity(entity_audit: Sequence[dict[str, object]]) -> dict[str, obje
     }
 
 
-def disclose_exclusions(inputs: RawInputs) -> dict[str, object]:
+def disclose_exclusions(
+    inputs: RawInputs, battery_entities: Sequence[str] = ()
+) -> dict[str, object]:
     """Split the configured exclusions into *seen and dropped* vs *never present*.
 
     A manifest that lists an entity under "excluded" asserts that the pipeline
@@ -2766,7 +2870,7 @@ def disclose_exclusions(inputs: RawInputs) -> dict[str, object]:
     """
     seen = set(inputs.observed_entities)
     declared = set(inputs.declared_entities)
-    used = set(GRID_COUNTER_ENTITIES) | set(PRICE_ENTITIES)
+    used = set(GRID_COUNTER_ENTITIES) | set(PRICE_ENTITIES) | set(battery_entities)
     configured = {entity: "nested_submeter" for entity in NESTED_SUBMETER_ENTITIES}
     configured.update({entity: "dead_duplicate" for entity in sorted(DEAD_DUPLICATE_ENTITY_IDS)})
 
@@ -2841,14 +2945,27 @@ def _build_params(
     battery_detection: str,
     exclusions: dict[str, object],
     reconciliation_tolerance_kwh: float,
+    battery: BatteryTelemetry | None = None,
 ) -> dict[str, object]:
     """The ``params`` block for the dataset id and both manifests.
+
+    *battery* is given only for a window that reaches the commissioning instant; it adds the
+    counters and the instant to the params (and so to the id).  A window before commissioning
+    gets exactly the params it had before the battery code existed.
 
     Every numeric knob carries an explicit unit in its key name so a reader (or a
     report) cannot mistake a seconds value for milliseconds or a dimensionless
     factor for a threshold.
     """
+    battery_params: dict[str, object] = {}
+    if battery is not None and battery.commissioned_at is not None:
+        battery_params = {
+            "battery_commissioned_at": iso_z(battery.commissioned_at),
+            "battery_charge_entity": battery.charge_entity,
+            "battery_discharge_entity": battery.discharge_entity,
+        }
     return {
+        **battery_params,
         "timezone": tz_name,
         "interval_seconds": interval_seconds,
         "gap_factor_intervals": gap_factor,
@@ -2864,7 +2981,9 @@ def _build_params(
         "battery_absent": battery_absent,
         "battery_absent_is_assumption": battery_detection == BATTERY_UNKNOWN,
         "battery_detection": battery_detection,
-        "battery_telemetry_entities": list(BATTERY_TELEMETRY_ENTITIES),
+        "battery_telemetry_entities": list(
+            battery.entities if battery is not None else BATTERY_TELEMETRY_ENTITIES
+        ),
         # Exclusions are a *measurement of this build's inputs*, not a static
         # list: only entities actually observed and deliberately dropped are
         # claimed as excluded (see :func:`disclose_exclusions`).
@@ -2887,7 +3006,52 @@ def _id_params(params: dict[str, object]) -> dict[str, object]:
             "reconciliation_tolerance_kwh",
             "battery_absent",
             "battery_detection",
+            # Present only for a window that reaches the commissioning instant.
+            "battery_commissioned_at",
+            "battery_charge_entity",
+            "battery_discharge_entity",
         )
+        if key in params
+    }
+
+
+def _battery_reconstruction_manifest(
+    table: pa.Table,
+    battery: BatteryAllocation,
+    telemetry: BatteryTelemetry,
+    reconciliations: dict[str, dict[str, object]],
+    interval_seconds: int,
+) -> dict[str, object]:
+    """What the post-commissioning intervals of this build rest on, and which are unusable."""
+    starts = table.column("interval_start").to_pylist()
+    gross = table.column("gross_kwh").to_pylist()
+    quality = table.column("energy_quality").to_pylist()
+    after = [i for i, start in enumerate(starts) if start >= battery.commissioned_at]
+    reconstructed = [i for i in after if gross[i] is not None]
+    unusable = [i for i in after if gross[i] is None]
+    reasons = Counter(quality[i] for i in unusable)
+    return {
+        "rule": "gross_kwh = raw_grid_kwh + charge_kwh - discharge_kwh, per interval",
+        "commissioned_at": iso_z(battery.commissioned_at),
+        "charge_entity": telemetry.charge_entity,
+        "discharge_entity": telemetry.discharge_entity,
+        "intervals_at_or_after_commissioning": len(after),
+        "reconstructed_intervals": len(reconstructed),
+        "unusable_intervals": len(unusable),
+        "unusable_by_energy_quality": dict(sorted(reasons.items())),
+        "unusable_ranges": _merge_contiguous(
+            [to_micros(starts[i]) for i in unusable], interval_seconds * 1_000_000
+        ),
+        "counter_reconciliation": reconciliations,
+        "counter_rule": (
+            "battery counters use the grid counter's span rules: any decrease is a counter "
+            "reset and nulls the intervals it touches (the stricter form of the rollback rule "
+            "of features.counter_rates, which adds nothing for a small decrease)"
+        ),
+        "assumption_refused": (
+            "the no-battery assumption does not apply from commissioned_at on; "
+            "battery_absent is False for these intervals"
+        ),
     }
 
 
@@ -2909,6 +3073,7 @@ def build_dataset(
     price_staleness_seconds: float = DEFAULT_PRICE_STALENESS_SECONDS,
     battery_absent: bool = True,
     reconciliation_tolerance_kwh: float = DEFAULT_RECONCILIATION_TOLERANCE_KWH,
+    battery: BatteryTelemetry | None = None,
 ) -> Path:
     """Build the 15-minute analysis dataset from the raw archive.
 
@@ -2927,7 +3092,8 @@ def build_dataset(
             the build manifest and reported — never silently derived from the
             archive, because an unregistered battery metric proves nothing.  When
             the archive *does* carry registered battery telemetry the build
-            refuses regardless of this flag.
+            refuses regardless of this flag.  It never covers an interval at or
+            after the battery commissioning instant (see *battery*).
         reconciliation_tolerance_kwh: Largest unexplained energy the build will
             accept, in kWh.  The identity
             ``counter endpoint == Σ allocated + Σ declared unattributed + residual``
@@ -2936,6 +3102,16 @@ def build_dataset(
             and belongs to no declared category, so the build is refused instead of
             publishing a dataset with a hole in it.  Defaults to
             :data:`DEFAULT_RECONCILIATION_TOLERANCE_KWH` (1 mWh).
+        battery: The battery AC counters and commissioning instant; ``None`` reads them
+            from ``config/service.yaml``
+            (:func:`~battery_optimizer.battery_telemetry.load_battery_telemetry`).
+            A window that ends at or before ``commissioned_at`` (or with none recorded)
+            ignores it: the dataset, its id and its manifest are what they were before
+            the battery code existed.  A window that reaches ``commissioned_at`` reads
+            the counters, and every interval from that instant on gets
+            ``gross = raw_grid + charge - discharge`` or is null with an explicit
+            ``energy_quality`` reason; if the counters are not configured or not in the
+            archive at all, the build is refused.
 
     Returns:
         The dataset directory (:class:`~pathlib.Path`).
@@ -2943,11 +3119,12 @@ def build_dataset(
     Raises:
         BuildError: no referenced parts, a corrupt/missing/traversing part, a
             schema mismatch, an overlap/conflict, a missing grid counter, an
-            unknown timezone, or ``battery_absent=False`` with battery presence
+            unknown timezone, battery telemetry in the archive with no recorded
+            commissioning instant, or ``battery_absent=False`` with battery presence
             unknown (gross load cannot then be established).
+        BatteryCountersMissingError: the window reaches the commissioning instant and
+            the battery counters are not configured or have no samples.
         ReconciliationError: this build's own energy accounting did not close.
-        NotImplementedError: battery telemetry is detected (ADR-0003 gross-load
-            reconstruction is unimplemented).
         ValueError: a naive or inverted window bound.
         FileNotFoundError: tariff config not found.
     """
@@ -2968,12 +3145,19 @@ def build_dataset(
     except Exception as exc:
         raise BuildError(f"timezone {tz_name!r} is not usable: {exc}") from exc
 
+    battery_cfg = load_battery_telemetry() if battery is None else battery
+    # The configuration only matters to a window that reaches the commissioning instant; any
+    # earlier window is built exactly as it was before the battery code existed.
+    battery_window = battery_cfg.commissioned_at is not None and t_end > battery_cfg.commissioned_at
+    battery_entities = battery_cfg.entities if battery_window else ()
+
     inputs = load_raw_inputs(
         root,
-        entities=list(GRID_COUNTER_ENTITIES) + list(PRICE_ENTITIES),
+        entities=list(GRID_COUNTER_ENTITIES) + list(PRICE_ENTITIES) + list(battery_entities),
         window_start=t_start,
         window_end=t_end,
         lookback=lookback,
+        battery_entities=battery_entities,
     )
 
     grid_series = inputs.timeline(GRID_COUNTER_ENTITIES[0])
@@ -2985,34 +3169,58 @@ def build_dataset(
             "compute a delta, need at least 2"
         )
 
-    # Battery: detect, then reconcile with the explicit assumption.  Presence in
-    # the data is a hard refusal; unknown presence with an opted-out assumption is
-    # a refusal to invent gross load.
+    # Battery: detect, then reconcile with the explicit assumption.  Presence in the data
+    # is a hard refusal unless the commissioning instant says how to read it; unknown
+    # presence with an opted-out assumption is a refusal to invent gross load.
     seen_entities = [str(item["entity"]) for item in inputs.entity_audit]
-    battery_detected = detect_battery_active(seen_entities)
-    if battery_detected is True:
-        raise NotImplementedError(
-            "battery telemetry detected in the archive — gross-load reconstruction is not "
-            "implemented; channel 1 then measures net grid exchange (ADR-0003 §data contract)."
-        )
-    if battery_detected is None and not battery_absent:
-        raise BuildError(
-            "battery presence is unknown (no battery telemetry registered) and "
-            "battery_absent=False refuses to assume absence: gross load cannot be "
-            "established. Pass battery_absent=True to assume no battery, or register "
-            "BATTERY_TELEMETRY_ENTITIES so presence can be detected."
-        )
-    # Reaching here, absence is either a detected fact (False) or an explicit
-    # assumption (True).  gross == raw grid is then valid.
-    battery_detection = (
-        BATTERY_ABSENT if battery_detected is False else BATTERY_UNKNOWN
-    )  # detected present already raised
-    battery_active = False
+    battery_series: dict[str, StitchedSeries | None] = {}
+    if battery_window:
+        # From the commissioning instant the no-battery assumption is not available: the
+        # counters must exist, or there is no way to establish gross load.
+        assert battery_cfg.commissioned_at is not None
+        battery_series = {e: inputs.timeline(e) for e in battery_entities}
+        missing = sorted(e for e, ser in battery_series.items() if ser is None or len(ser) < 2)
+        if not battery_cfg.has_counters or missing:
+            raise BatteryCountersMissingError(
+                f"the window [{iso_z(t_start)}, {iso_z(t_end)}) reaches the battery "
+                f"commissioning instant {iso_z(battery_cfg.commissioned_at)}, after which "
+                "channel 1 is net grid exchange and the no-battery assumption is refused, but "
+                + (
+                    "no battery AC counters are configured (entities.battery_charge_energy and "
+                    "entities.battery_discharge_energy in config/service.yaml)"
+                    if not battery_cfg.has_counters
+                    else f"{', '.join(missing)} have fewer than 2 samples in the archive "
+                    "(extract them with `extract --entities`)"
+                )
+                + ". Gross load cannot be established, so no dataset is built."
+            )
+        battery_detection = BATTERY_PRESENT
+    else:
+        battery_detected = detect_battery_active(seen_entities)
+        if battery_detected is True or (
+            battery_cfg.commissioned_at is None and set(battery_cfg.entities) & set(seen_entities)
+        ):
+            raise BuildError(
+                "battery telemetry detected in the archive but this window does not reach a "
+                "recorded battery commissioning instant (battery.commissioned_at in "
+                "config/service.yaml): record it so gross load can be reconstructed from the "
+                "battery AC counters (ADR-0003 §data contract)."
+            )
+        if battery_detected is None and not battery_absent:
+            raise BuildError(
+                "battery presence is unknown (no battery telemetry registered) and "
+                "battery_absent=False refuses to assume absence: gross load cannot be "
+                "established. Pass battery_absent=True to assume no battery, or register "
+                "BATTERY_TELEMETRY_ENTITIES so presence can be detected."
+            )
+        # Reaching here, absence is either a detected fact (False) or an explicit
+        # assumption (True).  gross == raw grid is then valid.
+        battery_detection = BATTERY_ABSENT if battery_detected is False else BATTERY_UNKNOWN
 
     interval_starts = make_utc_grid(t_start, t_end, interval_seconds=interval_seconds)
     price_series = inputs.timeline(PRICE_ENTITIES[0])
     cfg_digest = config_hash(cfg_path)
-    exclusions = disclose_exclusions(inputs)
+    exclusions = disclose_exclusions(inputs, battery_entities)
     params = _build_params(
         tz_name=tz_name,
         interval_seconds=interval_seconds,
@@ -3024,6 +3232,7 @@ def build_dataset(
         battery_detection=battery_detection,
         exclusions=exclusions,
         reconciliation_tolerance_kwh=reconciliation_tolerance_kwh,
+        battery=battery_cfg if battery_window else None,
     )
     dataset_id = compute_dataset_id(
         part_hashes=inputs.lineage,
@@ -3034,6 +3243,31 @@ def build_dataset(
         window_end=t_end,
         params=_id_params(params),
     )
+
+    battery_allocation: BatteryAllocation | None = None
+    battery_reconciliations: dict[str, dict[str, object]] = {}
+    if battery_window:
+        assert battery_cfg.commissioned_at is not None
+        counters: dict[str, list[IntervalEnergy]] = {}
+        for entity in battery_entities:
+            series = battery_series[entity]
+            assert series is not None
+            counter_spans = counter_deltas(
+                series, gap_factor=gap_factor, gap_threshold_seconds=gap_threshold_seconds
+            )
+            counters[entity], counter_ledger = allocate_energy(
+                series, counter_spans, interval_starts, interval_seconds=interval_seconds
+            )
+            counter_reconciliation = counter_ledger.reconciliation(
+                tolerance_kwh=reconciliation_tolerance_kwh
+            )
+            require_reconciled(counter_reconciliation)
+            battery_reconciliations[entity] = counter_reconciliation.as_dict()
+        battery_allocation = BatteryAllocation(
+            commissioned_at=battery_cfg.commissioned_at,
+            charge=counters[str(battery_cfg.charge_entity)],
+            discharge=counters[str(battery_cfg.discharge_entity)],
+        )
 
     table, ledger, price_ledger = build_interval_table(
         grid=grid_series,
@@ -3046,7 +3280,7 @@ def build_dataset(
         gap_factor=gap_factor,
         gap_threshold_seconds=gap_threshold_seconds,
         price_staleness_seconds=price_staleness_seconds,
-        battery_active=battery_active,
+        battery=battery_allocation,
     )
     price_ledger.hour_timezone = tz_name
     # Fail before publishing, not after: a build whose energy does not close must
@@ -3173,6 +3407,10 @@ def build_dataset(
             "ranges": _merge_contiguous(excluded_us, interval_seconds * 1_000_000),
         },
     }
+    if battery_allocation is not None:
+        manifest["battery_reconstruction"] = _battery_reconstruction_manifest(
+            table, battery_allocation, battery_cfg, battery_reconciliations, interval_seconds
+        )
 
     # The dataset directory must hold no wall-clock value; refuse to leak one.
     build_manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True, default=str).encode(

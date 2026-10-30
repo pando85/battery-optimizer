@@ -38,6 +38,11 @@ import pytest
 
 from battery_optimizer import build as build_mod
 from battery_optimizer import schemas
+from battery_optimizer.battery_telemetry import (
+    BatteryTelemetry,
+    load_battery_telemetry,
+    parse_commissioned_at,
+)
 from battery_optimizer.build import (
     ALLOCATION_ESTIMATED_BOUNDARY,
     ALLOCATION_EXACT,
@@ -58,6 +63,7 @@ from battery_optimizer.build import (
     PRICE_MEASURED,
     PRICE_MISSING,
     PRICE_PERIOD_SECONDS,
+    BatteryCountersMissingError,
     BuildError,
     ConflictingSampleError,
     DeltaSpan,
@@ -111,6 +117,19 @@ JOB_NEW = "home-assistant"
 
 _T0 = datetime(2026, 1, 5, tzinfo=UTC)
 MADRID = ZoneInfo("Europe/Madrid")
+
+
+@pytest.fixture(autouse=True)
+def _no_battery_service_config(tmp_path_factory: pytest.TempPathFactory, monkeypatch) -> None:
+    """Keep the build tests independent of the repository's ``config/service.yaml``.
+
+    ``build_dataset`` reads the battery counters and commissioning instant from the service
+    config; once the real battery is configured there, a window after that date would
+    otherwise change what these synthetic archives mean.
+    """
+    empty = tmp_path_factory.mktemp("service-config") / "service.yaml"
+    empty.write_text("{}\n")
+    monkeypatch.setenv("BATTERY_OPTIMIZER_SERVICE_CONFIG", str(empty))
 
 
 def _labels(
@@ -1833,7 +1852,7 @@ class TestGrossLoadSeam:
         assert resolve_gross_load(None, battery_active=False) is None
 
     def test_resolve_gross_load_refuses_to_guess_with_a_battery(self) -> None:
-        """The equality is a property of today's installation, not a general truth."""
+        """The equality is a property of the pre-battery installation, not a general truth."""
         with pytest.raises(NotImplementedError, match="gross-load reconstruction"):
             resolve_gross_load(0.25, battery_active=True)
 
@@ -1917,8 +1936,444 @@ class TestGrossLoadSeam:
             ),
         ]
         write_raw_part(data_dir, rows)
-        with pytest.raises(NotImplementedError, match="ADR-0003"):
+        with pytest.raises(BuildError, match="commissioning instant"):
             build(data_dir, cfg, _T0, _T0 + timedelta(hours=1), lookback=timedelta(minutes=5))
+
+
+# ===========================================================================
+# 8b. Gross load once the battery runs (ADR-0006 risk 2)
+# ===========================================================================
+
+CHARGE = "sensor.test_battery_charge_energy"  # a test id, not an OmniBattery fact
+DISCHARGE = "sensor.test_battery_discharge_energy"
+
+#: Per 5-minute sample: grid net import, battery AC charge, battery AC discharge (kWh).
+GRID_STEP, CHARGE_STEP, DISCHARGE_STEP = 0.10, 0.04, 0.01
+
+
+def spans_in(out: list[dict[str, Any]], i: int) -> int:
+    """5-minute spans inside interval *i*: three, except the last (``[start, end)`` drops the
+    sample at ``end`` itself, so the span that closes the window is not read)."""
+    return 2 if i == len(out) - 1 else 3
+
+
+def battery_telemetry(
+    commissioned_at: datetime | None, *, counters: bool = True
+) -> BatteryTelemetry:
+    return BatteryTelemetry(
+        charge_entity=CHARGE if counters else None,
+        discharge_entity=DISCHARGE if counters else None,
+        commissioned_at=commissioned_at,
+    )
+
+
+def battery_archive(
+    data_dir: Path,
+    start: datetime,
+    end: datetime,
+    *,
+    charge_until: datetime | None = None,
+    counters: bool = True,
+    discharge_step: float = DISCHARGE_STEP,
+    discharge_rollback_at: int | None = None,
+) -> None:
+    """Grid, price and (optionally) battery counters, one aligned sample every 5 minutes.
+
+    ``charge_until`` stops the charge counter early to model a partial counter;
+    ``discharge_rollback_at`` makes the discharge counter slip back 0.03 kWh at that sample.
+    """
+    count = int((end - start).total_seconds() // 300) + 1
+    times = aligned_times(start, count, 300.0)
+
+    def counter(entity: str, step: float, n: int, rollback_at: int | None = None) -> list[Any]:
+        slip = lambda i: 0.03 if rollback_at is not None and i >= rollback_at else 0.0  # noqa: E731
+        return [
+            raw_row(entity, "energy_kwh", "kWh", times[i], 100.0 + step * i - slip(i))
+            for i in range(n)
+        ]
+
+    rows = counter_rows(start, count, per_sample=GRID_STEP, times=times)
+    hours = int((end - start).total_seconds() // 3600) + 1
+    rows += price_rows(start, {h: 0.1 for h in range(hours)}, per_minute=6, step_seconds=10.0)
+    if counters:
+        charge_n = count
+        if charge_until is not None:
+            charge_n = int((charge_until - start).total_seconds() // 300) + 1
+        rows += counter(CHARGE, CHARGE_STEP, charge_n)
+        rows += counter(DISCHARGE, discharge_step, count, discharge_rollback_at)
+    write_raw_part(data_dir, rows)
+
+
+class TestBatteryGrossLoad:
+    """``gross = raw_grid + charge - discharge`` from commissioning; refusal otherwise."""
+
+    def test_reconstruction_arithmetic(self, tmp_path: Path, data_dir: Path) -> None:
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=2)
+        battery_archive(data_dir, _T0, end)
+        table, manifest = build_rows(
+            data_dir, cfg, _T0, end, lookback=timedelta(minutes=5), battery=battery_telemetry(_T0)
+        )
+        out = rows_as_dicts(table)
+        assert len(out) == 8
+        for i, row in enumerate(out):
+            n = spans_in(out, i)  # whole 5-minute spans, each exactly contained
+            assert row["raw_grid_kwh"] == pytest.approx(n * GRID_STEP)
+            assert row["gross_kwh"] == pytest.approx(n * (GRID_STEP + CHARGE_STEP - DISCHARGE_STEP))
+            assert row["battery_absent"] is False
+            assert row["energy_quality"] == ENERGY_MEASURED
+            assert row["allocation_quality"] == ALLOCATION_EXACT
+        block = manifest["battery_reconstruction"]
+        assert block["reconstructed_intervals"] == 8
+        assert block["unusable_intervals"] == 0
+        assert block["charge_entity"] == CHARGE
+        assert manifest["params"]["battery_detection"] == "present"
+        assert manifest["params"]["battery_commissioned_at"] == build_mod.iso_z(_T0)
+        assert manifest["params"]["battery_telemetry_entities"] == [CHARGE, DISCHARGE]
+        used = {e["entity"]: e["used_for"] for e in manifest["entity_audit"]}
+        assert used[CHARGE] == used[DISCHARGE] == "battery_counter"
+        assert CHARGE not in manifest["input_exclusions"]["other_entities_seen_and_ignored"]
+
+    def test_intervals_before_commissioning_keep_the_no_battery_reading(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=2)
+        commissioned = _T0 + timedelta(hours=1)
+        battery_archive(data_dir, _T0, end)
+        table, manifest = build_rows(
+            data_dir,
+            cfg,
+            _T0,
+            end,
+            lookback=timedelta(minutes=5),
+            battery=battery_telemetry(commissioned),
+        )
+        for row in rows_as_dicts(table):
+            if row["interval_start"] < commissioned:
+                assert row["gross_kwh"] == row["raw_grid_kwh"]
+                assert row["battery_absent"] is True
+            else:
+                assert row["gross_kwh"] > row["raw_grid_kwh"]
+                assert row["battery_absent"] is False
+        assert manifest["battery_reconstruction"]["intervals_at_or_after_commissioning"] == 4
+
+    @pytest.mark.parametrize(
+        ("day", "intervals", "transition", "offset"),
+        [
+            (date(2026, 10, 25), 100, "fall_back", "+02:00"),
+            (date(2026, 3, 29), 92, "spring_forward", "+01:00"),
+        ],
+    )
+    def test_dst_days_reconstruct_every_interval(
+        self,
+        tmp_path: Path,
+        data_dir: Path,
+        day: date,
+        intervals: int,
+        transition: str,
+        offset: str,
+    ) -> None:
+        cfg = write_tariff(tmp_path)
+        start, end = local_day_utc_bounds(day)
+        battery_archive(data_dir, start, end)
+        # Commissioning at the local midnight, written with the local offset as an owner would.
+        commissioned = parse_commissioned_at(f"{day.isoformat()}T00:00:00{offset}")
+        assert commissioned == start
+        table, manifest = build_rows(
+            data_dir,
+            cfg,
+            start,
+            end,
+            lookback=timedelta(minutes=5),
+            battery=battery_telemetry(commissioned),
+        )
+        out = rows_as_dicts(table)
+        assert len(out) == intervals
+        assert {r["dst_transition"] for r in out} == {transition}
+        assert manifest["battery_reconstruction"]["reconstructed_intervals"] == intervals
+        raw = sum(r["raw_grid_kwh"] for r in out)
+        gross = sum(r["gross_kwh"] for r in out)
+        spans = sum(spans_in(out, i) for i in range(intervals))
+        assert gross - raw == pytest.approx(spans * (CHARGE_STEP - DISCHARGE_STEP))
+
+    def test_ambiguous_fall_back_hour_is_decided_by_the_offset(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        """02:30 local happens twice on 2026-10-25; the offset says which instant counts."""
+        cfg = write_tariff(tmp_path)
+        start, end = local_day_utc_bounds(date(2026, 10, 25))
+        battery_archive(data_dir, start, end)
+        first = parse_commissioned_at("2026-10-25T02:30:00+02:00")
+        second = parse_commissioned_at("2026-10-25T02:30:00+01:00")
+        assert second - first == timedelta(hours=1)
+        counts = []
+        for commissioned in (first, second):
+            table, _ = build_rows(
+                data_dir,
+                cfg,
+                start,
+                end,
+                lookback=timedelta(minutes=5),
+                battery=battery_telemetry(commissioned),
+            )
+            starts = [r["interval_start"] for r in rows_as_dicts(table) if not r["battery_absent"]]
+            assert min(starts) == commissioned
+            counts.append(len(starts))
+        assert counts[0] - counts[1] == 4  # one hour = four intervals
+
+    def test_partial_counter_makes_the_intervals_unusable_with_a_reason(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=2)
+        battery_archive(data_dir, _T0, end, charge_until=_T0 + timedelta(minutes=30))
+        table, manifest = build_rows(
+            data_dir, cfg, _T0, end, lookback=timedelta(minutes=5), battery=battery_telemetry(_T0)
+        )
+        out = rows_as_dicts(table)
+        good, bad = out[:2], out[2:]
+        assert all(r["gross_kwh"] is not None for r in good)
+        for i, row in enumerate(bad, start=2):
+            assert row["gross_kwh"] is None  # never raw_grid, never a half-corrected value
+            assert row["raw_grid_kwh"] == pytest.approx(spans_in(out, i) * GRID_STEP)
+            assert row["energy_quality"] == build_mod.ENERGY_BATTERY_COUNTERS_MISSING
+            assert row["battery_absent"] is False
+        block = manifest["battery_reconstruction"]
+        assert block["unusable_by_energy_quality"] == {"battery_counters_missing": 6}
+        assert block["unusable_ranges"] == [
+            {
+                "start": build_mod.iso_z(_T0 + timedelta(minutes=30)),
+                "end": build_mod.iso_z(end),
+                "intervals": 6,
+            }
+        ]
+        assert set(values_for(table, "energy_quality")) <= ENERGY_QUALITY_VALUES
+
+    def test_counter_rollback_nulls_the_interval_not_the_neighbours(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        """Any decrease is a reset in ``counter_deltas``: stricter than ``counter_rates``."""
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=1)
+        battery_archive(data_dir, _T0, end, discharge_rollback_at=4)  # inside interval 1
+        table, _ = build_rows(
+            data_dir, cfg, _T0, end, lookback=timedelta(minutes=5), battery=battery_telemetry(_T0)
+        )
+        out = rows_as_dicts(table)
+        assert [r["gross_kwh"] is None for r in out] == [False, True, False, False]
+        assert out[1]["energy_quality"] == build_mod.ENERGY_BATTERY_COUNTERS_MISSING
+
+    def test_negative_reconstruction_is_dropped_not_clamped(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=1)
+        # discharging 0.30 kWh per sample while grid + charge only supply 0.14: they disagree
+        battery_archive(data_dir, _T0, end, discharge_step=0.30)
+        table, manifest = build_rows(
+            data_dir, cfg, _T0, end, lookback=timedelta(minutes=5), battery=battery_telemetry(_T0)
+        )
+        for row in rows_as_dicts(table):
+            assert row["gross_kwh"] is None
+            assert row["energy_quality"] == build_mod.ENERGY_BATTERY_GROSS_NEGATIVE
+        assert manifest["battery_reconstruction"]["unusable_by_energy_quality"] == {
+            "battery_gross_negative": 4
+        }
+
+    def test_pre_commissioning_dataset_is_byte_identical_with_or_without_the_config(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        """A window that ends before commissioning ignores the battery configuration."""
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=2)
+        battery_archive(data_dir, _T0, end)  # the counters are in the archive, and unread
+        plain = build(
+            data_dir, cfg, _T0, end, lookback=timedelta(minutes=5), battery=BatteryTelemetry()
+        )
+        snapshot = {p.relative_to(plain): p.read_bytes() for p in plain.rglob("*") if p.is_file()}
+        for commissioned in (end, end + timedelta(days=30)):  # a window may end AT commissioning
+            configured = build(
+                data_dir,
+                cfg,
+                _T0,
+                end,
+                lookback=timedelta(minutes=5),
+                battery=battery_telemetry(commissioned),
+            )
+            assert configured == plain  # same dataset_id
+            again = {
+                p.relative_to(configured): p.read_bytes()
+                for p in configured.rglob("*")
+                if p.is_file()
+            }
+            assert again == snapshot
+        manifest = json.loads((plain / "build_manifest.json").read_text())
+        assert "battery_reconstruction" not in manifest
+        assert "battery_commissioned_at" not in manifest["params"]
+        assert manifest["params"]["battery_telemetry_entities"] == []
+        assert manifest["params"]["battery_detection"] == "unknown"
+
+    def test_battery_params_enter_the_dataset_id_after_commissioning(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=2)
+        battery_archive(data_dir, _T0, end)
+        ids = {
+            build(
+                data_dir,
+                cfg,
+                _T0,
+                end,
+                lookback=timedelta(minutes=5),
+                battery=battery_telemetry(commissioned),
+            ).name
+            for commissioned in (_T0, _T0 + timedelta(hours=1), end + timedelta(days=1))
+        }
+        assert len(ids) == 3
+
+    def test_after_commissioning_without_configured_counters_is_refused(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=2)
+        battery_archive(data_dir, _T0, end, counters=False)
+        with pytest.raises(BatteryCountersMissingError, match="no battery AC counters"):
+            build(
+                data_dir,
+                cfg,
+                _T0,
+                end,
+                lookback=timedelta(minutes=5),
+                battery=battery_telemetry(_T0 + timedelta(hours=1), counters=False),
+            )
+        # the assumption flag is no way around it, and nothing is published
+        with pytest.raises(BatteryCountersMissingError):
+            build(
+                data_dir,
+                cfg,
+                _T0,
+                end,
+                lookback=timedelta(minutes=5),
+                battery_absent=True,
+                battery=battery_telemetry(_T0, counters=False),
+            )
+        assert not (data_dir / "analysis").exists()
+
+    def test_after_commissioning_with_counters_absent_from_the_archive_is_refused(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=2)
+        battery_archive(data_dir, _T0, end, counters=False)
+        with pytest.raises(BatteryCountersMissingError, match="fewer than 2 samples"):
+            build(
+                data_dir,
+                cfg,
+                _T0,
+                end,
+                lookback=timedelta(minutes=5),
+                battery=battery_telemetry(_T0 + timedelta(hours=1)),
+            )
+        assert not (data_dir / "analysis").exists()
+
+    def test_counters_in_the_archive_without_a_recorded_commissioning_are_refused(
+        self, tmp_path: Path, data_dir: Path
+    ) -> None:
+        """Configured counters that show up in the data, with no date: do not guess."""
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=2)
+        battery_archive(data_dir, _T0, end)
+        with pytest.raises(BuildError, match="commissioning instant"):
+            build(
+                data_dir,
+                cfg,
+                _T0,
+                end,
+                lookback=timedelta(minutes=5),
+                battery=battery_telemetry(None),
+            )
+
+    def test_the_default_configuration_is_read_from_the_service_config(
+        self, tmp_path: Path, data_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = write_tariff(tmp_path)
+        end = _T0 + timedelta(hours=2)
+        battery_archive(data_dir, _T0, end)
+        service = tmp_path / "service.yaml"
+        service.write_text(
+            "entities:\n"
+            f"  battery_charge_energy: {CHARGE}\n"
+            f"  battery_discharge_energy: {DISCHARGE}\n"
+            "battery:\n"
+            '  commissioned_at: "2026-01-05T01:00:00+00:00"\n'
+        )
+        monkeypatch.setenv("BATTERY_OPTIMIZER_SERVICE_CONFIG", str(service))
+        table, _ = build_rows(data_dir, cfg, _T0, end, lookback=timedelta(minutes=5))
+        assert [r["battery_absent"] for r in rows_as_dicts(table)] == [True] * 4 + [False] * 4
+
+
+class TestBatteryTelemetryConfig:
+    def test_parse_commissioned_at_requires_an_explicit_offset(self) -> None:
+        assert parse_commissioned_at(None) is None
+        assert parse_commissioned_at("2026-11-05T00:00:00+01:00") == datetime(
+            2026, 11, 4, 23, tzinfo=UTC
+        )
+        assert parse_commissioned_at("2026-11-04T23:00:00Z") == datetime(
+            2026, 11, 4, 23, tzinfo=UTC
+        )
+        for bad in ("2026-11-05T00:00:00", "2026-11-05", date(2026, 11, 5), "soon", 5):
+            with pytest.raises(ValueError, match="commissioned_at"):
+                parse_commissioned_at(bad)
+
+    def test_the_committed_service_config_has_no_battery_yet_and_parses(self) -> None:
+        repo_config = Path(__file__).resolve().parents[1] / "config" / "service.yaml"
+        loaded = load_battery_telemetry(repo_config)
+        assert loaded.commissioned_at is None
+        assert loaded.entities == ()
+
+    def test_loads_entities_and_instant(self, tmp_path: Path) -> None:
+        path = tmp_path / "service.yaml"
+        path.write_text(
+            f"entities:\n  battery_charge_energy: {CHARGE}\n"
+            f"  battery_discharge_energy: {DISCHARGE}\n"
+            "battery:\n  commissioned_at: 2026-11-05T00:00:00+01:00\n"
+        )
+        loaded = load_battery_telemetry(path)
+        assert loaded.entities == (CHARGE, DISCHARGE)
+        assert loaded.has_counters
+        assert loaded.commissioned_at == datetime(2026, 11, 4, 23, tzinfo=UTC)
+
+    @pytest.mark.parametrize(
+        ("text", "match"),
+        [
+            (f"entities:\n  battery_charge_energy: {CHARGE}\n", "go together"),
+            ("entities:\n  battery_charge_energy: nonsense\n", "entity id"),
+            ("battery:\n  commissioned_at: 2026-11-05\n", "bare date"),
+            ("battery:\n  commissioned_at: '2026-11-05T00:00:00'\n", "no UTC offset"),
+            ("battery:\n  commissioned: null\n", "unknown battery keys"),
+            ("- not a mapping\n", "must be a mapping"),
+        ],
+    )
+    def test_rejects_malformed_config(self, tmp_path: Path, text: str, match: str) -> None:
+        path = tmp_path / "service.yaml"
+        path.write_text(text)
+        with pytest.raises(ValueError, match=match):
+            load_battery_telemetry(path)
+
+    def test_a_missing_file_is_nothing_configured_only_by_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("BATTERY_OPTIMIZER_SERVICE_CONFIG", raising=False)
+        monkeypatch.delenv("ENERGY_BASELINE_SERVICE_CONFIG", raising=False)
+        monkeypatch.chdir(tmp_path)  # no config/service.yaml here
+        assert load_battery_telemetry() == BatteryTelemetry()
+        with pytest.raises(ValueError, match="not found"):
+            load_battery_telemetry(tmp_path / "absent.yaml")
+        monkeypatch.setenv("BATTERY_OPTIMIZER_SERVICE_CONFIG", str(tmp_path / "typo.yaml"))
+        with pytest.raises(ValueError, match="not found"):
+            load_battery_telemetry()
 
 
 # ===========================================================================

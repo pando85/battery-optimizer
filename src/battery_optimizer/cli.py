@@ -244,7 +244,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Assume no battery is dispatching, so gross load may equal the whole-home feed "
         "counter (default).  This is a recorded assumption, NOT a detection: missing battery "
         "telemetry cannot prove a battery is absent.  Use --no-assume-no-battery to refuse the "
-        "assumption, which then requires registered battery telemetry to establish gross load",
+        "assumption, which then requires registered battery telemetry to establish gross load.  "
+        "It never covers an interval at or after battery.commissioned_at (config/service.yaml)",
     )
 
     # -- build-features ---------------------------------------------------
@@ -1062,6 +1063,7 @@ def _validate_manifests(data_dir: Path, sources: list[str]) -> dict:
 def cmd_build(args: argparse.Namespace) -> int:
     """Build 15-min analysis dataset."""
     from battery_optimizer import build as build_module
+    from battery_optimizer.battery_telemetry import load_battery_telemetry
 
     battery_absent: bool = args.assume_no_battery
     if battery_absent:
@@ -1090,6 +1092,13 @@ def cmd_build(args: argparse.Namespace) -> int:
     )
     print(f"build: dataset directory: {dataset_dir}")
     print(f"build: battery_absent={battery_absent} (assumption, not detection)")
+    commissioned_at = load_battery_telemetry().commissioned_at
+    print(
+        "build: battery.commissioned_at="
+        + (commissioned_at.isoformat() if commissioned_at else "null (no battery recorded)")
+        + " (config/service.yaml); from that instant the assumption is refused and gross load is "
+        "grid + charge - discharge"
+    )
     return 0
 
 

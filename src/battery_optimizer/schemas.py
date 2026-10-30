@@ -35,6 +35,12 @@ Allowed categorical values
     - ``gap_partial``        — partial gap in counter data within interval
     - ``gap_total_unknown``  — total gap; energy for span is unknown
     - ``counter_reset_bridged`` — counter reset detected and bridged
+    - ``battery_counters_missing`` — at or after the battery commissioning instant, a
+      battery AC counter is unknown for the interval, so ``gross_kwh`` is null (the grid
+      reading alone is net exchange, never load)
+    - ``battery_gross_negative`` — at or after commissioning, ``raw_grid + charge -
+      discharge`` came out negative (the meters disagree inside the interval); ``gross_kwh``
+      is null, never clamped
 
 ``allocation_quality`` (ANALYSIS_INTERVAL):
     - ``exact``              — every contributing counter span lay wholly inside

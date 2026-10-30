@@ -95,7 +95,7 @@ flowchart LR
 
 | Component | Status | Since | One-line reason |
 |---|---|---|---|
-| [data-pipeline](data-pipeline.md) | valid until battery go-live | 2026-10-30 | Net grid is stored as gross while no battery telemetry is registered; blocks post-commissioning data |
+| [data-pipeline](data-pipeline.md) | valid until battery go-live | 2026-10-31 | `build` reconstructs gross load and refuses the no-battery assumption from `battery.commissioned_at`; set it and the counter ids on install day |
 | [outdoor-temperature](outdoor-temperature.md) | valid | 2026-10-30 | Debiased house sensor, fused series only fills long gaps |
 | [heat-pump-controller](heat-pump-controller.md) | valid (legacy), being replaced | 2026-10-30 | Cheapest-hours rule is live; comfort controller designed 2026-10-31, merge gated on the battery ([design](../planning/comfort-controller-design.md)) |
 | [cop-model](cop-model.md) | provisional | 2026-10-30 | Daily error passes, season error fails; trained on 26 to 28 degC water only |

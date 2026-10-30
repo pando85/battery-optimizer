@@ -52,6 +52,9 @@ entities:
   battery_power: null              # signed, + charge (per-battery *_battery_power)
   battery_charge_power: null       # sensor.omnibattery_system_charge_power
   battery_discharge_power: null    # sensor.omnibattery_system_discharge_power
+  # PLACEHOLDERS, not entity IDs: fill both in at installation from the HA entity picker
+  # (kWh, cumulative, AC side: the same terminals as the Shelly feed).  The live service
+  # history and the offline `build` (gross = grid + charge - discharge) both read these two.
   battery_charge_energy: null      # sensor.*_total_charging_energy
   battery_discharge_energy: null   # sensor.*_total_discharging_energy
   # Read-only context recorded with each slot (never written).  Add the Omnibattery
@@ -62,6 +65,17 @@ entities:
   # sensor.omnibattery_integration_status.
   observed:
     - sensor.shellyem_main_channel_2_power
+
+# Read by the offline dataset build and by `extract --entities` only; `serve` ignores it.
+# Not in config/tariff.yaml: that file's hash is part of every dataset_id (ADR-0006).
+battery:
+  # First instant at which the battery may exchange energy, ISO-8601 WITH a UTC offset,
+  # e.g. "2026-11-05T00:00:00+01:00"; null while no battery is installed.  Set it at
+  # installation together with the two energy counters above and the regime log line in
+  # docs/components/regime-log.md.  From this instant on `build` refuses the no-battery
+  # assumption: gross load = grid + charge - discharge, or the interval is unusable.  A window
+  # that ends before it is built exactly as before.
+  commissioned_at: null
 
 # Maximum source age (seconds since HA last_reported) before an input is stale.
 freshness_s:
