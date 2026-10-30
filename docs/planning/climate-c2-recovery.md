@@ -39,7 +39,7 @@ Track E may produce a **proposed** comfort-aware legacy heuristic, but without a
 | **R2 — Identifiability tests** | Is the second state supported? Compare profile likelihood and Jacobian/SVD condition numbers, parameter correlation, parameter estimates under constrained initial slab temperature, leave-session-out stability, sensitivity to `b_ret` and its flow dependence. | A/B are *diagnostic references*, not accepted control models. If slab capacity or coupling stays non-identifiable, **drop the latent slab state from the actuator model**, retain uncertainty in the building response |
 | **R3 — Fair challenger models** | What is the simplest candidate that generalizes? Compare physical first-order with exogenous solar/internal gains, a regularized delayed/impulse-response or ARX model driven by **measured heat**, optional physically constrained two-state model with externally sourced priors, and a separate empirical `permission→Q_heat` model | Rolling-origin error at 1/6/12/24 h on identical mask and matched information set. Include persistence/diurnal and original A/B as reference. Do not default to ML or more states |
 | **R4 — Plant/energy error decomposition** | Does the error originate in `Q_heat→room`, `permission→Q_heat`, or `Q_heat→electricity`? | Distinct failure budgets and baselines for each link. Even a good Q-driven house fit **does not** authorize u-driven scheduling if the permission/valve model fails |
-| **R5 — Data value and experiment design** | Which missing outdoor × achieved-flow × valve × compressor sessions would distinguish competing models? | Ranked coverage matrix, expected information gain and a proposed supervised experiment batch, coordinated with C7-F F0–F2. Avoid experimental changes for cells with already stable estimates |
+| **R5 — Data value and experiment design** | Which missing outdoor × achieved-flow × valve × compressor sessions would distinguish competing models? | Ranked coverage matrix, expected information gain and a proposed supervised experiment batch, coordinated with the C7-F F0/F1 audits and field trial (F2). Avoid experimental changes for cells with already stable estimates |
 
 Use the existing `climate/data.py`, `thermal.py`, `plant.py`, `cop.py`, parquet/manifest datasets, historical GoHeishaMon telemetry and `t_out_fused`; add diagnostics as offline functions/CLI reports, not a new resident service. Do not store training outputs under the repository or retrofit a previous C2 `model_id`. Inputs and outputs must be versioned, content-addressed and replayable.
 
@@ -63,7 +63,7 @@ Keep three separate gates:
 
 Failing G-R1/R2 means **no MPC permission/flow actuation**; this does not prevent building dashboards, passive experiments, or model-free observational analysis. G-R3 passing would permit **read-only shadow C3** under a separate documented approval and API contract, followed by the existing C4 validation, C5 single-writer device safety gate and supervised commissioning. G-R1/R2 alone do not approve even shadow plans being treated as feasible.
 
-C7-F remains an **independent** control-lever study but cannot skip the action-model and safety evidence needed for an actual optimizer. F0/F1 and supervised F2 can contribute the data needed for recovery. F4 must compare flow modulation against a native curve and the best available **validated** permission baseline; if none exists, compare native/legacy and label speculative simulations non-actionable. Neither C7-F nor C2-R retroactively converts C2's no-go to a pass.
+C7-F remains an **independent** control-lever study but cannot skip the action-model and safety evidence needed for an actual optimizer. F0/F1 and the deliberately varied data of its field trial (F2) can contribute the data needed for recovery. The trial is model-free: it compares each arm with current operation and needs no validated permission baseline; any model-based flow claim stays non-actionable until the gates above pass. Neither C7-F nor C2-R retroactively converts C2's no-go to a pass.
 
 ## 5. Planned PRs, responsibilities and concrete exit criteria
 
@@ -72,7 +72,7 @@ C7-F remains an **independent** control-lever study but cannot skip the action-m
 | **R0** | Reproducible C2 failure ledger with grouped residuals and pinned manifests | Reviewer can see *which stage* fails; does not publish raw/private house data |
 | **R1** | Sensor, hydraulic, meter and slab-observability audit | Quantify bias/uncertainty; choose minimal trustworthy features |
 | **R2** | Identifiability diagnostics and simple challenger fitting | Demonstrate parameter stability and held-out gains, or explicitly reject the model family; no threshold-tuning after viewing held-out results |
-| **R3** | Experiment planner integrated with C7-F F1/F2 | Approved, low-risk session requirements with abort conditions; no default actuation |
+| **R3** | Experiment planner integrated with the C7-F F1 coverage and F2 trial design | Approved, low-risk session requirements with abort conditions; no default actuation |
 | **R4** | Independent frozen preregistration, seasonal/prospective comparison and gate report | PASS / FAIL / UNDETERMINED for observation, action and policy; only then consider C3 shadow |
 | **R5** | Optional C3 shadow proposal | New PR if R4 passes; no homelab writes, no battery changes |
 
