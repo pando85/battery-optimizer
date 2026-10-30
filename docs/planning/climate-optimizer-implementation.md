@@ -1,6 +1,6 @@
 # Climate optimizer: shared-runtime architecture and phased implementation plan
 
-- **Status:** Proposed (documentation only; no application change or permission to actuate). Amended 2026-10-30 with the plant topology, data audit, the C2 design and its predeclared gate, and the C2 outcome (UNDETERMINED, no-go)
+- **Status:** C2 completed **UNDETERMINED / no-go** (2026-10-30); [diagnostic-first recovery (R0–R5)](climate-c2-recovery.md) proposed. The original C2 gate remains frozen. No new climate actuation is authorized.
 - **Date:** 2026-10-30
 - **Architecture decision:** [ADR-0005](../adr/0005-shared-energy-planning-climate.md)
 - **Repository ownership:** `pando85/battery-optimizer` for models, planning, history and evaluations; [`pando85/homelab`](https://github.com/pando85/homelab) for AppDaemon controls, HA entities, GitOps, manifests and deployment
@@ -278,8 +278,9 @@ Forecast interfaces should carry UTC slot IDs, kWh, quality and model/plan versi
 | **C0 — Correctness audit and stabilization** | homelab | The agreed scope below (disable restores the heat mode, HA watchdog, retry re-check, full heat-mode map, numeric sensors); preserve existing user-facing toggles | Tests cover disable, the watchdog (stale heartbeat while enabled and `DHW`), the retry loop re-checking the toggle and the nine-option mode map |
 | **C1a — Offline extraction and climate feature set** | battery-optimizer + homelab configuration | Map verified room, tank, compressor, power and weather data (mode-aware, including cooling power/energy) into extraction and a **separate climate feature set**; quality report; homelab numeric template sensors for operating mode, defrost and 3-way valve (C0 homelab work); no control writes | Enough measured history and documented gaps to fit a model without inventing data; `dataset_id` and existing feature-set ids unchanged; battery baseline regression-free |
 | **C2 — Thermal identification, COP and dual-objective gate** | battery-optimizer | Pure models (first-order and two-state slab+air), fitting, safe parameter envelopes, recorded versions and chronological validation; COP fitted on electricity; policy simulator and the go/no-go gate ([design](#c2-design-and-predeclared-gate)); DHW stays fixed | Model acceptance criteria met on the held-out season (otherwise UNDETERMINED, treated as no-go); bad sensors trigger model fallback; gate verdict recorded with its preregistration |
-| **C1b — Live climate observer** | battery-optimizer | Live climate observer in `serve` behind a feature flag, read-only; deferred until C3 and only after the C2 gate passes | Existing battery runtime unaffected; freshness and quality metrics |
-| **C3 — Climate shadow planner** | battery-optimizer | After the C2 gate: temperature-aware heuristic then climate MPC, versioned plan, read-only GET, shadow metrics, executor not connected | Deterministic, physically feasible plans, bounded solve latency, no interference with existing battery runtime |
+| **C2-R — Recovery after UNDETERMINED** | optimizer (offline) | [Independent diagnostic-first model recovery](climate-c2-recovery.md): sensor and heat attribution, observability, minimal/empirical alternatives, and prospective validation | New preregistered observation/action/policy gates; does **not** amend or override the failed C2 protocol; no actuation |
+| **C1b — Live climate observer** | battery-optimizer | Live climate observer in `serve` behind a feature flag, read-only; blocked by C2 no-go until a *new* accepted recovery route and separate promotion decision | Existing battery runtime unaffected; freshness and quality metrics |
+| **C3 — Climate shadow planner** | battery-optimizer | **Blocked:** historical C2 no-go. A new accepted C2-R policy gate may separately authorize an experimental shadow planner; existing C3 must not use failed A/B as accepted defaults | Reproducible new acceptance, deterministic bounded plans and no interference with battery runtime |
 | **C4 — Evaluation and plan handoff** | battery-optimizer, then homelab | Compare cheap-hours, comfort-rule and MPC using identical historical decision-time inputs; add AppDaemon **shadow** plan reader and telemetry | Comfort, model-cost and cycling comparisons recorded; shadow reads cannot actuate; tested expires/parse errors |
 | **C5 — Gated heating control** | homelab (plus explicit optimizer flag/config) | Single writer for heat and DHW; controlled schedule activation with acknowledgement and safety fallback | Manual supervised pilot, recovery and hardware-state checks, acceptance of temperature and cycling behavior; easy switch back to legacy |
 | **C6 — Demand forecast exchange** | battery-optimizer | Expose committed climate electric load to the battery forecaster; validate residual and historical reconciliation | No double counting; battery shadow savings/forecast regret improve on matched windows; no battery writes |
@@ -289,11 +290,12 @@ Forecast interfaces should carry UTC slot IDs, kWh, quality and model/plan versi
 
 **Ordering:** C0 can begin independently in `homelab`; C1a and C2 came first and ran while legacy heating stayed active. C2 ended UNDETERMINED after its one predeclared iteration, which counts as no-go (see the [outcome](#c2-model-iteration-the-one-predeclared-iteration-config-version-2)): C1b and C3–C5 do not start as specified, and the C2 gate and its preregistration stay as committed. If a permission policy is ever accepted later, C3–C4 must still precede any C5 actuation. C6 can start read-only before C5 but must distinguish hypothetical shadow schedules from committed ones. The battery Phase D commissioning/authorization is **independent** of C5. No timeline, energy savings percentage or thermal parameter is assumed.
 
-**Next steps after the C2 outcome:**
+**Next steps after the C2 outcome (two complementary tracks):**
 
-1. A model-free empirical analysis of the `min_hours` lever, the 10 h vs 15 h comfort and cost observed in 2025–26 (in progress offline).
-2. The C7-F F0 control-surface audit and F1 coverage report, which can start now.
-3. Any live trial of a changed heating rule needs its own design, agreed with the owner before any homelab change. **Proposed, not decided.**
+1. **C2-R recovery:** [R0–R5 diagnostic-first work](climate-c2-recovery.md) starts with a reproducible failure ledger, checks the room/valve/heat/electricity observability and tests minimal physical and regularized empirical models *without assuming either A or B is valid*. Keep all C2 v2 failure results and model parameters unchanged.
+2. **Model-free observational baseline:** compare existing `min_hours` regimes and measured room comfort/cost on carefully matched periods, reporting confounding and lack of overlap; do not equate an association with an intervention effect.
+3. **C7-F passive characterization:** F0 and F1, followed by supervised F2 only after site safety review. The new flow-response data can help identify the missing plant/slab dynamics, but flow modulation is not a substitute for an accepted action model.
+4. **Separate gates, not an automatic retry:** no tuning of the original v2 thresholds or reuse of S3 as an untouched confirmation. A new predeclared evaluation must rely on genuinely held-out/prospective data and be accepted before C3; C4/C5 and physical authorization remain separate. Any live heating-rule trial is **proposed only**.
 
 ### C0 scope (agreed after the owner's review)
 
@@ -457,7 +459,8 @@ figures stay in the private model directory.
 - **homelab — C0:** the agreed scope above (disable restores the heat mode, HA watchdog, retry re-check, nine-option mode map, numeric template sensors). Preserve current schedules by default.
 - **battery-optimizer — C1a:** offline extraction and a separate climate feature set from the existing Prometheus archive; model input audits for room, tank and HVAC electric/thermal power.
 - **battery-optimizer — C2:** offline first-order and two-state thermal models, COP fitted on electricity, test fixtures and the dual-objective gate, in the five PRs above; no runtime configuration or actuator.
-- **battery-optimizer — C3 (only after a passed gate; not started, C2 was UNDETERMINED):** opt-in shadow planning and `GET /climate/plan`; prove battery shadow behavior unaffected.
+- **optimizer — C2-R (now):** [diagnostics and independent model validation](climate-c2-recovery.md), not a repeat of the exhausted C2 iteration; preserve original A/B no-go and use a new prospective confirmation dataset.
+- **battery-optimizer — C3 (only after a new accepted gate; not started, C2 was UNDETERMINED):** opt-in shadow planning and `GET /climate/plan`; prove battery shadow behavior unaffected.
 - **homelab — C4/C5 (same condition):** explicit read-only plan consumption then a separately approved, reversible controlled heating rollout.
 - **now, see the next steps in the ordering above:** the `min_hours` analysis, then C7-F F0/F1 ([flow-temperature coverage and identification plan](climate-flow-calibration-optimization.md)), keeping its held-out models and safety gate separate from the predeclared C2 permission-only decision. A live heating-rule trial is proposed only.
 
