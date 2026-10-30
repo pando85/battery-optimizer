@@ -34,10 +34,13 @@ by this optimizer, under a separate ADR; the shadow phase has no writer.
 - The horizon ends at the last published price slot; there is no unpublished-price forecast live.
 - **Hard constraint (owner-confirmed 2026-10-30):** the 5.0 kW import limit is enforced by the smart
   meter, which cuts supply on overload; this has happened. A trip is a safety and availability failure,
-  never an acceptable cost trade-off.
+  never an acceptable cost trade-off. The trip is **instantaneous**, not a 15-minute average (owner-confirmed
+  2026-10-31; no distributor document yet).
 - Charge is limited only through forecast load (`charge <= limit * h - forecast load`) on a 15-minute
   average with no margin; load that is not in the forecast (boost, hot-water booster) is invisible to that
-  constraint. At go-live the real-time grid-target cap below the limit is therefore **required**, not optional.
+  constraint. Because the trip is instantaneous, the cap cannot rely on 15-minute averages: OmniBattery must regulate
+  against the measured load in real time with a margin below the limit. This is a requirement for the
+  actuator ADR, and at go-live the cap is **required**, not optional.
 - **Heater inputs to the import limit** (Panasonic service manual; details in
   [heat-pump-controller](heat-pump-controller.md#heater-facts-import-limit-inputs)): the heat pump alone draws
   at most 3.47 kW, and its integrated 3.00 kW electric heater brings the worst case to about 6.5 kW, above the

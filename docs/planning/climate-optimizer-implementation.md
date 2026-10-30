@@ -503,7 +503,7 @@ Price enters through **boost** (at most 0.04 €/kWh for 3 h or more, tunable): 
 1. ADR-0006 and the plan updates (this change).
 2. Record the HP switch date(s) and the trial block calendar in `docs/planning/`, not `config/tariff.yaml`. Exclude the first 28 days after the switch and alternating-arm weeks from gate-C and forecast evaluations.
 3. Homelab: retire the legacy cheapest-hours space-heating rule when the comfort controller goes live. **DHW keeps price scheduling** (one DHW writer, cheapest 2 h window by price / COP). The heater question is answered: the booster is the 3 kW heater, so the tank target is capped at 50 °C and AppDaemon never starts the heater.
-4. Verify the import-limit basis (instantaneous overload trip against 15-minute average) with the contract or distributor.
+4. Import-limit basis: the owner confirmed an **instantaneous** trip on 2026-10-31 (no distributor document yet); a written confirmation from the contract or distributor is still welcome. The actuator ADR must require real-time regulation against measured load with a margin.
 5. Homelab: comfort controller (comfort schedule, optimum start, software water-temperature curve, DHW rule, helpers) as specified in [comfort-controller-design](comfort-controller-design.md). **Merged and tested only once the house battery is working.** Evaluated as the before/after comparison of C7-F F2, with the criteria preregistered before go-live.
 
 *Track B: shadow thermal-model MPC (this repository, read-only; [design section 13](comfort-controller-design.md#13-track-b-shadow-thermal-model-mpc))*

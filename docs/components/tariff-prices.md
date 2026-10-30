@@ -37,8 +37,9 @@ Home Assistant PVPC sensor, fed by the homelab deployment. Roadmap: [Price Outlo
 - The service never forecasts unpublished prices; its horizon ends at the last published slot.
 - **Hard constraint (owner-confirmed 2026-10-30):** the 5.0 kW contracted import limit is enforced by the
   smart meter, which cuts supply on overload, and this has happened. It is not a cost term and must not be
-  traded against price. Whether the trip is on the 15-minute average or on sustained instantaneous load
-  is still unverified; until it is, treat the model's averaged constraint as insufficient.
+  traded against price. The trip is on **instantaneous** load, not the 15-minute average
+  (owner-confirmed 2026-10-31; no distributor document yet), so the model's averaged constraint is
+  insufficient and the real-time cap in the actuator is required.
 
 ## Invalidated when
 
