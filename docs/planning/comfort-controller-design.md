@@ -264,8 +264,21 @@ part of B0 to B3.
 |---|---|---|
 | **B0** | Diagnostics: [C2 recovery](climate-c2-recovery.md) R0 to R2 and the warm-up rates (feeds the optimum-start table) | done (2026-10-31), see [climate-c2-recovery section 7](climate-c2-recovery.md#7-status-2026-10-31-b0-results-r0-to-r2) |
 | **B1** | Offline MPC replay on the committed comfort schedule | implemented, offline ([climate-mpc](../components/climate-mpc.md)); result below |
-| **B2** | Shadow runner in the service (read-only plan and prediction metrics) | planned |
+| **B2** | Shadow runner in the service (read-only plan and prediction metrics) | implemented, not deployed (2026-10-31; [ops](../service.md#climate-shadow-track-b2)) |
 | **B3** | Preregistered comparison after winter | planned |
+
+### B2 interface to the controller (read-only)
+
+The shadow reads three Home Assistant helpers the homelab PR should create, and tolerates their absence:
+
+- `input_boolean.comfort_control_enable`: on while the comfort controller is in charge. It labels every
+  shadow record `comfort`; absent means `legacy`. The preregistered windows depend on it.
+- `input_text.comfort_dhw_plan`: the DHW window the scheduler chose, as `start/end` ISO-8601 instants
+  with a UTC offset (several comma-separated), a JSON `{"start", "end"}` object or list, or a daily local
+  `HH:MM-HH:MM`. Absent or unparseable: the shadow uses yesterday's measured DHW slots.
+- the away switch of section 5 (id to be named; off while unmapped).
+
+The ids are placeholders in `config/service.yaml` until that PR fixes them.
 
 ### B1 result (offline replay)
 

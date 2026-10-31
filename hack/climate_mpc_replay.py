@@ -45,10 +45,10 @@ if str(_PROJECT / "src") not in sys.path:
     sys.path.insert(0, str(_PROJECT / "src"))
 
 from battery_optimizer.climate import b2d, mpc_replay  # noqa: E402
-from battery_optimizer.climate.config import Section, load_climate_config  # noqa: E402
+from battery_optimizer.climate.config import load_climate_config  # noqa: E402
 from battery_optimizer.climate.data import SITE_FILE, load_climate_data, load_site  # noqa: E402
 from battery_optimizer.climate.mpc import PlanSettings  # noqa: E402
-from battery_optimizer.climate.mpc_config import load_mpc_config  # noqa: E402
+from battery_optimizer.climate.mpc_config import load_mpc_config, override  # noqa: E402
 from battery_optimizer.features import json_bytes  # noqa: E402
 from battery_optimizer.manifest import code_version  # noqa: E402
 from battery_optimizer.paths import resolve_data_dir, write_part_atomic  # noqa: E402
@@ -60,23 +60,6 @@ def _run_id(value: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", value) or ".." in value:
         raise argparse.ArgumentTypeError(f"{value!r}: use only [A-Za-z0-9._-] and no '..'")
     return value
-
-
-def _override(cfg, path: tuple[str, ...], value: Any):
-    """A copy of the read-only config tree with one leaf replaced (recorded in the report)."""
-    raw = cfg.to_dict()
-    node = raw
-    for key in path[:-1]:
-        node = node[key]
-    node[path[-1]] = value
-
-    def wrap(x):
-        return Section({k: wrap(v) for k, v in x.items()}) if isinstance(x, dict) else x
-
-    out = type(cfg)(wrap(raw))
-    object.__setattr__(out, "sha256", cfg.sha256)
-    object.__setattr__(out, "path", cfg.path)
-    return out
 
 
 def _pct(x: float | None) -> str:
@@ -238,10 +221,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(str(exc)) from exc
     overrides: dict[str, Any] = {}
     if args.model:
-        cfg = _override(cfg, ("model", "kind"), args.model)
+        cfg = override(cfg, ("model", "kind"), args.model)
         overrides["model.kind"] = args.model
     if args.weather:
-        cfg = _override(cfg, ("replay", "weather"), args.weather)
+        cfg = override(cfg, ("replay", "weather"), args.weather)
         overrides["replay.weather"] = args.weather
     seasons = tuple(args.seasons.split(",")) if args.seasons else tuple(cfg.replay.seasons)
     if args.seasons:
@@ -250,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
         overrides["max_days"] = args.max_days
     if args.offsets:
         offsets = [int(v) for v in args.offsets.split(",")]
-        cfg = _override(cfg, ("water", "offsets_k"), tuple(offsets))
+        cfg = override(cfg, ("water", "offsets_k"), tuple(offsets))
         overrides["water.offsets_k"] = offsets
 
     root = resolve_data_dir(args.data_dir)

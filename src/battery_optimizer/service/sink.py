@@ -9,6 +9,9 @@ Layout (partitioned by **UTC** day, so a DST day is never split or doubled)::
                                                        one row per PVPC sensor state change
     service/v1/weather_forecasts/date=YYYY-MM-DD/weather_forecasts.jsonl
                                                        one row per HA weather forecast fetch
+    service/v1/climate_<x>/date=YYYY-MM-DD/climate_<x>.jsonl  (x: decisions, scores, days, models)
+                                                       the climate shadow (track B2): decisions,
+                                                       scores, days and model refits
     service/v1/state/virtual_battery.json              the virtual battery's SOC (mutable)
 
 Plans are written with :func:`battery_optimizer.paths.write_part_atomic` (temp
@@ -31,10 +34,12 @@ from typing import Any
 
 from battery_optimizer.paths import _ensure_private_dir, write_part_atomic
 
-__all__ = ["SCHEMA_VERSION", "ShadowSink", "iter_records"]
+__all__ = ["CLIMATE_KINDS", "SCHEMA_VERSION", "ShadowSink", "iter_records"]
 
 SCHEMA_VERSION = 1
 _ROOT = Path("service") / "v1"
+#: Append-only record kinds of the climate shadow (:mod:`.climate_shadow`).
+CLIMATE_KINDS = ("climate_decisions", "climate_scores", "climate_days", "climate_models")
 
 
 def _utc_day(at: datetime) -> str:
@@ -87,6 +92,11 @@ class ShadowSink:
     def append_weather_forecast(self, at: datetime, record: dict[str, Any]) -> Path:
         return self._append("weather_forecasts", at, record)
 
+    def append_climate(self, kind: str, at: datetime, record: dict[str, Any]) -> Path:
+        if kind not in CLIMATE_KINDS:
+            raise ValueError(f"unknown climate record kind {kind!r}")
+        return self._append(kind, at, record)
+
     # -- mutable state -------------------------------------------------------------
 
     def _state_path(self) -> Path:
@@ -119,7 +129,7 @@ def iter_records(
     data_dir: Path, kind: str, since: datetime, until: datetime
 ) -> Iterator[dict[str, Any]]:
     """Records of *kind* (``slots``/``events``/``plans``/``pvpc_snapshots``/
-    ``weather_forecasts``) from the UTC-day partitions
+    ``weather_forecasts``/``climate_*``) from the UTC-day partitions
     overlapping ``[since, until)``; torn or corrupt lines are skipped."""
     root = data_dir / _ROOT / kind
     day = since.astimezone(UTC).date() - timedelta(days=1)

@@ -29,7 +29,13 @@ from battery_optimizer.climate.config import (
     timezone,
 )
 
-__all__ = ["MPC_CONFIG_VERSION", "MpcConfig", "MpcConfigError", "load_mpc_config"]
+__all__ = [
+    "MPC_CONFIG_VERSION",
+    "MpcConfig",
+    "MpcConfigError",
+    "load_mpc_config",
+    "override",
+]
 
 MPC_CONFIG_VERSION = 1
 MODEL_KINDS = ("b2d", "c2")
@@ -187,3 +193,23 @@ def load_mpc_config(path: str | Path = "config/climate-mpc.yaml") -> MpcConfig:
     object.__setattr__(cfg, "path", p)
     _cross_checks(cfg)
     return cfg
+
+
+def override(cfg: MpcConfig, path: tuple[str, ...], value: Any) -> MpcConfig:
+    """A copy of the read-only tree with one leaf replaced; ``sha256`` and ``path`` still name the
+    file, so a caller records the override next to them."""
+    raw = cfg.to_dict()
+    node = raw
+    for key in path[:-1]:
+        node = node[key]
+    if path[-1] not in node:
+        raise MpcConfigError(f"climate-mpc config: no key {'.'.join(path)}")
+    node[path[-1]] = value
+
+    def wrap(x: Any) -> Any:
+        return Section({k: wrap(v) for k, v in x.items()}) if isinstance(x, dict) else x
+
+    out = type(cfg)(wrap(raw))
+    object.__setattr__(out, "sha256", cfg.sha256)
+    object.__setattr__(out, "path", cfg.path)
+    return out

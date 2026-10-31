@@ -106,8 +106,8 @@ These have no CLI surface (or `hack/` only), deliberately:
   never writes and is not a `build` input.
 - `replay_runtime.py` — replay-only asyncio dispatch runtime with a recording sink. No writer,
   no actuation, no HA adapter, no wall clock. See [Replay runtime](#replay-runtime-replay_runtimepy).
-- `climate/` — offline data layer, heat-pump electricity model and thermal models of the climate
-  optimizer (C2). See [Climate subpackage](#climate-subpackage-climate).
+- `climate/` — data layer, heat-pump electricity model, thermal models (C2), the comfort MPC (B1) and
+  its live shadow (B2, run by `serve`). See [Climate subpackage](#climate-subpackage-climate).
 
 ## Dispatch intent contract (`dispatch.py`)
 
@@ -144,7 +144,7 @@ Demo: `python -m battery_optimizer.hack.replay_runtime_demo`. See module docstri
 
 **Status: C2 PRs 1 to 3 and the model iteration — configuration, data loader, audit, heat-pump
 electricity (COP) model, thermal models with causal weekly refits, heat response and `climate-fit`;
-no policy, no runtime, no actuation.** The
+the B1 comfort MPC and its read-only live shadow (B2); no actuation.** The
 offline half of the [climate optimizer plan](planning/climate-optimizer-implementation.md#c2-design-and-predeclared-gate).
 It reads the climate feature set (`build-features --signal-set climate`) and the PVPC prices of a
 canonical dataset, and never writes into either.
@@ -274,6 +274,16 @@ solve, simulate and re-linearise loop; `mpc_replay.py` and `hack/climate_mpc_rep
 offline receding-horizon replay into `<data_dir>/analysis/v1/climate-mpc/<run-id>/`. Nothing in it
 writes to Home Assistant or the plant. Formulation, causality and results:
 [climate-mpc](components/climate-mpc.md).
+
+**Live climate shadow (track B2).** `shadow.py` runs the same model and MILP on live data: raw
+Prometheus samples go through the feature builder's slot rules and `build_climate_data`, so a live slot is
+an offline feature-set slot; `ShadowPrior` is the offline part (B1's `fit_prior` and `fit_cop` on one
+season, written by `hack/climate_shadow_prior.py`, content-addressed); `refit`, `decide` and `score`
+reuse the replay's re-estimation, `decision_inputs`, `run_decision`, `open_loop_accuracy` and
+`heat_driven`. `shadow_gates.py` evaluates the preregistered section-A criteria from the persisted records.
+The resident service runs it (`service/climate_shadow.py`, off by default) and records into
+`<data_dir>/service/v1/climate_*`; `climate-shadow-report` prints the gates. Ops, schema and
+definitions: [service](service.md#climate-shadow-track-b2).
 
 `hack/comfort_history.py` (read-only) writes `report.json` and `report.md` into
 `<data_dir>/analysis/v1/comfort-history/<run-id>/`: per winter, the hall-kitchen temperature and

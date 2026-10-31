@@ -62,16 +62,22 @@ from battery_optimizer.climate.config import ClimateConfig
 from battery_optimizer.climate.data import ClimateData
 from battery_optimizer.climate.mpc import Plan, PlanSettings, plan
 from battery_optimizer.climate.mpc_config import MpcConfig
-from battery_optimizer.climate.mpc_model import Exogenous, RcComfortModel
+from battery_optimizer.climate.mpc_model import Exogenous, HeatLaw, RcComfortModel
 
 __all__ = [
+    "ACTIONS",
     "Context",
+    "Prior",
     "causal_outdoor",
     "comfort_minimum",
     "decision_inputs",
     "fit_cop",
+    "fit_prior",
+    "heat_driven",
+    "open_loop_accuracy",
     "prepare_season",
     "replay_days",
+    "run_decision",
     "summarise",
 ]
 
@@ -306,6 +312,74 @@ def _observe_piece(model: RcComfortModel, w: np.ndarray, y: np.ndarray, lo: int,
     return xs[lo - start :], age[lo - start :]
 
 
+@dataclass(frozen=True)
+class Prior:
+    """B0's season prior of the ``b2d`` model: every parameter, the heat law, the valve cap and
+    the observer gain, fitted on one season (the replay's ``PRIOR_OF``, the live shadow's last
+    complete season)."""
+
+    season: str
+    rooms: tuple[str, ...]
+    params: dict[str, float]
+    n_diurnal: int
+    fit_info: dict[str, Any]
+    law: HeatLaw
+    law_stats: dict[str, Any]
+    cap: plant.ValveCap
+    process_var: float
+    gain: np.ndarray
+
+    def model(self, params: dict[str, float] | None = None) -> RcComfortModel:
+        """The model with *params* (default: the prior's) and the prior's law, cap and gain."""
+        return b2d.make_model(
+            b2d.B2D_NAME,
+            params or self.params,
+            self.n_diurnal,
+            self.law,
+            self.cap,
+            self.rooms,
+            gain=self.gain,
+        )
+
+
+def fit_prior(
+    d: ClimateData,
+    ccfg: ClimateConfig,
+    season: str,
+    *,
+    w_hist: np.ndarray,
+    n_diurnal: int,
+    phi: float,
+) -> Prior:
+    """Fit the ``b2d`` prior on the training slots of *season* (B0's ``fitm``), then the heat law
+    on the prior model's observer slab states."""
+    rooms = tuple(d.comfort_rooms)
+    train = fit.train_slots(d, [season])
+    params, fit_info = b2d.fit_b2d(d, w_hist, train, n_diurnal)
+    cap = b2d.cap_for(d, ccfg, train, phi)
+    ad, bd = b2d.rc_matrices(params, n_diurnal)
+    pv = b2d.process_var(d, ad, bd, w_hist, train)
+    gain = thermal.observer_gain(ad, pv, thermal.MEASUREMENT_SIGMA_K**2)
+    placeholder = HeatLaw(0.0, 0.0, 0.0, float(ccfg.comfort.low_c))
+    prior_model = b2d.make_model(
+        b2d.B2D_NAME, params, n_diurnal, placeholder, cap, rooms, gain=gain
+    )
+    prior_states, _ = prior_model.observe(w_hist, d.t_air)
+    law, law_stats = b2d.fit_heat_law(d, prior_states, cap, train, float(ccfg.comfort.low_c))
+    return Prior(
+        season=season,
+        rooms=rooms,
+        params=params,
+        n_diurnal=n_diurnal,
+        fit_info=fit_info,
+        law=law,
+        law_stats=law_stats,
+        cap=cap,
+        process_var=pv,
+        gain=np.asarray(gain, float),
+    )
+
+
 def prepare_season(
     d: ClimateData,
     ccfg: ClimateConfig,
@@ -341,16 +415,9 @@ def prepare_season(
 
     n_d = diurnal.shape[1]
     prior_season = PRIOR_OF[season]
-    train = fit.train_slots(d, [prior_season])
-    params, fit_info = b2d.fit_b2d(d, w_hist, train, n_d)
-    cap = b2d.cap_for(d, ccfg, train, phi)
-    ad, bd = b2d.rc_matrices(params, n_d)
-    pv = b2d.process_var(d, ad, bd, w_hist, train)
-    gain = thermal.observer_gain(ad, pv, thermal.MEASUREMENT_SIGMA_K**2)
-    placeholder = b2d.HeatLaw(0.0, 0.0, 0.0, float(ccfg.comfort.low_c))
-    prior_model = b2d.make_model(b2d.B2D_NAME, params, n_d, placeholder, cap, rooms, gain=gain)
-    prior_states, _ = prior_model.observe(w_hist, y)
-    law, law_stats = b2d.fit_heat_law(d, prior_states, cap, train, float(ccfg.comfort.low_c))
+    prior = fit_prior(d, ccfg, prior_season, w_hist=w_hist, n_diurnal=n_d, phi=phi)
+    params, law, cap, gain = prior.params, prior.law, prior.cap, prior.gain
+    fit_info, law_stats, pv = prior.fit_info, prior.law_stats, prior.process_var
 
     re = cfg.model.reestimate
     pieces: list[tuple[int, RcComfortModel]] = []
@@ -420,11 +487,19 @@ def _split_kh(rooms, temps, minimum, cfg) -> dict[str, float]:
     return {"day_kh": day_kh, "floor_kh": floor_kh, "coverage": min(day_cov, floor_cov)}
 
 
-def _legacy_action(ctx: Context, t0: int, inp: dict[str, Any]):
-    """The legacy actions over the horizon: replayed permission outside DHW and the measured water
-    target; ``None`` where unknown (the run stops there)."""
+#: The actions an open-loop accuracy row drives the model with: the replayed legacy permission
+#: (B1, legacy regime) or the measured space-heating run (the live shadow once the rule is retired;
+#: weaker, because a run is only seen where heat was delivered).
+ACTIONS = ("permission", "measured_run")
+
+
+def _legacy_action(ctx: Context, t0: int, inp: dict[str, Any], action: str = "permission"):
+    """The actions over the horizon: the replayed permission (or the measured space-heating run)
+    outside DHW and the measured water target; the run stops where either is unknown."""
     d, h = ctx.d, ctx.horizon
-    u = d.u[t0 : t0 + h]
+    if action not in ACTIONS:
+        raise ValueError(f"action must be one of {ACTIONS}, not {action!r}")
+    u = d.u[t0 : t0 + h] if action == "permission" else ctx.space_heat[t0 : t0 + h]
     water = d.columns["flow_target_temp_mean_c"][t0 : t0 + h]
     on = (u == 1.0) & ~inp["dhw"]
     known = np.isfinite(u) & (~on | np.isfinite(water))
@@ -432,10 +507,19 @@ def _legacy_action(ctx: Context, t0: int, inp: dict[str, Any]):
 
 
 def run_decision(
-    ctx: Context, t0: int, *, midnight: bool = False, accuracy: bool = True
+    ctx: Context,
+    t0: int,
+    *,
+    midnight: bool = False,
+    accuracy: bool = True,
+    per_slot: bool = False,
+    inp: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Plan at *t0* and score the model on the legacy actions of the same horizon."""
-    inp = decision_inputs(ctx, t0)
+    """Plan at *t0* and score the model on the legacy actions of the same horizon.
+
+    *per_slot* adds every slot of the plan (the live shadow keeps them); *inp* are the
+    :func:`decision_inputs` when the caller already built them."""
+    inp = decision_inputs(ctx, t0) if inp is None else inp
     if inp is None:
         return None
     d, cfg = ctx.d, ctx.cfg
@@ -484,12 +568,18 @@ def run_decision(
                 },
             }
         )
-        if midnight:
+        if midnight or per_slot:
             rec["plan_on"] = p.on.astype(np.int8).tolist()
             rec["plan_elec_slot"] = np.round(p.elec_kwh, 4).tolist()
             rec["plan_temps"] = np.round(temps, 3).tolist()
+        if per_slot:
+            offsets = np.asarray(cfg.water.offsets_k)
+            heat = p.on > 0
+            rec["plan_offset_k"] = np.where(heat, offsets[p.offset_index], 0).astype(int).tolist()
+            rec["plan_water_c"] = [None if not np.isfinite(w) else float(w) for w in p.water]
+            rec["plan_valve_open"] = np.round(np.nan_to_num(p.valve_open), 3).tolist()
     if accuracy:
-        rec["accuracy"] = _accuracy(ctx, t0, inp, model, midnight)
+        rec["accuracy"] = open_loop_accuracy(ctx, t0, inp, model, midnight)
     return rec
 
 
@@ -510,12 +600,22 @@ def _slot_stats(model, p: Plan, cfg: MpcConfig) -> dict[str, Any]:
     return out
 
 
-def _accuracy(
-    ctx: Context, t0: int, inp: dict[str, Any], model: RcComfortModel, midnight: bool
+def open_loop_accuracy(
+    ctx: Context,
+    t0: int,
+    inp: dict[str, Any],
+    model: RcComfortModel,
+    midnight: bool,
+    *,
+    action: str = "permission",
 ) -> dict[str, Any]:
+    """Section (a): the model from ``inp["x0"]`` over ``inp["ex"]`` against the measured rooms at
+    the accuracy horizons, driven by the actions (``air``, ``hall``) and by the measured heat
+    (``air_q``); errors are prediction minus measurement, ``pers_*`` the persistence errors.  A
+    midnight origin with the whole horizon known adds the day's heat and electricity (``day``)."""
     d, cfg, h = ctx.d, ctx.cfg, ctx.horizon
     ex: Exogenous = inp["ex"]
-    on, water, run = _legacy_action(ctx, t0, inp)
+    on, water, run = _legacy_action(ctx, t0, inp, action)
     hall = list(model.rooms).index(cfg.comfort.day_room)
     measured_ex = Exogenous(
         t_out=ex.t_out,
@@ -538,11 +638,7 @@ def _accuracy(
     pers_hall = d.room_temp[cfg.comfort.day_room][t0 - 1]
     # heat-driven (measured Q): the thermal part alone
     q_meas = np.where(inp["dhw"][:run], 0.0, d.q_heat_kw[t0 : t0 + run])
-    q_known = fit._run_length(np.isfinite(q_meas), 0, run)
-    xs_q = None
-    if q_known > 0:
-        w = model.inputs(q_meas[:q_known], _cut(measured_ex, q_known))
-        xs_q = thermal.simulate(model.ad, w @ model.bd.T, inp["x0"])
+    xs_q, q_known = heat_driven(model, inp["x0"], measured_ex, q_meas)
     for hh in cfg.replay.accuracy_horizons_hours:
         j = 4 * hh - 1
         if j >= run:
@@ -571,6 +667,18 @@ def _accuracy(
                 "e_meas_kwh": float(e_meas.sum()),
             }
     return out
+
+
+def heat_driven(
+    model: RcComfortModel, x0: np.ndarray, ex: Exogenous, q_kw: np.ndarray
+) -> tuple[np.ndarray | None, int]:
+    """``(states, slots)``: the thermal model alone from *x0*, driven by the heat *q_kw* (kW per
+    slot, DHW slots 0) until the first unknown one; ``None`` when the first is unknown."""
+    q_known = fit._run_length(np.isfinite(q_kw), 0, q_kw.size)
+    if q_known == 0:
+        return None, 0
+    w = model.inputs(q_kw[:q_known], _cut(ex, q_known))
+    return thermal.simulate(model.ad, w @ model.bd.T, np.asarray(x0, float)), q_known
 
 
 def _err(pred: float, obs: float) -> float | None:

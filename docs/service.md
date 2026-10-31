@@ -154,7 +154,9 @@ control surface (`number.*_pd_target_grid_power`, `switch.*_battery_allow_charge
 caps — where `0` means *unlimited*) to `observed`, and switch to `soc_source: entity`.
 
 The optional `archive:` section switches the two [passive archives](#passive-archives) on; without it
-both are off, so a deployed config must carry it.
+both are off, so a deployed config must carry it. The `climate_shadow:` section (off by default) runs the
+[climate shadow](#climate-shadow-track-b2); its three Home Assistant helpers are placeholders until the
+homelab comfort-controller PR creates them, and each may be absent.
 
 The variables the service reads (the complete table for every command is in
 [Configuration](configuration.md#environment-variables)):
@@ -183,7 +185,7 @@ return 405). Bind address `0.0.0.0`, container port **8080**.
 |---|---|
 | `/health/live` | `{"status": "alive"}` — the process and its event loop are up |
 | `/health/ready` | `{ready, inputs_ready, reasons, details}`; 200 or 503 |
-| `/status` | Adapter state (connects, reconnects, resyncs, failures, last error), per-entity freshness, price curve summary, history summary, last solve (timing, outcome), virtual battery, code version, config hash |
+| `/status` | Adapter state (connects, reconnects, resyncs, failures, last error), per-entity freshness, price curve summary, history summary, last solve (timing, outcome), virtual battery, the climate shadow (prior, model hash, last run, queue, error, go-live, verdicts), code version, config hash |
 | `/plan` | Latest plan with its snapshot summary, solver result and intents, plus the current intent (all flagged `shadow`) |
 | `/metrics` | Prometheus exposition |
 
@@ -225,6 +227,18 @@ ID, price, timestamp or household reading is a label.
 | `pvpc_snapshots_total` | counter | `result` (`written`, `failed`) |
 | `weather_forecast_fetches_total` | counter | `result` (`ok` = fetched and written, `failed`) |
 | `archive_last_success_timestamp_seconds` | gauge (absent until the first success) | `archive` (`pvpc_snapshots`, `weather_forecast`) |
+| `climate_shadow_runs_total` | counter | `result` (`planned`, `plan_failed`, `no_state`, `no_inputs`, `error`) |
+| `climate_shadow_solves_total` | counter | `status` (`optimal`, `gap`, `time_limit`, `infeasible`, `error`) |
+| `climate_shadow_solve_duration_seconds` | histogram (one MILP solve) | — |
+| `climate_shadow_scores_total` | counter | `result` (`scored`, `expired`, `failed`) |
+| `climate_shadow_refits_total` | counter | `result` (`refitted`, `prior_kept`) |
+| `climate_shadow_up`, `climate_shadow_scoring_queue` | gauge | — |
+| `climate_shadow_last_run_timestamp_seconds`, `climate_shadow_last_refit_timestamp_seconds` | gauge | — |
+| `climate_shadow_regime` | gauge 0/1 (the regime at the last run) | `regime` (`legacy`, `comfort`, `comfort_off`, `unknown`) |
+| `climate_shadow_last_plan_top_offset_share_ratio` | gauge | — |
+| `climate_shadow_rmse_kelvin`, `climate_shadow_skill_ratio`, `climate_shadow_abs_bias_kelvin`, `climate_shadow_origins` | gauge | `window` (`legacy`, `new`), `horizon` (`1h`, `6h`, `12h`, `24h`) |
+| `climate_shadow_daily_heat_mdape_ratio`, `climate_shadow_valid_weeks`, `climate_shadow_top_offset_share_ratio` | gauge | `window` |
+| `climate_shadow_gate` | gauge 0/1 (state set) | `window`, `criterion` (the six of the preregistration and `verdict`), `status` (`PASS`, `FAIL`, `UNDETERMINED`) |
 
 Suggested alerts (homelab): `ready == 0` for 30 m; `ha_connected == 0` for 10 m;
 `input_stale{role="grid_power"} == 1` for 15 m; `plan_age_seconds > 1800`;
@@ -232,7 +246,9 @@ Suggested alerts (homelab): `ready == 0` for 30 m; `ha_connected == 0` for 10 m;
 `history_age_seconds > 93600`; archives:
 `time() - archive_last_success_timestamp_seconds{archive="weather_forecast"} > 10800` or
 `increase(weather_forecast_fetches_total{result="failed"}[3h]) > 2`. A PVPC snapshot only exists when the sensor
-changes, so alert on `increase(pvpc_snapshots_total{result="failed"}[1h]) > 0` rather than on staleness.
+changes, so alert on `increase(pvpc_snapshots_total{result="failed"}[1h]) > 0` rather than on staleness. Climate
+shadow (when enabled): `climate_shadow_up == 0` for 2 h, `time() - climate_shadow_last_run_timestamp_seconds
+> 7200`, or `increase(climate_shadow_runs_total{result="error"}[6h]) > 2`.
 
 ## Store
 
@@ -247,6 +263,7 @@ files `0600`, directories `0700`:
 | `state/virtual_battery.json` | Virtual SOC (restored after a restart if younger than 6 h) |
 | `pvpc_snapshots/date=YYYY-MM-DD/pvpc_snapshots.jsonl` | One row per PVPC sensor state change (see [Passive archives](#passive-archives)) |
 | `weather_forecasts/date=YYYY-MM-DD/weather_forecasts.jsonl` | One row per fetched HA weather forecast (see [Passive archives](#passive-archives)) |
+| `climate_{decisions,scores,days,models}/date=YYYY-MM-DD/*.jsonl` | The [climate shadow](#climate-shadow-track-b2)'s records (only when it is enabled) |
 
 JSONL rows are appended with a single `O_APPEND` write plus `fsync`; readers skip a torn last line.
 The store is private household data: it never leaves the PVC and is never committed.
@@ -312,6 +329,108 @@ An empty or missing forecast list is a failure and is not written.
 the guard accepts (see [Safety](#safety)). The Home Assistant user behind the token must be allowed to call
 that service (a normal non-admin user is); the token stays read-only in every other respect.
 
+## Climate shadow (track B2)
+
+With `climate_shadow.enabled` the service also runs B0's thermal model and the price-blind comfort MPC
+([climate-mpc](components/climate-mpc.md)) on live data, in **shadow**: it predicts, plans, records and
+scores, and sends nothing anywhere. It is the data source of the preregistered section-A verdicts
+([preregistration](planning/climate-preregistration-2026-27.md)) and of the descriptive MPC-versus-rule
+comparison after the winter (B3). Code: `climate/shadow.py` (live data, decision, scoring),
+`climate/shadow_gates.py` (the gates), `service/climate_shadow.py` (the job).
+
+**Data flow.** Every `replan_every_minutes` of `config/climate-mpc.yaml` (hourly), `offset_minutes`
+after the boundary (default 10, after the weather fetch at :05), on its own worker thread:
+
+1. **Read.** Raw Prometheus samples of the climate signals the job needs (rooms and setpoints, unit
+   outdoor sensor, water target, compressor frequency, heat-pump power by mode, force-DHW, the legacy
+   rule's enable and hours, PVPC) for the trailing `model.reestimate.window_days + 2` days, cached in
+   memory and fetched incrementally after the first run. They go through the feature builder's own slot
+   rules and the climate loader, cut at the decision `t0`, so a live slot is computed like an offline
+   feature-set slot (debiased outdoor sensor, DHW and cooling masks, comfort-room mean, replayed legacy
+   permission). From Home Assistant, through the entity store only: `entities.regime`,
+   `entities.dhw_plan` and `entities.away`, each optional. The forecast is the newest record of the
+   [weather archive](#passive-archives) requested within `forecast_max_age_minutes`.
+2. **Refit** (`every_days`, 7): `ua` and `q0` on the `window_days` (28) complete heating-month days
+   before today, the rest at the prior, exactly as the B1 replay; logged with its model hash.
+3. **Decide** at `t0`: the observer state (causal outdoor series, two warm-up days; recorded as the
+   prediction origin) and the MPC plan over 24 h. Horizon inputs: the forecast outdoor temperature (else
+   the last valid reading held), the DHW window of the comfort controller's plan helper (else yesterday's
+   measured DHW slots), the design setpoints with optimum start (every room 21.5 degC while `away` is on),
+   and the run in progress from the measured slots.
+4. **Score** each origin once the local day of its last horizon slot is complete (so the replayed permission
+   of that day is known): open-loop room predictions at 1, 6, 12 and 24 h, and, for midnight origins, the
+   day's heat delivery. Each completed day gets its validity record.
+5. **Gates**: re-evaluated from the score and day records for `/metrics` and `/status`.
+
+**Enable it.** Fit the prior offline, on the workstation that holds the climate feature set:
+
+```bash
+uv run python hack/climate_shadow_prior.py --feature-set <id> --dataset <dataset dir> --season S3
+```
+
+It prints the prior id and writes `<data_dir>/analysis/v1/climate-shadow/priors/<id>/prior.json`
+(model parameters only, content-addressed). Copy that directory and the private `climate/site.yaml`
+into the service's data directory, set `climate_shadow.enabled: true` and `climate_shadow.prior: <id>`,
+and mount `climate.yaml` and `climate-mpc.yaml` next to `service.yaml` (the two paths are relative to the
+service config's directory). The weather archive should be on (`archive.weather_forecast`, `hourly`);
+without it the horizon holds the last reading. Nothing else is needed: no new credential, the same
+read-only token and Prometheus URL. A missing prior, site file or config is reported
+(`climate_shadow_up 0`, `/status`, a `climate_shadow_error` event) and retried every hour; it never
+affects readiness or the battery planner.
+
+**Where the data lands.** `<data_dir>/service/v1/`, append-only, UTC-day partitions:
+
+| Kind | One row per | Content |
+|---|---|---|
+| `climate_decisions` | run | `t0`, local day and hour, `midnight`, `regime` and the raw helper state, `prior_id`, `model_hash` and parameters, MPC config hash; `inputs` (weather source, forecast time and its offset from the last reading, horizon outdoor temperature, DHW source and slots, away, run in progress, setpoints per room and slot); `origin` (`x0`, observer age); `plan` (status, every solve's status, time and gap, re-linearisation iterates, per slot on/off, water offset and target, open valve share, predicted room temperatures and electricity, the comfort deficit); `status` (`planned`, `plan_failed`, `no_state`, `no_inputs`, `error`) |
+| `climate_scores` | scored origin | `room_mean` per horizon: `heat` (gate basis), `heat_plan_weather`, `persistence` errors in K; `accuracy` (the B1 replay's open-loop block: `air`, `hall`, `air_q`, persistence, and `day` for midnight origins); the action used, regime and a plan summary (status, solve time, heating and top-offset slots, midnight planned electricity) |
+| `climate_days` | completed local day with a decision | coverage of the gate rooms, heat-pump energy and outdoor series, space-heating slots, `valid_heating_day`, the regimes recorded that day |
+| `climate_models` | weekly refit | valid-from day, prior id, parameters, whether the window refitted, window days, model hash, config hashes |
+
+Every row carries `schema_version`, `code_version` and `written_at`. Energy figures are internal values of
+the private store; no metric exposes one.
+
+**Definitions** (the same as the B1 replay unless the preregistration says otherwise):
+
+- **Regime** per record: `comfort` when `input_boolean.comfort_control_enable` is on, `comfort_off` when it
+  is off, `legacy` when it does not exist, `unknown` when HA is not synced. The preregistered windows:
+  legacy = records in `legacy` before go-live; new = records in `comfort` from go-live plus 7 days through
+  2027-03-31. Go-live is `climate_shadow.go_live`, else the first `comfort` record.
+- **Room-mean** (preregistration): the mean of `gate_rooms` (default the four thermostat rooms of design
+  section 3, office A included). The model predicts the comfort-room mean (three rooms); a room is that
+  plus its median offset by local hour from the prior season (stored in the prior).
+- **Gate prediction**: from the persisted origin, driven by the **measured heat and measured outdoor
+  temperature** (B0's 7.3 basis, B1's `air_q`). `heat_plan_weather` is the same with the outdoor series the
+  plan used (diagnostic). The action-driven errors (B1's `air`) use the replayed legacy permission in the
+  legacy regime and the measured space-heating run in the comfort regime (weaker: it conditions on heat
+  being delivered).
+- **Rows**: origins on valid heating days of the window; RMSE, bias and skill on the origins where both
+  the model and persistence have an error. **Daily heat**: midnight origins, the heat law under the actions
+  against the measured heat, median APE on days above 20% of the window's median daily heat.
+
+**Read the gate report** (from the store alone, no network):
+
+```bash
+battery-optimizer climate-shadow-report [--data-dir <store>] [--service-config <yaml>] [--format md|json]
+```
+
+Per window: valid heating days and weeks (6 weeks needed, else every criterion is UNDETERMINED), each
+preregistered criterion with its value, threshold and PASS / FAIL / UNDETERMINED, RMSE, persistence RMSE,
+skill and bias at 1, 6, 12 and 24 h, the daily heat MdAPE, solver statuses and times, the top-offset share
+and the planned-over-rule electricity ratio (descriptive only). The report holds private figures: keep it
+with the data. Locally: `just pull-store`, then point `--data-dir` at the copy.
+
+**Recalibration triggers.** The weekly refit follows the season; the prior stays fixed through both
+preregistered windows, because each verdict is about the model as it ran. A new prior (a new
+`hack/climate_shadow_prior.py` run, set as `climate_shadow.prior`, noted in the
+[regime log](components/regime-log.md)) is fitted for the next season, or earlier only when a trigger of
+[climate-mpc](components/climate-mpc.md#invalidated-when) or
+[thermal-model](components/thermal-model.md#invalidated-when) fires that changes the model's inputs
+themselves: the outdoor source or the heat measurement, the comfort rooms or their thermostats. A change of
+the schedule, the water curve or the machine limits is an edit of the MPC config (a new config hash in every
+decision), not a refit. Changing `gate_rooms`, a threshold or a window is a preregistration amendment,
+allowed only before go-live.
+
 ## Failure modes
 
 | Failure | Detection | Behaviour |
@@ -326,6 +445,7 @@ that service (a normal non-admin user is); the token stays read-only in every ot
 | Solver error or timeout | `solves_total{result}` | Reported; a timed-out thread keeps the worker (`busy`) |
 | Store write fails | `sink_write_errors_total` | Logged; service continues |
 | Archive write fails, or a forecast fetch fails (no session, call refused, timeout, empty or malformed response) | `pvpc_snapshots_total{result="failed"}`, `weather_forecast_fetches_total{result="failed"}` | Logged and counted; the record is dropped; a failed fetch is retried after 30 s, 60 s, ... capped at 10 min (never past the next grid instant); readiness, solves and slot closes are untouched |
+| Climate shadow cannot load (prior, site file or config missing) or a run fails | `climate_shadow_up`, `climate_shadow_runs_total{result="error"}`, `/status` | Recorded (an `error` decision row or a `climate_shadow_error` event), retried at the next hour; readiness and the battery planner are untouched |
 | Restart | `build_info`, events | No plan is resumed; decisions start after the first fresh solve |
 
 ## Shadow-vs-native comparison

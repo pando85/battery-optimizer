@@ -96,6 +96,17 @@ There is **no retention yet**: nothing prunes them. Keys, record schemas, metric
 [shadow service](service.md#passive-archives). The weather fetch is the only Home Assistant service call the
 service can make; the token otherwise stays read-only.
 
+### Climate shadow of the resident service
+
+With `climate_shadow.enabled` in `config/service.yaml`, `serve` runs the track-B2 climate shadow hourly and
+appends its records under `<data dir>/service/v1/climate_{decisions,scores,days,models}/`. It needs, in the
+data directory, the prior written by `hack/climate_shadow_prior.py`
+(`analysis/v1/climate-shadow/priors/<id>/prior.json`, named by `climate_shadow.prior`) and the private
+`climate/site.yaml`, and, next to the service config, `climate.yaml` and `climate-mpc.yaml` (paths relative to
+the service config's directory). No new variable or credential: it uses `BATTERY_OPTIMIZER_PROMETHEUS_URL`
+and the read-only token, and reads three optional HA helpers (placeholders until the homelab comfort
+controller creates them). Keys and ops: [shadow service](service.md#climate-shadow-track-b2).
+
 ### No recurring scheduler yet
 
 There is no recurring scheduler, cron job, or Kubernetes CronJob wired up for this toolkit yet.

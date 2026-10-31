@@ -59,6 +59,7 @@ __all__ = [
     "LoadForecast",
     "LoadHistory",
     "PrometheusHistory",
+    "fetch_points",
     "forecast_load",
 ]
 
@@ -205,6 +206,45 @@ def forecast_load(
 HistoryFetcher = Callable[[datetime, date], LoadHistory]
 
 
+def fetch_points(
+    client: httpx.Client,
+    base_url: str,
+    entity: str,
+    metric: str,
+    start: datetime,
+    end: datetime,
+) -> list[build_mod.RawPoint]:
+    """Raw samples of one entity in ``[start, end)``: instant queries over day-long range
+    vectors (never ``query_range``), non-finite values dropped.  *base_url* is resolved."""
+    spec = extract_prom.EntitySpec(entity, metric, "")
+    points: list[build_mod.RawPoint] = []
+    for c_start, c_end in extract_prom.iter_chunks(start, end, 86400):
+        window = extract_prom.range_window_seconds(c_start, c_end)
+        matrix = extract_prom.query_range_vector(
+            client,
+            base_url=base_url,
+            query=extract_prom.build_range_query(spec, window),
+            time_us=extract_prom.to_micros(c_end),
+        )
+        lo, hi = extract_prom.to_micros(c_start), extract_prom.to_micros(c_end)
+        for series in matrix:
+            labels = {str(k): str(v) for k, v in (series.get("metric") or {}).items()}
+            key = extract_prom.compute_series_key(labels)
+            for raw_ts, raw_value in series.get("values") or []:
+                ts_us = extract_prom.parse_epoch_time(raw_ts)
+                if not lo <= ts_us < hi:
+                    continue
+                value = float(raw_value)
+                if not math.isfinite(value):
+                    continue
+                points.append(
+                    build_mod.RawPoint(
+                        ts=extract_prom.from_micros(ts_us), value=value, series_key=key
+                    )
+                )
+    return points
+
+
 class PrometheusHistory:
     """Synchronous Prometheus reader (run it in a worker thread, never on the loop)."""
 
@@ -242,33 +282,7 @@ class PrometheusHistory:
     def _points(
         self, client: httpx.Client, entity: str, metric: str, start: datetime, end: datetime
     ) -> list[build_mod.RawPoint]:
-        spec = extract_prom.EntitySpec(entity, metric, "")
-        points: list[build_mod.RawPoint] = []
-        for c_start, c_end in extract_prom.iter_chunks(start, end, 86400):
-            window = extract_prom.range_window_seconds(c_start, c_end)
-            matrix = extract_prom.query_range_vector(
-                client,
-                base_url=self._base_url,
-                query=extract_prom.build_range_query(spec, window),
-                time_us=extract_prom.to_micros(c_end),
-            )
-            lo, hi = extract_prom.to_micros(c_start), extract_prom.to_micros(c_end)
-            for series in matrix:
-                labels = {str(k): str(v) for k, v in (series.get("metric") or {}).items()}
-                key = extract_prom.compute_series_key(labels)
-                for raw_ts, raw_value in series.get("values") or []:
-                    ts_us = extract_prom.parse_epoch_time(raw_ts)
-                    if not lo <= ts_us < hi:
-                        continue
-                    value = float(raw_value)
-                    if not math.isfinite(value):
-                        continue
-                    points.append(
-                        build_mod.RawPoint(
-                            ts=extract_prom.from_micros(ts_us), value=value, series_key=key
-                        )
-                    )
-        return points
+        return fetch_points(client, self._base_url, entity, metric, start, end)
 
     def _slot_energy(
         self, client: httpx.Client, entity: str, start: datetime, end: datetime

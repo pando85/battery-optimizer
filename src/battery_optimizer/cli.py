@@ -680,6 +680,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_shadow.add_argument("--format", choices=("md", "json"), default="md")
 
+    # -- climate-shadow-report ---------------------------------------------
+    p_cshadow = subs.add_parser(
+        "climate-shadow-report",
+        help="Preregistered gate report of the climate shadow (track B2) from the store",
+    )
+    _add_common(p_cshadow)
+    p_cshadow.add_argument(
+        "--service-config",
+        default=None,
+        help="Service YAML, for climate_shadow.go_live (default as for serve)",
+    )
+    p_cshadow.add_argument("--format", choices=("md", "json"), default="md")
+
     # -- mirror (deferred) ------------------------------------------------
     p_mirror = subs.add_parser("mirror", help="Mirror dataset to SQL (deferred in Phase 1)")
     _add_common(p_mirror)
@@ -1647,6 +1660,30 @@ def cmd_shadow_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_climate_shadow_report(args: argparse.Namespace) -> int:
+    """Section-A gates of the climate shadow from its persisted scores and day records."""
+    from battery_optimizer.climate.shadow_gates import SEASON_END, evaluate, render_markdown
+    from battery_optimizer.paths import resolve_data_dir
+    from battery_optimizer.service.climate_shadow import RECORDS_SINCE, read_records
+    from battery_optimizer.service.config import load_service_config, resolve_service_config_path
+
+    config = load_service_config(resolve_service_config_path(args.service_config))
+    root = resolve_data_dir(args.data_dir)
+    since = datetime.combine(RECORDS_SINCE, datetime.min.time(), tzinfo=UTC)
+    season_end = datetime.combine(SEASON_END, datetime.min.time(), tzinfo=UTC)
+    until = max(datetime.now(UTC), season_end) + timedelta(days=2)
+    report = evaluate(
+        read_records(root, "climate_scores", since, until),
+        read_records(root, "climate_days", since, until),
+        go_live=config.climate_shadow.go_live,
+    )
+    if args.format == "json":
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(render_markdown(report))
+    return 0
+
+
 def cmd_mirror(args: argparse.Namespace) -> int:
     """Mirror dataset to SQL — deferred in Phase 1."""
     print(
@@ -1676,6 +1713,7 @@ _HANDLERS = {
     "ha-states": cmd_ha_states,
     "serve": cmd_serve,
     "shadow-report": cmd_shadow_report,
+    "climate-shadow-report": cmd_climate_shadow_report,
     "mirror": cmd_mirror,
 }
 

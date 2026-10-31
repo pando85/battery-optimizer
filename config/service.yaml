@@ -142,3 +142,35 @@ archive:
     type: hourly            # hourly | daily | twice_daily
     interval_minutes: 60
     offset_minutes: 5
+
+# Climate shadow (track B2): B0's thermal model and the price-blind comfort MPC on live data,
+# every `replan_every_minutes` of the MPC config (hourly), `offset_minutes` after the boundary.
+# Records decisions, scores and the preregistered gates under <data_dir>/service/v1/climate_*;
+# plans are NEVER sent anywhere.  Needs BATTERY_OPTIMIZER_PROMETHEUS_URL, the prior written by
+# hack/climate_shadow_prior.py in <data_dir>/analysis/v1/climate-shadow/priors/<prior>/ and the
+# private <data_dir>/climate/site.yaml.  The weather forecast is the archive above (hourly).
+climate_shadow:
+  enabled: false
+  climate_config: climate.yaml        # relative to this file's directory
+  mpc_config: climate-mpc.yaml        # horizon, cadence, schedule, refit: as in the B1 replay
+  prior: null                         # prior id (hex prefix); required when enabled
+  offset_minutes: 10                  # after the weather fetch at :05
+  forecast_max_age_minutes: 180       # older archive records: the last outdoor reading is held
+  score_lookback_days: 7              # unscored decisions older than this are dropped
+  # Preregistered room-mean: the thermostat rooms of design section 3 (the owner confirms the
+  # list at review, preregistration section 5).
+  gate_rooms: [bedroom, hall_kitchen, office_t, office_a]
+  # Local day of the comfort controller's go-live; null = the first record in the `comfort`
+  # regime.  The new window starts 7 days later (preregistration section 1).
+  go_live: null
+  # Read-only Home Assistant helpers; each may be absent.  PLACEHOLDERS until the homelab
+  # comfort-controller PR creates them: confirm the ids there.
+  entities:
+    # on = comfort controller in charge (regime `comfort`); absent = `legacy`.
+    regime: input_boolean.comfort_control_enable
+    # The DHW window the comfort controller schedules: "start/end" ISO instants with offset
+    # (comma-separated), a JSON {"start", "end"} object or list, or a daily "HH:MM-HH:MM".
+    # Absent or unparseable: yesterday's measured DHW slots.
+    dhw_plan: input_text.comfort_dhw_plan
+    # Away switch of design section 5 (every room at 21.5 degC); unknown id, so off.
+    away: null
