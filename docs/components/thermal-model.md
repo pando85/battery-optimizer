@@ -13,7 +13,7 @@ learning for optimum start.
 - **In:** climate feature set, [outdoor-temperature](outdoor-temperature.md), [cop-model](cop-model.md)
   for the electricity criteria, the replayed legacy permission `u`, the private site file.
 - **Out:** `<data_dir>/analysis/v1/climate-models/<model_id>/` (`model.json`, `validation.json`).
-- **Consumers:** none live. The offline whole-system replay deliberately does **not** use it.
+- **Consumers:** none live; the whole-system replay does **not** use it; [climate-mpc](climate-mpc.md) (offline) refits B0's candidate.
 
 ## Calibrated on
 
