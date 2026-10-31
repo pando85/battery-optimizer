@@ -42,7 +42,7 @@ ENABLED = {
 }
 
 
-def make_service(tmp_path, server, *, factory=None, **overrides):
+def make_service(tmp_path, server, *, factory=None, sync_timeout=0.05, **overrides):
     holder: list[ShadowService] = []
 
     def default_factory():
@@ -69,6 +69,7 @@ def make_service(tmp_path, server, *, factory=None, **overrides):
         code_version="test-sha",
         ws_transport=server,
         climate_job_factory=factory or default_factory,
+        climate_sync_timeout_s=sync_timeout,
     )
     holder.append(service)
     return service
@@ -185,6 +186,113 @@ def test_on_start_the_current_boundary_is_caught_up_once_its_offset_passed(
         shutdown(service)
     expected = MIDNIGHT + timedelta(minutes=minutes if immediately else 10)
     assert runs == [expected]
+
+
+async def _cancel(*tasks):
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def test_the_catch_up_run_waits_for_the_ha_sync_and_records_legacy(tmp_path):
+    service = make_service(tmp_path, FakeHAServer(), sync_timeout=30.0)
+    entered = []
+    run = service.run_climate_shadow
+
+    async def spy():
+        entered.append(service.ha.stats.synced)
+        return await run()
+
+    service.run_climate_shadow = spy
+
+    async def go():
+        loop_task = asyncio.create_task(service._climate_loop())
+        for _ in range(20):  # the loop is at the catch-up run but HA has not synced
+            await asyncio.sleep(0)
+        assert entered == [] and service.climate is None and not service.ha.stats.synced
+        ha_task = asyncio.create_task(service.ha.run())
+
+        def records():
+            end = RUN_AT + timedelta(hours=1)
+            return list(iter_records(tmp_path / "data", "climate_decisions", MIDNIGHT, end))
+
+        await wait_until(lambda: records(), timeout=10.0)
+        await service.ha.stop()
+        await _cancel(loop_task, ha_task)
+        return records()
+
+    try:
+        dec = asyncio.run(go())[0]
+    finally:
+        shutdown(service)
+    assert entered[0] is True and dec["regime"] == "legacy"
+
+
+def test_the_catch_up_run_does_not_wait_without_ha(tmp_path):
+    service = make_service(tmp_path, FakeHAServer(), sync_timeout=30.0)
+    service.ha = None  # not configured: nothing to wait for
+    regimes = []
+
+    async def fake_run():
+        regimes.append(service.climate_inputs(service.clock.now()).regime)
+        raise asyncio.CancelledError
+
+    service.run_climate_shadow = fake_run
+
+    async def go():
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(service._climate_loop(), timeout=2.0)
+
+    try:
+        asyncio.run(go())
+    finally:
+        shutdown(service)
+    assert regimes == ["unknown"]
+
+
+def test_the_catch_up_run_goes_ahead_after_the_timeout_and_records_unknown(tmp_path, caplog):
+    service = make_service(tmp_path, FakeHAServer(), sync_timeout=0.02)  # HA is never started
+    regimes = []
+
+    async def fake_run():
+        regimes.append(service.climate_inputs(service.clock.now()).regime)
+        raise asyncio.CancelledError
+
+    service.run_climate_shadow = fake_run
+
+    async def go():
+        with pytest.raises(asyncio.CancelledError):
+            await service._climate_loop()
+
+    try:
+        with caplog.at_level("WARNING"):
+            asyncio.run(go())
+    finally:
+        shutdown(service)
+    assert regimes == ["unknown"]
+    assert "Home Assistant not synced" in caplog.text
+
+
+def test_the_catch_up_run_does_not_wait_when_ha_is_already_synced(tmp_path):
+    service = make_service(tmp_path, FakeHAServer(), sync_timeout=30.0)
+    service.ha.stats.synced = True
+    regimes = []
+
+    async def fake_run():
+        regimes.append(service.climate_inputs(service.clock.now()).regime)
+        raise asyncio.CancelledError
+
+    service.run_climate_shadow = fake_run
+
+    async def go():
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(service._climate_loop(), timeout=2.0)
+
+    try:
+        asyncio.run(go())
+    finally:
+        shutdown(service)
+    assert regimes == ["legacy"]
 
 
 def test_regime_inputs_from_the_store(tmp_path):

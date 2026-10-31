@@ -383,7 +383,7 @@ service config's directory). The weather archive should be on (`archive.weather_
 without it the horizon holds the last reading. Set `climate_shadow.go_live` on the comfort controller's
 go-live day: without it there is no new-window verdict. Nothing else is needed: no new credential, the
 same read-only token and Prometheus URL. On start the job catches up the current hour once its offset has
-passed. A missing prior, site file or config is reported (`climate_shadow_up 0`, which is also 0 until
+passed, after the first Home Assistant sync (at most 60 s, then it runs anyway and records regime `unknown`). A missing prior, site file or config is reported (`climate_shadow_up 0`, which is also 0 until
 the job has loaded; `/status`; a `climate_shadow_error` event) and retried every hour; it never affects
 readiness or the battery planner.
 
