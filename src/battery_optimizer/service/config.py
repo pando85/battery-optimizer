@@ -22,7 +22,6 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from battery_optimizer._env import get_env
-from battery_optimizer.extract_prom import CLIMATE_ROOMS
 
 __all__ = [
     "BATTERY_ROLES",
@@ -192,10 +191,6 @@ class ArchiveSettings:
     weather_forecast: WeatherForecastSettings = field(default_factory=WeatherForecastSettings)
 
 
-#: The thermostat rooms of the comfort-controller design (section 3): the preregistered room-mean.
-DESIGN_ROOMS: tuple[str, ...] = tuple(CLIMATE_ROOMS)
-
-
 @dataclass(frozen=True)
 class ClimateShadowSettings:
     """Live shadow of the thermal model and the comfort MPC (track B2); reads only.
@@ -214,12 +209,11 @@ class ClimateShadowSettings:
     forecast_max_age_minutes: int = 180
     #: Unscored decisions older than this are dropped from the scoring queue.
     score_lookback_days: int = 7
-    gate_rooms: tuple[str, ...] = DESIGN_ROOMS
     #: Local day of the comfort controller's go-live; ``None`` = the first ``comfort`` record.
     go_live: date | None = None
     regime_entity: str | None = "input_boolean.comfort_control_enable"
     dhw_plan_entity: str | None = "input_text.comfort_dhw_plan"
-    away_entity: str | None = None
+    away_entity: str | None = "input_boolean.comfort_away"
 
     def entities(self) -> tuple[str, ...]:
         return tuple(e for e in (self.regime_entity, self.dhw_plan_entity, self.away_entity) if e)
@@ -274,7 +268,6 @@ class ServiceConfig:
             "archive": asdict(self.archive),
             "climate_shadow": {
                 **asdict(self.climate_shadow),
-                "gate_rooms": list(self.climate_shadow.gate_rooms),
                 "go_live": self.climate_shadow.go_live.isoformat()
                 if self.climate_shadow.go_live
                 else None,
@@ -443,7 +436,6 @@ _CLIMATE_SHADOW_KEYS = (
     "offset_minutes",
     "forecast_max_age_minutes",
     "score_lookback_days",
-    "gate_rooms",
     "go_live",
     "entities",
 )
@@ -465,16 +457,6 @@ def _parse_climate_shadow(raw: Mapping[str, Any]) -> ClimateShadowSettings:
         if value is not None and (not isinstance(value, str) or not _ENTITY_ID.match(value)):
             raise ValueError(f"service config: {name}.entities.{key} must be an entity ID or null")
         entities[key] = value
-    rooms = raw.get("gate_rooms", list(DESIGN_ROOMS))
-    if (
-        not isinstance(rooms, list)
-        or not rooms
-        or len(set(rooms)) != len(rooms)
-        or any(r not in DESIGN_ROOMS for r in rooms)
-    ):
-        raise ValueError(
-            f"service config: {name}.gate_rooms must be distinct rooms of {DESIGN_ROOMS}"
-        )
     go_live = raw.get("go_live")
     if go_live is not None:
         if isinstance(go_live, str):
@@ -511,7 +493,6 @@ def _parse_climate_shadow(raw: Mapping[str, Any]) -> ClimateShadowSettings:
             raw.get("forecast_max_age_minutes", 180), f"{name}.forecast_max_age_minutes"
         ),
         score_lookback_days=_int(raw.get("score_lookback_days", 7), f"{name}.score_lookback_days"),
-        gate_rooms=tuple(rooms),
         go_live=go_live,
         regime_entity=entities["regime"],
         dhw_plan_entity=entities["dhw_plan"],

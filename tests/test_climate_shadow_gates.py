@@ -39,8 +39,25 @@ def test_the_thresholds_are_the_preregistered_ones():
         assert phrase in text, phrase
     assert (g.MIN_VALID_DAYS, g.SETTLING_DAYS, g.HEAT_DAY_SHARE) == (42, 7, 0.20)
     assert g.SEASON_END == date(2027, 3, 31)
-    # no amendment yet: a dated amendment must change this test together with the constants
-    assert "| (none) | | | | |" in text
+    # the pre-data amendment of 2026-10-31 (one row per change, all before any data)
+    for phrase in (
+        "| 2026-10-31 | Room-mean (sections 1 and 2) |",
+        "| 2026-10-31 | Prediction basis (section 2) |",
+        "| 2026-10-31 | Daily heat-delivery error, new regime (section 2) |",
+        "| 2026-10-31 | Go-live (section 1) |",
+    ):
+        assert phrase in text, phrase
+    assert "| (none) | | | | |" not in text
+
+
+def test_the_gate_room_mean_is_b0s_comfort_rooms_with_zero_offset():
+    from battery_optimizer.climate.config import load_climate_config
+
+    climate = load_climate_config(PREREG.parents[2] / "config" / "climate.yaml")
+    assert g.GATE_ROOMS == ("bedroom", "hall_kitchen", "office_t") == tuple(climate.comfort.rooms)
+    assert "office_a" not in g.GATE_ROOMS
+    text = " ".join(PREREG.read_text().split())
+    assert "bedroom, hall_kitchen and office_t" in text and "zero offset" in text
 
 
 def test_windows_follow_go_live_and_the_settling_days():
@@ -58,7 +75,29 @@ def test_windows_follow_go_live_and_the_settling_days():
         {"local_day": "2026-11-12", "regime": "comfort"},
     ]
     assert g.find_go_live(recs) == date(2026, 11, 10)
-    assert g.find_go_live(recs, date(2026, 11, 9)) == date(2026, 11, 9)
+
+
+def test_a_new_window_verdict_needs_a_configured_go_live():
+    scores, days = _records(date(2026, 11, 1), 60, "comfort")
+    report = g.evaluate(scores, days)
+    assert report["go_live"] is None and report["go_live_provisional"] == "2026-11-01"
+    new = report["windows"]["new"]
+    assert new["verdict"] == "UNDETERMINED" and "go_live" in new["note"]
+    assert set(new["criteria"].values()) == {"UNDETERMINED"}
+    configured = g.evaluate(scores, days, go_live=date(2026, 11, 1))["windows"]["new"]
+    assert configured["verdict"] == "PASS" and configured["valid_heating_days"] == 53
+
+
+def test_only_the_named_lineage_is_evaluated():
+    mine, days = _records(date(2026, 11, 1), 42, "legacy")
+    other, _ = _records(date(2026, 11, 1), 42, "legacy", e6=0.9)
+    for r in other:
+        r["prior_id"] = "fedcba987654"
+    report = g.evaluate(mine + other, days, prior_id="abcdef012345", mpc_config_sha256="cfg")
+    assert report["windows"]["legacy"]["verdict"] == "PASS"
+    assert report["lineages"] == {"abcdef012345/cfg": 42, "fedcba987654/cfg": 42}
+    mixed = g.evaluate(mine + other, days)["windows"]["legacy"]
+    assert mixed["criteria"]["rmse_6h"] == "FAIL"
 
 
 def test_rmse_skill_and_bias_by_hand():
@@ -112,6 +151,8 @@ def _records(first: date, n: int, regime: str, e6=0.2, e12=0.3, heat=(10.0, 11.0
                     "top_slots": 4,
                     "kwh": 3.3,
                 },
+                "prior_id": "abcdef012345",
+                "mpc_config_sha256": "cfg",
             }
         )
         days.append({"day": label, "valid_heating_day": True, "regimes": [regime, "unknown"]})
@@ -154,8 +195,8 @@ def test_invalid_days_and_other_regimes_do_not_count():
     # go-live on day 30: the legacy window keeps 29 days, the new one starts 7 days later
     live = date(2026, 11, 30)
     new, new_days = _records(live, 50, "comfort")
-    report = g.evaluate(scores[:29] + new, days[:29] + new_days)
-    assert report["go_live"] == live.isoformat() and report["go_live_source"] == "records"
+    report = g.evaluate(scores[:29] + new, days[:29] + new_days, go_live=live)
+    assert report["go_live"] == report["go_live_provisional"] == live.isoformat()
     assert report["windows"]["legacy"]["valid_heating_days"] == 28  # day 0 is invalid
     assert report["windows"]["new"]["valid_heating_days"] == 43
     assert report["windows"]["new"]["first_day"] == "2026-12-07"
@@ -168,11 +209,15 @@ def test_the_cli_prints_the_gate_report_from_the_store(tmp_path, capsys):
     import json
 
     from battery_optimizer import cli
+    from battery_optimizer.climate.mpc_config import load_mpc_config
     from battery_optimizer.service.sink import ShadowSink
 
     data = tmp_path / "data"
     sink = ShadowSink(data)
     scores, days = _records(date(2026, 11, 1), 42, "legacy")
+    sha = load_mpc_config(PREREG.parents[2] / "config" / "climate-mpc.yaml").sha256
+    for s in scores:  # the lineage of the committed MPC config
+        s["mpc_config_sha256"] = sha
     for s in scores:
         at = datetime.fromisoformat(s["local_day"] + "T12:00:00+00:00")
         sink.append_climate("climate_scores", at, s)
@@ -186,3 +231,8 @@ def test_the_cli_prints_the_gate_report_from_the_store(tmp_path, capsys):
     assert cli.main([*args, "--format", "json"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["windows"]["legacy"]["valid_heating_days"] == 42
+    assert report["lineage"]["mpc_config_sha256"] == sha
+    assert cli.main([*args, "--mpc-config-sha256", "0" * 64]) == 0  # another lineage: no rows
+    assert "## legacy window: UNDETERMINED" in capsys.readouterr().out
+    assert cli.main([*args, "--mpc-config-sha256", "0" * 64, "--all-lineages"]) == 0
+    assert "## legacy window: PASS" in capsys.readouterr().out

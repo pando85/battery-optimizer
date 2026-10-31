@@ -21,6 +21,7 @@
   thermostat-room temperatures, the heat-pump energy source and the outdoor series present for at least 90%
   of the 15-minute slots. The owner confirms this definition at review.
 - **Room-mean.** The mean of the thermostat rooms listed in [design section 3](comfort-controller-design.md#3-comfort-schedule-and-setpoints).
+  *Amended 2026-10-31 (section 4):* bedroom, hall_kitchen and office_t (`comfort.rooms`), office A excluded.
 - **Persistence.** The last observed value held over the horizon. **Skill** is
   `1 - RMSE(model) / RMSE(persistence)` on the same forecast origins.
 - **UNDETERMINED** means the data requirement was not met. It is never read as a pass.
@@ -81,13 +82,19 @@ saving. Every result is reported with this limit stated.
 ## 4. Amendments
 
 Allowed only **before go-live**, one dated entry each, naming the threshold, the old and the new value and the
-reason. The commit history of this file is the audit trail. No amendment has been made.
+reason. The commit history of this file is the audit trail. One amendment (four rows) has been made, on
+2026-10-31, **before any data was collected**: the shadow runner (B2) was not deployed and no 2026-27 heating
+data existed. No threshold value changed; the rows fix definitions the text left open or that disagreed with
+the evidence the thresholds came from. Where a row and section 1 or 2 differ, the row applies.
 
 | Date | Criterion | Old | New | Reason |
 |---|---|---|---|---|
-| (none) | | | | |
+| 2026-10-31 | Room-mean (sections 1 and 2) | The mean of the thermostat rooms of design section 3 (four rooms, office A included) | The mean of `comfort.rooms` of `config/climate.yaml`: bedroom, hall_kitchen and office_t, which is the model's `t_air` with zero offset; persistence is the same mean held. Office A is excluded as a server heat sink. The valid-day room coverage reads the same three rooms. The four-room mean is reported as a diagnostic only | The thresholds come from B0's 7.3 numbers (0.249 / 0.325 K), which are errors of `t_air` over these three rooms; a four-room mean would test something the thresholds were not derived from |
+| 2026-10-31 | Prediction basis (section 2) | Not stated | The prediction is driven by the **measured heat and the measured outdoor temperature** (`t_out_model`, the last valid reading held where it is unknown), from the shadow's observer state at each forecast origin; the prior fit uses the same outdoor series. It tests the thermal model, not the operational weather forecast; the error with the forecast the plan used is a diagnostic | The B0 7.3 basis the thresholds came from |
+| 2026-10-31 | Daily heat-delivery error, new regime (section 2) | Not stated (the legacy permission `u`) | Legacy regime: the heat law driven by the replayed permission `u`. New regime: driven by the **measured space-heating run**, because the rule and its `u` are retired. This is a weaker test of the heat law (it conditions on heat being delivered). The median APE and the 20%-of-median day filter are unchanged | `u` does not exist after go-live |
+| 2026-10-31 | Go-live (section 1) | Not stated how it is fixed | The new window needs a configured go-live date (`climate_shadow.go_live`); without one there is no new-window verdict. A date taken from the records (the first `comfort` record) is reported as provisional only and never fixes a window | A window boundary must not move with the data |
 
 ## 5. Items for the owner at review
 
-- The validity definition (section 1) and the room list (design section 3). The degree-day base follows `hack/system_sim.py`.
-- The go-live date: it fixes the start of the new regime and the end of the legacy window.
+- The validity definition (section 1) and the room list (design section 3; for section A fixed by the amendment of 2026-10-31). The degree-day base follows `hack/system_sim.py`.
+- The go-live date: it fixes the start of the new regime and the end of the legacy window. It is set in the service config (`climate_shadow.go_live`); a date read from the records is never used (amendment of 2026-10-31).

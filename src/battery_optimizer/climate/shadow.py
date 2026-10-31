@@ -15,22 +15,27 @@ Data path (the same definitions as the B1 replay, :mod:`.mpc_replay`):
 * the model is :class:`ShadowPrior` (B0's ``b2d`` prior fitted offline on the last complete season,
   with its heat law, valve cap, observer gain and COP model) with ``ua`` and ``q0`` re-estimated
   every ``model.reestimate.every_days`` on the trailing ``window_days`` (:func:`refit`);
-* the observer reads the causal outdoor series (B1 ``persistence`` semantics: the last valid
-  reading held) from two warm-up days before the decision;
+* one outdoor series everywhere (:func:`outdoor_series`): B0's ``t_out_model`` (the debiased unit
+  sensor), with the last valid reading held where it is unknown.  The prior fit, the weekly refit,
+  the observer (two warm-up days before the decision) and the gate scoring all read it; live, the
+  data end at the decision, so it is causal;
 * over the horizon the outdoor temperature is the **issued forecast** of the archive (B1's
-  ``perfect`` series replaced by a real forecast), else the last reading held; the DHW mask is the
-  comfort controller's plan (``input_text.comfort_dhw_plan``) or, without one, yesterday's measured
-  DHW slots; setpoints follow the design schedule with optimum start (and away, if mapped); the
-  run in progress comes from the measured slots before the decision.
+  ``perfect`` series replaced by a real forecast), else the last reading held; the DHW mask of
+  today's slots is the comfort controller's plan (``input_text.comfort_dhw_plan``, see
+  :func:`parse_dhw_plan`) and every other slot, or every slot without a plan for today, repeats
+  yesterday's measured DHW slots; setpoints follow the design schedule with optimum start (and
+  away); the run in progress comes from the measured slots before the decision.
 
-Scoring (:func:`score`), once the local day holding the last horizon slot is complete: the open-loop
-prediction from the persisted origin state is driven by the measured heat and the measured outdoor
-temperature (the basis of B0's 7.3 numbers and B1's ``air_q``; the **gate basis**), by the actions
-(B1's ``air``: the replayed permission in the legacy regime, the measured space-heating run after
-it), and by the measured heat with the outdoor series the plan used (diagnostic).  The
-preregistered room-mean (design section 3 rooms, ``gate_rooms``) is the comfort-room prediction
-plus each room's median offset by local hour from the prior season.  Midnight origins add the
-day's heat delivery (``day``), and every complete local day gets its validity (:func:`day_record`).
+Scoring (:func:`score`), once the local day holding the last horizon slot is complete.  The
+**gate prediction** (preregistration amendment of 2026-10-31) is the model's comfort-room mean
+``t_air`` (B0's three ``comfort.rooms``, zero offset) from the persisted origin state, driven by the
+**measured heat and the measured outdoor temperature**: B0's 7.3 basis and B1's ``air_q``.  It tests
+the thermal model, not the operational forecast.  Diagnostics only: the same with the outdoor series
+the plan used (``heat_plan_weather``), the four thermostat rooms of design section 3 with their
+prior-season offsets (``design_rooms``), and B1's action-driven block (the replayed permission in
+the legacy regime; the **measured space-heating run** in the comfort regime, a weaker test of the
+heat law).  Midnight origins add the day's heat delivery (``day``), and every complete local day
+gets its validity (:func:`day_record`).
 
 Nothing here does I/O except :func:`load_prior` / :func:`save_prior`.
 """
@@ -40,7 +45,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
@@ -57,6 +61,7 @@ from battery_optimizer.climate.data import ClimateData, Site, build_climate_data
 from battery_optimizer.climate.mpc import PlanSettings
 from battery_optimizer.climate.mpc_config import MpcConfig, override
 from battery_optimizer.climate.mpc_model import Exogenous, HeatLaw
+from battery_optimizer.climate.shadow_gates import GATE_ROOMS
 from battery_optimizer.extract_prom import CLIMATE_ROOMS, ENTITY_SPECS
 from battery_optimizer.features import (
     CLIMATE_SIGNALS,
@@ -89,6 +94,7 @@ __all__ = [
     "load_prior",
     "model_hash",
     "observer_inputs",
+    "outdoor_series",
     "parse_dhw_plan",
     "refit",
     "save_prior",
@@ -175,10 +181,16 @@ def build_live_data(
     return build_climate_data(table, config=config, site=site, prices=prices, feature_set_id="live")
 
 
+def outdoor_series(d: ClimateData) -> np.ndarray:
+    """B0's ``t_out_model``, with the last valid reading held where it is unknown (a compressor
+    run longer than the debiasing cap, or the slots after the last valid reading)."""
+    return np.where(np.isfinite(d.t_out_model), d.t_out_model, mpc_replay.causal_outdoor(d))
+
+
 def observer_inputs(d: ClimateData, diurnal: np.ndarray) -> np.ndarray:
-    """``w`` of the history with the causal outdoor series (B1 ``persistence`` semantics)."""
+    """``w`` of the history on :func:`outdoor_series` (cooling slots unknown)."""
     w = b2d.full_inputs(d, diurnal)
-    w[:, 1] = np.where(d.cooling, np.nan, mpc_replay.causal_outdoor(d))
+    w[:, 1] = np.where(d.cooling, np.nan, outdoor_series(d))
     return w
 
 
@@ -280,8 +292,9 @@ class ShadowPrior:
             lineage=dict(raw.get("lineage") or {}),
         )
 
-    def gate_offsets(self, rooms: Sequence[str]) -> np.ndarray:
-        """``(24,)`` mean over *rooms* of their offsets from ``t_air`` (unknown hours count 0)."""
+    def room_mean_offsets(self, rooms: Sequence[str]) -> np.ndarray:
+        """``(24,)`` mean over *rooms* of their offsets from ``t_air`` (unknown hours count 0);
+        for the four-room diagnostic only, the gate reads ``t_air`` itself."""
         missing = [r for r in rooms if r not in self.room_offsets]
         if missing:
             raise ValueError(f"the prior has no offsets for the room(s) {missing}")
@@ -300,7 +313,7 @@ def fit_shadow_prior(
     phi: float,
     lineage: Mapping[str, Any],
 ) -> ShadowPrior:
-    """B1's prior (:func:`.mpc_replay.fit_prior`) on the causal outdoor series, its COP model and
+    """B1's prior (:func:`.mpc_replay.fit_prior`) on :func:`outdoor_series`, its COP model and
     every thermostat room's offset, all from the training slots of *season*."""
     hour_frac, weekend = b2d.slot_calendar(d)
     diurnal = b2d.diurnal_matrix(hour_frac, weekend, cfg.model.diurnal_harmonics)
@@ -315,7 +328,7 @@ def fit_shadow_prior(
         room_offsets={r: _nan_none(offsets[i]) for i, r in enumerate(d.rooms)},
         lineage={
             **dict(lineage),
-            "history_outdoor": "causal (last valid reading held)",
+            "history_outdoor": "t_out_model, the last valid reading held where unknown",
             "feature_set_id": d.feature_set_id,
             "climate_config_sha256": ccfg.sha256,
             "mpc_config_sha256": cfg.sha256,
@@ -412,78 +425,55 @@ def detect_regime(state: str | None, *, exists: bool, synced: bool) -> str:
     return "unknown"
 
 
-_HHMM = re.compile(r"^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$")
-
-
-def _interval(start: str, end: str) -> tuple[datetime, datetime] | None:
+def _instant(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
     try:
-        a, b = datetime.fromisoformat(start.strip()), datetime.fromisoformat(end.strip())
+        at = datetime.fromisoformat(value.strip())
     except ValueError:
         return None
-    if a.tzinfo is None or b.tzinfo is None or b <= a:
+    return at.astimezone(UTC) if at.tzinfo is not None else None
+
+
+def parse_dhw_plan(
+    text: str | None, *, starts_us: np.ndarray, tz: ZoneInfo, day: date
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """``(mask, covered)`` of the comfort controller's DHW plan on the slots *starts_us*, or
+    ``None`` when it says nothing about *day* (the decision's local date).
+
+    The homelab app (``comfort_control.py``) writes ``input_text.comfort_dhw_plan`` as JSON:
+    ``{"day": "YYYY-MM-DD", "start": <ISO with offset> | null, "end": ... | null, "forced": ..,
+    "target_written": .., "done": "YYYY-MM-DD" | null}``, or ``{"done": ...}`` alone.  The plan
+    covers *day* only, so ``covered`` is the slots of that local date and the caller fills the
+    rest of the horizon:
+
+    * ``day`` equal to *day*: DHW where a slot starts in ``[start, end)``; ``start`` and ``end``
+      both null (the window is over, or none was chosen) is no DHW for the rest of the day;
+    * otherwise ``done`` equal to *day*: today's window is finished, no DHW for the rest of it;
+    * anything else (a stale plan of another day, empty, ``unknown``, unparseable, one of
+      ``start``/``end`` null or without an offset): ``None``."""
+    if text is None or text.strip().lower() in ("", "unknown", "unavailable", "none"):
         return None
-    return a.astimezone(UTC), b.astimezone(UTC)
-
-
-def parse_dhw_plan(text: str | None, *, starts_us: np.ndarray, tz: ZoneInfo) -> np.ndarray | None:
-    """The DHW mask the comfort controller announced, on the slots *starts_us*, or ``None``.
-
-    Accepted (the helper does not exist yet; the format is this repository's proposal):
-
-    * ``start/end`` ISO-8601 instants with a UTC offset, several separated by ``,`` or ``;``;
-    * a JSON object ``{"start": ..., "end": ...}`` or a list of them;
-    * ``HH:MM-HH:MM``: a daily local window (an end before the start crosses midnight).
-
-    A slot is DHW when its start lies in a window.  Empty, ``unknown``, ``unavailable`` or
-    unparseable text gives ``None`` (the caller falls back to the measured history)."""
-    if text is None:
+    try:
+        obj = json.loads(text)
+    except ValueError:
         return None
-    raw = text.strip()
-    if raw.lower() in ("", "unknown", "unavailable", "none"):
+    if not isinstance(obj, Mapping):
         return None
     t = np.asarray(starts_us, dtype=np.int64)
-    windows: list[tuple[datetime, datetime]] = []
-    if raw[0] in "[{":
-        try:
-            obj = json.loads(raw)
-        except ValueError:
+    local = [datetime.fromtimestamp(int(u) / 1e6, tz=UTC).astimezone(tz).date() for u in t]
+    covered = np.array([x == day for x in local], dtype=bool)
+    if obj.get("day") == day.isoformat():
+        if obj.get("start") is None and obj.get("end") is None:
+            return np.zeros(t.size, dtype=bool), covered
+        a, b = _instant(obj.get("start")), _instant(obj.get("end"))
+        if a is None or b is None or b <= a:
             return None
-        items = obj if isinstance(obj, list) else [obj]
-        for item in items:
-            if not isinstance(item, dict) or not {"start", "end"} <= item.keys():
-                return None
-            iv = _interval(str(item["start"]), str(item["end"]))
-            if iv is None:
-                return None
-            windows.append(iv)
-    elif m := _HHMM.match(raw):
-        h0, m0, h1, m1 = (int(x) for x in m.groups())
-        if h0 > 23 or h1 > 24 or m0 > 59 or m1 > 59 or (h0, m0) == (h1, m1):
-            return None
-        if t.size == 0:
-            return np.zeros(0, dtype=bool)
-        first = datetime.fromtimestamp(int(t[0]) / 1e6, tz=UTC).astimezone(tz).date()
-        last = datetime.fromtimestamp(int(t[-1]) / 1e6, tz=UTC).astimezone(tz).date()
-        day = first - timedelta(days=1)
-        while day <= last:
-            a = datetime.combine(day, time(h0, m0), tzinfo=tz)
-            end_day = day if (h1, m1) > (h0, m0) else day + timedelta(days=1)
-            b = datetime.combine(end_day, time(0), tzinfo=tz) + timedelta(hours=h1, minutes=m1)
-            windows.append((a.astimezone(UTC), b.astimezone(UTC)))
-            day += timedelta(days=1)
-    else:
-        for part in re.split(r"[;,]", raw):
-            if "/" not in part:
-                return None
-            iv = _interval(*part.split("/", 1))
-            if iv is None:
-                return None
-            windows.append(iv)
-    mask = np.zeros(t.size, dtype=bool)
-    for a, b in windows:
         lo, hi = int(a.timestamp() * 1e6), int(b.timestamp() * 1e6)
-        mask |= (t >= lo) & (t < hi)
-    return mask
+        return covered & (t >= lo) & (t < hi), covered
+    if obj.get("done") == day.isoformat():
+        return np.zeros(t.size, dtype=bool), covered
+    return None
 
 
 def forecast_series(record: Mapping[str, Any] | None, starts_us: np.ndarray) -> np.ndarray:
@@ -593,21 +583,23 @@ def decide(
         raise ValueError(f"the live grid does not hold the horizon of {t0_at.isoformat()}")
     model = sp.prior.model(dict(model_rec["params"]))
     hi = t0 + h
-    causal = mpc_replay.causal_outdoor(d)
-    # horizon outdoor: the issued forecast, else the last valid reading held
+    outdoor = outdoor_series(d)
+    # horizon outdoor: the issued forecast, else the last reading held
     fc = forecast_series(inputs.forecast, d.starts_us[t0:hi])
     weather = "forecast" if np.isfinite(fc).all() else "persistence"
-    horizon_t_out = fc if weather == "forecast" else np.full(h, causal[t0 - 1])
-    history_t_out = causal.copy()
+    horizon_t_out = fc if weather == "forecast" else np.full(h, outdoor[t0 - 1])
+    history_t_out = outdoor.copy()
     history_t_out[t0:hi] = horizon_t_out
-    # horizon DHW: the controller's plan, else yesterday's measured slots
-    plan_mask = parse_dhw_plan(inputs.dhw_plan, starts_us=d.starts_us[t0:hi], tz=d.tz)
-    if plan_mask is not None:
-        dhw_source, horizon_dhw = "plan", plan_mask
-    else:
-        back = np.arange(t0, hi) - mpc_replay.SLOTS_PER_DAY
-        horizon_dhw = np.where(back >= 0, d.dhw[np.maximum(back, 0)], False)
-        dhw_source = "history"
+    # horizon DHW: the controller's plan for today's slots, yesterday's measured slots elsewhere
+    back = np.arange(t0, hi) - mpc_replay.SLOTS_PER_DAY
+    horizon_dhw = np.where(back >= 0, d.dhw[np.maximum(back, 0)], False)
+    local_day = t0_at.astimezone(d.tz).date()
+    plan = parse_dhw_plan(inputs.dhw_plan, starts_us=d.starts_us[t0:hi], tz=d.tz, day=local_day)
+    dhw_source = "history"
+    if plan is not None:
+        plan_mask, covered = plan
+        horizon_dhw = np.where(covered, plan_mask, horizon_dhw)
+        dhw_source = "plan_today+history" if not covered.all() else "plan"
     dhw = d.dhw.copy()
     dhw[t0:hi] = horizon_dhw
     live = replace(d, t_out_debiased=history_t_out, t_out_filled=None, dhw=dhw)
@@ -629,8 +621,8 @@ def decide(
             "weather": weather,
             "forecast_requested_at": (inputs.forecast or {}).get("requested_at"),
             "forecast_minus_observed_k": None
-            if not (np.isfinite(fc[0]) and np.isfinite(causal[t0 - 1]))
-            else round(float(fc[0] - causal[t0 - 1]), 3),
+            if not (np.isfinite(fc[0]) and np.isfinite(outdoor[t0 - 1]))
+            else round(float(fc[0] - outdoor[t0 - 1]), 3),
             "t_out": _round(horizon_t_out, 2),
             "dhw_source": dhw_source,
             "dhw_slots": [int(i) for i in np.flatnonzero(horizon_dhw)],
@@ -679,8 +671,17 @@ def scoring_due(t0_at: datetime, horizon_hours: int, now: datetime, tz: ZoneInfo
     return now >= day_end
 
 
-def _gate_room_mean(d: ClimateData, rooms: Sequence[str]) -> np.ndarray:
+def _room_mean(d: ClimateData, rooms: Sequence[str]) -> np.ndarray:
     return np.vstack([d.room_temp[r] for r in rooms]).mean(axis=0)  # NaN unless all known
+
+
+def check_gate_rooms(d: ClimateData) -> None:
+    """The gate's room-mean is ``t_air`` over the preregistered rooms; refuse any other set."""
+    if tuple(d.comfort_rooms) != GATE_ROOMS:
+        raise ValueError(
+            f"comfort.rooms {list(d.comfort_rooms)} differ from the preregistered gate rooms "
+            f"{list(GATE_ROOMS)}"
+        )
 
 
 def score(
@@ -688,12 +689,12 @@ def score(
     decision: Mapping[str, Any],
     d: ClimateData,
     cfg: MpcConfig,
-    gate_rooms: Sequence[str],
 ) -> dict[str, Any] | None:
     """The score record of one decision with an origin, from the measured *d*; ``None`` when *d*
     does not hold the origin and its horizon."""
     if "origin" not in decision:
         return None
+    check_gate_rooms(d)
     cfg = live_config(cfg)
     h = int(cfg.horizon_hours * 4)
     t0_at = datetime.fromisoformat(decision["t0"])
@@ -703,10 +704,8 @@ def score(
     hi = t0 + h
     model = sp.prior.model(dict(decision["model_params"]))
     ctx = _context(sp, d, cfg, model, t0, PlanSettings.from_config(cfg))
-    measured = d.t_out_model[t0:hi]
-    t_out = np.where(np.isfinite(measured), measured, ctx.t_out_causal[t0:hi])
     ex = Exogenous(
-        t_out=t_out,
+        t_out=outdoor_series(d)[t0:hi],
         solar=d.solar[t0:hi],
         diurnal=ctx.diurnal[t0:hi],
         local_hour=d.local_hour[t0:hi].astype(np.int64),
@@ -726,23 +725,30 @@ def score(
     xs_f, n_f = (None, 0)
     if planned.size == h and np.isfinite(planned).all():
         xs_f, n_f = mpc_replay.heat_driven(model, x0, replace(ex, t_out=planned), q_meas)
-    obs = _gate_room_mean(d, gate_rooms)
-    mo = sp.gate_offsets(gate_rooms)
+    four = _room_mean(d, DESIGN_ROOMS)
+    four_off = sp.room_mean_offsets(DESIGN_ROOMS)
+
+    def err(xs: np.ndarray | None, n: int, j: int, y: float, off: float = 0.0) -> float | None:
+        e = xs[j + 1, 0] + off - y if xs is not None and j < n else np.nan
+        return float(e) if np.isfinite(e) else None
+
+    def diff(a: float, b: float) -> float | None:
+        return float(a - b) if np.isfinite(a - b) else None
+
     room_mean: dict[str, dict[str, float | None]] = {}
+    design: dict[str, dict[str, float | None]] = {}
     for hh in cfg.replay.accuracy_horizons_hours:
         j = 4 * hh - 1
-        y = obs[t0 + j]
-        off = mo[int(d.local_hour[t0 + j])]
-
-        def err(xs: np.ndarray | None, n: int) -> float | None:
-            e = xs[j + 1, 0] + off - y if xs is not None and j < n else np.nan
-            return float(e) if np.isfinite(e) else None
-
-        pers = obs[t0 - 1] - y
+        y = d.t_air[t0 + j]  # the gate: comfort-room mean, zero offset
         room_mean[f"h{hh}"] = {
-            "heat": err(xs_q, n_q),
-            "heat_plan_weather": err(xs_f, n_f),
-            "persistence": float(pers) if np.isfinite(pers) else None,
+            "heat": err(xs_q, n_q, j, y),
+            "heat_plan_weather": err(xs_f, n_f, j, y),
+            "persistence": diff(d.t_air[t0 - 1], y),
+        }
+        off = four_off[int(d.local_hour[t0 + j])]
+        design[f"h{hh}"] = {
+            "heat": err(xs_q, n_q, j, four[t0 + j], off),
+            "persistence": diff(four[t0 - 1], four[t0 + j]),
         }
     plan = decision.get("plan") or {}
     solves = plan.get("solves") or []
@@ -753,11 +759,13 @@ def score(
         "midnight": midnight,
         "regime": regime,
         "prior_id": decision.get("prior_id"),
+        "mpc_config_sha256": decision.get("mpc_config_sha256"),
         "model_hash": decision.get("model_hash"),
         "action": action,
         "weather": decision["inputs"]["weather"],
-        "gate_rooms": list(gate_rooms),
+        "gate_rooms": list(GATE_ROOMS),
         "room_mean": room_mean,
+        "design_rooms": design,
         "accuracy": acc,
         "plan": {
             "status": plan.get("status"),
@@ -770,13 +778,13 @@ def score(
     return out
 
 
-def day_record(d: ClimateData, j: int, gate_rooms: Sequence[str]) -> dict[str, Any]:
+def day_record(d: ClimateData, j: int) -> dict[str, Any]:
     """Validity of local day *j* (preregistration section 1): space heating in part of the day,
-    and the thermostat rooms, the heat-pump energy and the outdoor series present in at least 90%
-    of the slots."""
+    and the gate rooms, the heat-pump energy and the outdoor series present in at least 90% of
+    the slots."""
     label, lo, hi = d.days[j]
     n = hi - lo
-    rooms = np.isfinite(np.vstack([d.room_temp[r][lo:hi] for r in gate_rooms])).all(axis=0)
+    rooms = np.isfinite(np.vstack([d.room_temp[r][lo:hi] for r in GATE_ROOMS])).all(axis=0)
     energy = np.isfinite(d.q_heat_kwh[lo:hi]) & np.isfinite(d.e_heat_kwh[lo:hi])
     outdoor = np.isfinite(d.t_out[lo:hi])
     heating = mpc_replay.space_heat_state(d)[lo:hi] == 1.0
@@ -795,5 +803,5 @@ def day_record(d: ClimateData, j: int, gate_rooms: Sequence[str]) -> dict[str, A
         "valid_heating_day": bool(
             d.day_complete[j] and heating.any() and min(coverage.values()) >= 0.9
         ),
-        "gate_rooms": list(gate_rooms),
+        "gate_rooms": list(GATE_ROOMS),
     }

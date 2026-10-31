@@ -4,10 +4,11 @@
 The shadow's model is B0's ``b2d`` (B1 replay's model): every parameter, the heat law, the valve
 cap, the observer gain and the COP model come from one complete heating season, and the service
 re-estimates ``ua``/``q0`` weekly on live data. This script fits that season prior exactly as the
-B1 replay does (``mpc_replay.fit_prior`` and ``fit_cop``), on the **causal** outdoor series (the
-last valid reading held, as the live observer reads it), adds every thermostat room's median
-offset from the comfort-room mean (the preregistered room-mean includes office A) and writes it,
-write-once, to ``<data_dir>/analysis/v1/climate-shadow/priors/<prior_id>/prior.json``.
+B1 replay does (``mpc_replay.fit_prior`` and ``fit_cop``), on B0's ``t_out_model`` (the last valid
+reading held where it is unknown: the series the live observer and the gate read), adds every
+thermostat room's median offset from the comfort-room mean (for the four-room diagnostic; the gate
+reads the comfort-room mean itself) and writes it, write-once, to
+``<data_dir>/analysis/v1/climate-shadow/priors/<prior_id>/prior.json``.
 
 Usage:
     uv run python hack/climate_shadow_prior.py \\

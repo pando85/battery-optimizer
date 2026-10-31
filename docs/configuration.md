@@ -104,8 +104,8 @@ data directory, the prior written by `hack/climate_shadow_prior.py`
 (`analysis/v1/climate-shadow/priors/<id>/prior.json`, named by `climate_shadow.prior`) and the private
 `climate/site.yaml`, and, next to the service config, `climate.yaml` and `climate-mpc.yaml` (paths relative to
 the service config's directory). No new variable or credential: it uses `BATTERY_OPTIMIZER_PROMETHEUS_URL`
-and the read-only token, and reads three optional HA helpers (placeholders until the homelab comfort
-controller creates them). Keys and ops: [shadow service](service.md#climate-shadow-track-b2).
+and the read-only token, and reads three optional HA helpers of the homelab comfort controller. Set
+`climate_shadow.go_live` on its go-live day. Keys and ops: [shadow service](service.md#climate-shadow-track-b2).
 
 ### No recurring scheduler yet
 

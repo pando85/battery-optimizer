@@ -155,8 +155,8 @@ caps — where `0` means *unlimited*) to `observed`, and switch to `soc_source: 
 
 The optional `archive:` section switches the two [passive archives](#passive-archives) on; without it
 both are off, so a deployed config must carry it. The `climate_shadow:` section (off by default) runs the
-[climate shadow](#climate-shadow-track-b2); its three Home Assistant helpers are placeholders until the
-homelab comfort-controller PR creates them, and each may be absent.
+[climate shadow](#climate-shadow-track-b2); its three Home Assistant helpers are those of the homelab
+comfort controller, and each may be absent until it is deployed.
 
 The variables the service reads (the complete table for every command is in
 [Configuration](configuration.md#environment-variables)):
@@ -349,14 +349,21 @@ after the boundary (default 10, after the weather fetch at :05), on its own work
    feature-set slot (debiased outdoor sensor, DHW and cooling masks, comfort-room mean, replayed legacy
    permission). From Home Assistant, through the entity store only: `entities.regime`,
    `entities.dhw_plan` and `entities.away`, each optional. The forecast is the newest record of the
-   [weather archive](#passive-archives) requested within `forecast_max_age_minutes`.
+   [weather archive](#passive-archives) requested at or before `t0` and within
+   `forecast_max_age_minutes` (so the fetch at :05 serves the next hour's decision).
 2. **Refit** (`every_days`, 7): `ua` and `q0` on the `window_days` (28) complete heating-month days
    before today, the rest at the prior, exactly as the B1 replay; logged with its model hash.
-3. **Decide** at `t0`: the observer state (causal outdoor series, two warm-up days; recorded as the
-   prediction origin) and the MPC plan over 24 h. Horizon inputs: the forecast outdoor temperature (else
-   the last valid reading held), the DHW window of the comfort controller's plan helper (else yesterday's
-   measured DHW slots), the design setpoints with optimum start (every room 21.5 degC while `away` is on),
-   and the run in progress from the measured slots.
+3. **Decide** at `t0`: the observer state and the MPC plan over 24 h. The observer runs over two
+   warm-up days and its state is recorded as the prediction origin; it reads `t_out_model`, the same
+   outdoor series as the prior fit and the gate, with the last valid reading held where it is unknown.
+   Horizon inputs:
+   - the forecast outdoor temperature, else the last reading held;
+   - DHW for today's slots from the comfort controller's plan (see the
+     [contract](planning/comfort-controller-design.md#b2-interface-to-the-controller-read-only)), and
+     yesterday's measured DHW slots for the rest of the horizon or when the plan says nothing about
+     today;
+   - the design setpoints with optimum start, or every room at 21.5 degC while `away` is on;
+   - the run in progress from the measured slots.
 4. **Score** each origin once the local day of its last horizon slot is complete (so the replayed permission
    of that day is known): open-loop room predictions at 1, 6, 12 and 24 h, and, for midnight origins, the
    day's heat delivery. Each completed day gets its validity record.
@@ -373,46 +380,56 @@ It prints the prior id and writes `<data_dir>/analysis/v1/climate-shadow/priors/
 into the service's data directory, set `climate_shadow.enabled: true` and `climate_shadow.prior: <id>`,
 and mount `climate.yaml` and `climate-mpc.yaml` next to `service.yaml` (the two paths are relative to the
 service config's directory). The weather archive should be on (`archive.weather_forecast`, `hourly`);
-without it the horizon holds the last reading. Nothing else is needed: no new credential, the same
-read-only token and Prometheus URL. A missing prior, site file or config is reported
-(`climate_shadow_up 0`, `/status`, a `climate_shadow_error` event) and retried every hour; it never
-affects readiness or the battery planner.
+without it the horizon holds the last reading. Set `climate_shadow.go_live` on the comfort controller's
+go-live day: without it there is no new-window verdict. Nothing else is needed: no new credential, the
+same read-only token and Prometheus URL. On start the job catches up the current hour once its offset has
+passed. A missing prior, site file or config is reported (`climate_shadow_up 0`, which is also 0 until
+the job has loaded; `/status`; a `climate_shadow_error` event) and retried every hour; it never affects
+readiness or the battery planner.
 
 **Where the data lands.** `<data_dir>/service/v1/`, append-only, UTC-day partitions:
 
 | Kind | One row per | Content |
 |---|---|---|
 | `climate_decisions` | run | `t0`, local day and hour, `midnight`, `regime` and the raw helper state, `prior_id`, `model_hash` and parameters, MPC config hash; `inputs` (weather source, forecast time and its offset from the last reading, horizon outdoor temperature, DHW source and slots, away, run in progress, setpoints per room and slot); `origin` (`x0`, observer age); `plan` (status, every solve's status, time and gap, re-linearisation iterates, per slot on/off, water offset and target, open valve share, predicted room temperatures and electricity, the comfort deficit); `status` (`planned`, `plan_failed`, `no_state`, `no_inputs`, `error`) |
-| `climate_scores` | scored origin | `room_mean` per horizon: `heat` (gate basis), `heat_plan_weather`, `persistence` errors in K; `accuracy` (the B1 replay's open-loop block: `air`, `hall`, `air_q`, persistence, and `day` for midnight origins); the action used, regime and a plan summary (status, solve time, heating and top-offset slots, midnight planned electricity) |
+| `climate_scores` | scored origin | `room_mean` per horizon (the gate): `heat`, `heat_plan_weather`, `persistence` errors in K of the comfort-room mean `t_air`; `design_rooms` (diagnostic: the four thermostat rooms with their prior-season offsets); `accuracy` (the B1 replay's open-loop block: `air`, `hall`, `air_q`, persistence, and `day` for midnight origins); the action used, regime, `prior_id`, `mpc_config_sha256` and a plan summary (status, solve time, heating and top-offset slots, midnight planned electricity) |
 | `climate_days` | completed local day with a decision | coverage of the gate rooms, heat-pump energy and outdoor series, space-heating slots, `valid_heating_day`, the regimes recorded that day |
 | `climate_models` | weekly refit | valid-from day, prior id, parameters, whether the window refitted, window days, model hash, config hashes |
 
 Every row carries `schema_version`, `code_version` and `written_at`. Energy figures are internal values of
 the private store; no metric exposes one.
 
-**Definitions** (the same as the B1 replay unless the preregistration says otherwise):
+**Definitions** (the B1 replay's, with the
+[preregistration amendment of 2026-10-31](planning/climate-preregistration-2026-27.md#4-amendments)):
 
 - **Regime** per record: `comfort` when `input_boolean.comfort_control_enable` is on, `comfort_off` when it
   is off, `legacy` when it does not exist, `unknown` when HA is not synced. The preregistered windows:
   legacy = records in `legacy` before go-live; new = records in `comfort` from go-live plus 7 days through
-  2027-03-31. Go-live is `climate_shadow.go_live`, else the first `comfort` record.
-- **Room-mean** (preregistration): the mean of `gate_rooms` (default the four thermostat rooms of design
-  section 3, office A included). The model predicts the comfort-room mean (three rooms); a room is that
-  plus its median offset by local hour from the prior season (stored in the prior).
-- **Gate prediction**: from the persisted origin, driven by the **measured heat and measured outdoor
-  temperature** (B0's 7.3 basis, B1's `air_q`). `heat_plan_weather` is the same with the outdoor series the
-  plan used (diagnostic). The action-driven errors (B1's `air`) use the replayed legacy permission in the
-  legacy regime and the measured space-heating run in the comfort regime (weaker: it conditions on heat
-  being delivered).
+  2027-03-31. Go-live is `climate_shadow.go_live` only; **without it there is no new-window verdict**, and
+  the first `comfort` record is reported as a provisional date that never fixes a window.
+- **Room-mean**: B0's three `comfort.rooms` (bedroom, hall_kitchen, office_t), the model's `t_air` with
+  zero offset; persistence is the same mean held. Office A is excluded (server heat sink). The job refuses
+  a `climate.yaml` with other comfort rooms. The four-room mean of design section 3 is a diagnostic.
+- **Gate prediction**: from the persisted origin, driven by the **measured heat and the measured outdoor
+  temperature** (B0's 7.3 basis, B1's `air_q`). It tests the thermal model, not the operational weather
+  forecast. `heat_plan_weather` (the outdoor series the plan used) is a diagnostic.
+- **Daily heat**: midnight origins, the heat law under the actions against the measured heat, median APE
+  on days above 20% of the window's median daily heat. The action is the replayed legacy permission in the
+  legacy regime and the **measured space-heating run** in the comfort regime, which is a weaker test
+  (it conditions on heat being delivered).
 - **Rows**: origins on valid heating days of the window; RMSE, bias and skill on the origins where both
-  the model and persistence have an error. **Daily heat**: midnight origins, the heat law under the actions
-  against the measured heat, median APE on days above 20% of the window's median daily heat.
+  the model and persistence have an error.
+- **Lineage**: one prior and one MPC config. The job resumes, scores and evaluates only the records of
+  its own `prior_id` and `mpc_config_sha256`; the report counts the others.
 
 **Read the gate report** (from the store alone, no network):
 
 ```bash
-battery-optimizer climate-shadow-report [--data-dir <store>] [--service-config <yaml>] [--format md|json]
+battery-optimizer climate-shadow-report [--data-dir <store>] [--service-config <yaml>] \
+    [--prior <id>] [--mpc-config-sha256 <hash>] [--all-lineages] [--format md|json]
 ```
+
+The lineage defaults to the configured prior and the hash of the configured `climate-mpc.yaml`.
 
 Per window: valid heating days and weeks (6 weeks needed, else every criterion is UNDETERMINED), each
 preregistered criterion with its value, threshold and PASS / FAIL / UNDETERMINED, RMSE, persistence RMSE,
@@ -428,8 +445,8 @@ preregistered windows, because each verdict is about the model as it ran. A new 
 [thermal-model](components/thermal-model.md#invalidated-when) fires that changes the model's inputs
 themselves: the outdoor source or the heat measurement, the comfort rooms or their thermostats. A change of
 the schedule, the water curve or the machine limits is an edit of the MPC config (a new config hash in every
-decision), not a refit. Changing `gate_rooms`, a threshold or a window is a preregistration amendment,
-allowed only before go-live.
+decision), not a refit; both start a new lineage, which the gates evaluate apart. Changing the room set,
+a threshold or a window is a preregistration amendment, allowed only before go-live.
 
 ## Failure modes
 

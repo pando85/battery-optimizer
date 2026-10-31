@@ -269,16 +269,24 @@ part of B0 to B3.
 
 ### B2 interface to the controller (read-only)
 
-The shadow reads three Home Assistant helpers the homelab PR should create, and tolerates their absence:
+The shadow reads three helpers of the homelab app (`comfort_control.py`, helpers in
+`config/integrations/appdaemon_comfort.yaml`), writes none of them, and tolerates their absence:
 
 - `input_boolean.comfort_control_enable`: on while the comfort controller is in charge. It labels every
-  shadow record `comfort`; absent means `legacy`. The preregistered windows depend on it.
-- `input_text.comfort_dhw_plan`: the DHW window the scheduler chose, as `start/end` ISO-8601 instants
-  with a UTC offset (several comma-separated), a JSON `{"start", "end"}` object or list, or a daily local
-  `HH:MM-HH:MM`. Absent or unparseable: the shadow uses yesterday's measured DHW slots.
-- the away switch of section 5 (id to be named; off while unmapped).
-
-The ids are placeholders in `config/service.yaml` until that PR fixes them.
+  shadow record `comfort` (off: `comfort_off`; absent: `legacy`). The preregistered windows depend on it.
+- `input_text.comfort_dhw_plan`: JSON the app writes for **today only**, for example
+  `{"day":"2026-11-16","start":"2026-11-16T02:00:00+01:00","end":"2026-11-16T03:00:00+01:00","forced":true,"target_written":true,"done":"2026-11-15"}`.
+  After the window `start` and `end` are null; the app may also write `{"done":"2026-11-16"}` alone.
+  The shadow reads it as follows:
+  - `day` equal to the decision's local date: DHW in the slots that start in `[start, end)`; null
+    `start` and `end` mean no DHW for the rest of that day;
+  - otherwise, `done` equal to that date: today's window is finished, so no DHW today;
+  - a plan of another day (stale), an unreadable value or a helper that does not exist says nothing
+    about today.
+  Today's slots follow the plan. Tomorrow's slots of the 24 h horizon, and every slot when the plan says
+  nothing, repeat yesterday's measured DHW slots.
+- `input_boolean.comfort_away`: on means away (section 5). Every setpoint is 21.5 degC and the minimum is
+  the floor.
 
 ### B1 result (offline replay)
 

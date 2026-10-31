@@ -52,6 +52,7 @@ __all__ = [
     "PrometheusClimateSamples",
     "SampleSource",
     "build_job",
+    "config_paths",
     "latest_forecast",
     "next_run_time",
     "read_records",
@@ -124,22 +125,21 @@ def next_run_time(after: datetime, interval: timedelta, offset_minutes: int) -> 
 
 
 def latest_forecast(
-    data_dir: Path, entity_id: str, now: datetime, max_age: timedelta
+    data_dir: Path, entity_id: str, at: datetime, max_age: timedelta
 ) -> dict[str, Any] | None:
     """The newest archived ``weather.get_forecasts`` record of *entity_id* requested in
-    ``[now - max_age, now]`` (the service's own passive archive; nothing is fetched here)."""
+    ``[at - max_age, at]``; the caller passes the decision ``t0``, so no forecast issued after it
+    is read (the service's own passive archive; nothing is fetched here)."""
     best = None
-    for rec in iter_records(
-        data_dir, "weather_forecasts", now - max_age, now + timedelta(minutes=1)
-    ):
+    for rec in iter_records(data_dir, "weather_forecasts", at - max_age, at + timedelta(minutes=1)):
         if rec.get("entity_id") != entity_id:
             continue
         try:
-            at = datetime.fromisoformat(rec["requested_at"])
+            issued = datetime.fromisoformat(rec["requested_at"])
         except KeyError, TypeError, ValueError:
             continue
-        if now - max_age <= at <= now and (best is None or at > best[0]):
-            best = (at, rec)
+        if at - max_age <= issued <= at and (best is None or issued > best[0]):
+            best = (issued, rec)
     return best[1] if best else None
 
 
@@ -180,6 +180,11 @@ class ClimateShadowJob:
         metrics: Any = None,
     ) -> None:
         check_configs(climate_config, mpc_config)
+        if tuple(climate_config.comfort.rooms) != shadow_gates.GATE_ROOMS:
+            raise ValueError(
+                f"comfort.rooms {list(climate_config.comfort.rooms)} differ from the "
+                f"preregistered gate rooms {list(shadow_gates.GATE_ROOMS)}"
+            )
         self.settings = settings
         self.ccfg = climate_config
         self.cfg = mpc_config
@@ -211,6 +216,10 @@ class ClimateShadowJob:
     def next_run(self, after: datetime) -> datetime:
         return next_run_time(after, self.interval, self.settings.offset_minutes)
 
+    def decision_time(self, now: datetime) -> datetime:
+        """The decision boundary ``t0`` a run at *now* decides for."""
+        return floor_slot(now, int(self.interval.total_seconds()))
+
     # ------------------------------------------------------------------ state
 
     def _write(self, kind: str, at: datetime, record: dict[str, Any]) -> None:
@@ -223,24 +232,29 @@ class ClimateShadowJob:
         since = datetime.combine(RECORDS_SINCE, datetime.min.time(), tzinfo=UTC)
         until = now + timedelta(days=1)
         models = [
-            m
-            for m in iter_records(self.data_dir, "climate_models", since, until)
-            if m.get("prior_id") == self.prior.prior_id
+            m for m in iter_records(self.data_dir, "climate_models", since, until) if self._own(m)
         ]
         self.model = max(models, key=lambda m: m["valid_from"]) if models else None
         if self.model is not None and self.model.get("written_at"):
             self.refit_at = datetime.fromisoformat(self.model["written_at"])
         self.scores = list(iter_records(self.data_dir, "climate_scores", since, until))
-        scored = {s["t0"] for s in self.scores}
+        scored = {s["t0"] for s in self.scores if self._own(s)}
         for rec in iter_records(self.data_dir, "climate_days", since, until):
             self.days[rec["day"]] = rec
         lookback = now - timedelta(days=self.settings.score_lookback_days + 2)
         for rec in iter_records(self.data_dir, "climate_decisions", lookback, until):
             self.decided.add(rec["t0"])
             self.day_regimes.setdefault(rec["local_day"], set()).add(rec.get("regime") or "")
-            if "origin" in rec and rec["t0"] not in scored:
+            if "origin" in rec and rec["t0"] not in scored and self._own(rec):
                 self.queue[rec["t0"]] = rec
         self._loaded = True
+
+    def _own(self, rec: Mapping[str, Any]) -> bool:
+        """A record of this job's lineage: its prior and its MPC config."""
+        return (
+            rec.get("prior_id") == self.prior.prior_id
+            and rec.get("mpc_config_sha256") == self.cfg.sha256
+        )
 
     # ------------------------------------------------------------------ run
 
@@ -249,8 +263,7 @@ class ClimateShadowJob:
         data problem: the outcome is the returned (and recorded) status."""
         if not self._loaded:
             self.load(now)
-        step = int(self.interval.total_seconds())
-        t0 = floor_slot(now, step)
+        t0 = self.decision_time(now)
         key = _iso(t0)
         if key in self.decided:
             return {"status": "skipped", "t0": key}
@@ -279,6 +292,7 @@ class ClimateShadowJob:
                 "status": "error",
                 "error": f"{type(exc).__name__}: {exc}"[:500],
                 "prior_id": self.prior.prior_id,
+                "mpc_config_sha256": self.cfg.sha256,
             }
             d = None
         rec["run_at"] = _iso(now)
@@ -294,7 +308,11 @@ class ClimateShadowJob:
             summary["scored"] = self._score_due(d, now)
             summary["days"] = self._record_days(d, now)
         self.report = shadow_gates.evaluate(
-            self.scores, self.days.values(), go_live=self.settings.go_live
+            self.scores,
+            self.days.values(),
+            go_live=self.settings.go_live,
+            prior_id=self.prior.prior_id,
+            mpc_config_sha256=self.cfg.sha256,
         )
         self.last = {
             **summary,
@@ -336,7 +354,7 @@ class ClimateShadowJob:
             if not shadow.scoring_due(t0, self.horizon_hours, now, self.tz):
                 continue
             try:
-                rec = shadow.score(self.prior, dec, d, self.cfg, self.settings.gate_rooms)
+                rec = shadow.score(self.prior, dec, d, self.cfg)
             except Exception:  # noqa: BLE001 - one bad origin must not stop the others
                 log.exception("climate shadow scoring of %s failed", key)
                 rec = None
@@ -359,7 +377,7 @@ class ClimateShadowJob:
                 continue
             if not d.day_complete[j]:
                 continue
-            rec = shadow.day_record(d, j, self.settings.gate_rooms)
+            rec = shadow.day_record(d, j)
             rec["regimes"] = sorted(r for r in self.day_regimes[day] if r)
             self._write("climate_days", now, rec)
             self.days[day] = rec
@@ -386,6 +404,7 @@ class ClimateShadowJob:
         last = dict(self.last)
         at = last.pop("at", None)
         return {
+            "loaded": True,
             "prior_id": self.prior.prior_id,
             "model_hash": (self.model or {}).get("model_hash"),
             "model_valid_from": (self.model or {}).get("valid_from"),
@@ -412,6 +431,13 @@ def _resolve(path: str, base: Path) -> Path:
     return p if p.is_absolute() else base / p
 
 
+def config_paths(config: ServiceConfig) -> tuple[Path, Path]:
+    """``(climate.yaml, climate-mpc.yaml)`` of the shadow, relative to the service config."""
+    s = config.climate_shadow
+    base = Path(config.source_path).parent if config.source_path else Path.cwd() / "config"
+    return _resolve(s.climate_config, base), _resolve(s.mpc_config, base)
+
+
 def build_job(
     config: ServiceConfig,
     *,
@@ -426,9 +452,9 @@ def build_job(
     Raises ``ValueError``/``OSError`` with a readable message when something is missing; the
     runtime reports it and retries."""
     s = config.climate_shadow
-    base = Path(config.source_path).parent if config.source_path else Path.cwd() / "config"
-    ccfg = load_climate_config(_resolve(s.climate_config, base))
-    cfg = load_mpc_config(_resolve(s.mpc_config, base))
+    climate_path, mpc_path = config_paths(config)
+    ccfg = load_climate_config(climate_path)
+    cfg = load_mpc_config(mpc_path)
     if s.prior is None:
         raise ValueError("climate_shadow.prior is not set")
     prior = shadow.load_prior(data_dir, s.prior)

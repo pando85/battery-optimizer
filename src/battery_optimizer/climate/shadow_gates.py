@@ -6,20 +6,27 @@ amendment in that file **before go-live**; a test pins them to it.
 
 Windows (preregistration section 1): the **legacy** window is the shadow deployment until the
 comfort controller's go-live (records in the ``legacy`` regime); the **new** window is go-live
-plus 7 days of settling through 2027-03-31 (records in the ``comfort`` regime).  Go-live is the
-first local day of a record in the ``comfort`` regime unless the service config names it.  A
-record whose regime does not match its window (``unknown``, ``comfort_off``, ...) counts in
-neither.  Each window needs at least 6 weeks (42) of valid heating days, else every criterion is
-UNDETERMINED, which is never read as a pass.
+plus 7 days of settling through 2027-03-31 (records in the ``comfort`` regime).  Go-live is
+``climate_shadow.go_live`` of the service config: **without it there is no new-window verdict**
+(UNDETERMINED); the first ``comfort`` record is reported as a provisional date only and never fixes
+a window (amendment of 2026-10-31).  A record whose regime does not match its window
+(``unknown``, ``comfort_off``, ...) counts in neither.  Each window needs at least 6 weeks (42) of
+valid heating days, else every criterion is UNDETERMINED, which is never read as a pass.
+
+Only the records of one model lineage are evaluated: the prior id and the MPC config hash the
+caller names (the others are counted in ``lineages``).
 
 Rows: the forecast origins whose local day is a valid heating day of the window.  RMSE, bias and
 skill use the origins where both the model and persistence have an error, so the skill is on the
-same origins.  The model error is the room-mean prediction driven by the measured heat and the
-measured outdoor temperature (:func:`battery_optimizer.climate.shadow.score`, ``heat``).
+same origins.  The room-mean is :data:`GATE_ROOMS` (B0's ``comfort.rooms``, the model's ``t_air``
+with zero offset) and the prediction is driven by the **measured heat and the measured outdoor
+temperature** (B0's 7.3 basis; :func:`battery_optimizer.climate.shadow.score`, ``heat``): a test of
+the thermal model, not of the operational forecast (amendment of 2026-10-31).
 
 The daily heat-delivery error reads the midnight origins: the heat the model's heat law delivers
-under the actions (the replayed permission, or the measured run after the rule is retired) against
-the measured heat, on the days whose measured heat is above 20% of the window's median daily heat.
+under the actions against the measured heat, on the days whose measured heat is above 20% of the
+window's median daily heat.  The action is the replayed permission in the legacy regime and the
+**measured space-heating run** in the comfort regime (the rule is retired), a weaker test.
 
 The plan-versus-rule electricity ratio is **descriptive only** and grants nothing.
 """
@@ -36,6 +43,7 @@ import numpy as np
 
 __all__ = [
     "CRITERIA",
+    "GATE_ROOMS",
     "HEAT_DAY_SHARE",
     "MIN_VALID_DAYS",
     "SEASON_END",
@@ -78,6 +86,9 @@ CRITERIA: tuple[Criterion, ...] = (
         "Daily heat-delivery median absolute percentage error at most 15%",
     ),
 )
+#: The room-mean of every criterion: B0's comfort rooms (``config/climate.yaml`` ``comfort.rooms``),
+#: office A excluded as a server heat sink (amendment of 2026-10-31).
+GATE_ROOMS = ("bedroom", "hall_kitchen", "office_t")
 MIN_VALID_DAYS = 42  # 6 weeks of valid heating days per verdict
 SETTLING_DAYS = 7
 SEASON_END = date(2027, 3, 31)
@@ -88,10 +99,8 @@ REPORT_HORIZONS = (1, 6, 12, 24)
 PASS, FAIL, UNDETERMINED = "PASS", "FAIL", "UNDETERMINED"
 
 
-def find_go_live(records: Iterable[Mapping[str, Any]], override: date | None = None) -> date | None:
-    """The configured go-live day, else the first local day of a ``comfort`` record."""
-    if override is not None:
-        return override
+def find_go_live(records: Iterable[Mapping[str, Any]]) -> date | None:
+    """The first local day of a ``comfort`` record: a **provisional** go-live, reported only."""
     days = [date.fromisoformat(r["local_day"]) for r in records if r.get("regime") == "comfort"]
     return min(days) if days else None
 
@@ -202,17 +211,31 @@ def evaluate(
     days: Iterable[Mapping[str, Any]],
     *,
     go_live: date | None = None,
+    prior_id: str | None = None,
+    mpc_config_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """The gate report of both windows from the score and day records."""
-    scores = list(scores)
+    """The gate report of both windows from the score and day records of one lineage (*prior_id*
+    and *mpc_config_sha256*; ``None`` keeps any)."""
+    every = list(scores)
+    lineages = Counter(f"{r.get('prior_id')}/{str(r.get('mpc_config_sha256'))[:12]}" for r in every)
+    scores = [
+        r
+        for r in every
+        if (prior_id is None or r.get("prior_id") == prior_id)
+        and (mpc_config_sha256 is None or r.get("mpc_config_sha256") == mpc_config_sha256)
+    ]
     days = list(days)
-    live = find_go_live(scores, go_live)
+    live = go_live
+    provisional = find_go_live(scores)
     latest: dict[str, Mapping[str, Any]] = {}
     for rec in days:  # a re-scored day keeps its last record
         latest[rec["day"]] = rec
     report: dict[str, Any] = {
         "go_live": live.isoformat() if live else None,
-        "go_live_source": "config" if go_live else ("records" if live else None),
+        "go_live_provisional": provisional.isoformat() if provisional else None,
+        "lineage": {"prior_id": prior_id, "mpc_config_sha256": mpc_config_sha256},
+        "lineages": dict(sorted(lineages.items())),
+        "gate_rooms": list(GATE_ROOMS),
         "settling_days": SETTLING_DAYS,
         "season_end": SEASON_END.isoformat(),
         "min_valid_days": MIN_VALID_DAYS,
@@ -243,7 +266,13 @@ def evaluate(
         bias = horizons["6h"]["bias"]
         metrics["abs_bias_6h"] = abs(bias) if bias is not None else None
         status, verdict = _verdict(metrics, len(valid))
+        note = None
+        if w == "new" and live is None:
+            status = {c.name: UNDETERMINED for c in CRITERIA}
+            verdict = UNDETERMINED
+            note = "climate_shadow.go_live is not set: no new-window verdict"
         report["windows"][w] = {
+            "note": note,
             "valid_heating_days": len(valid),
             "valid_weeks": len(valid) / 7.0,
             "first_day": valid[0] if valid else None,
@@ -275,9 +304,15 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         "Shadow only: the MPC never acts. Thresholds from "
         "docs/planning/climate-preregistration-2026-27.md; UNDETERMINED is never a pass.",
         "",
-        f"- go-live: {report['go_live'] or 'not yet'} ({report['go_live_source'] or 'none'}); "
-        f"settling {report['settling_days']} days; season end {report['season_end']}; "
-        f"each verdict needs {report['min_valid_days']} valid heating days",
+        f"- go-live: {report['go_live'] or 'not configured'} (first comfort record, provisional: "
+        f"{report['go_live_provisional'] or 'none'}); settling {report['settling_days']} days; "
+        f"season end {report['season_end']}; each verdict needs {report['min_valid_days']} valid "
+        "heating days",
+        f"- room-mean: {', '.join(report['gate_rooms'])} (t_air, zero offset); prediction driven "
+        "by the measured heat and outdoor temperature",
+        f"- lineage: prior {report['lineage']['prior_id'] or 'any'}, MPC config "
+        f"{(report['lineage']['mpc_config_sha256'] or 'any')[:12]}; all records: "
+        f"{report['lineages'] or 'none'}",
         "",
     ]
     names = {c["name"]: c for c in report["criteria"]}
@@ -286,7 +321,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             f"## {w} window: {win['verdict']}",
             "",
             f"- valid heating days {win['valid_heating_days']} ({win['valid_weeks']:.1f} weeks), "
-            f"{win['first_day'] or '-'} to {win['last_day'] or '-'}; origins {win['origins']}",
+            f"{win['first_day'] or '-'} to {win['last_day'] or '-'}; origins {win['origins']}"
+            + (f"; {win['note']}" if win["note"] else ""),
             "",
             "| criterion | value | threshold | status |",
             "|---|---|---|---|",

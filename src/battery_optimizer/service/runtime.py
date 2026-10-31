@@ -486,8 +486,9 @@ class ShadowService:
 
         def work() -> dict[str, Any]:
             forecast = None
-            if weather.enabled:
-                forecast = latest_forecast(self.data_dir, weather.entity_id, now, max_age)
+            if weather.enabled:  # issued at or before t0: nothing after the decision
+                t0 = job.decision_time(now)
+                forecast = latest_forecast(self.data_dir, weather.entity_id, t0, max_age)
             return job.run_once(now, replace(inputs, forecast=forecast))
 
         try:
@@ -504,19 +505,26 @@ class ShadowService:
 
     async def _climate_loop(self) -> None:
         s = self.config.climate_shadow
+        offset = timedelta(minutes=s.offset_minutes)
+        first = True
         while True:
             now = self.clock.now()
-            if self.climate is not None:
+            # at start, catch up the current boundary once its offset has passed (the job skips a
+            # boundary it already decided)
+            if first and now >= floor_slot(now, 3600) + offset:
+                due = now
+            elif self.climate is not None:
                 due = self.climate.next_run(now)
             else:
                 due = next_run_time(now, timedelta(minutes=60), s.offset_minutes)
+            first = False
             await self.clock.sleep(max(0.0, (due - now).total_seconds()))
             await self.run_climate_shadow()
 
     def _climate_view(self) -> dict[str, Any] | None:
         if not self.config.climate_shadow.enabled:
             return None
-        view: dict[str, Any] = {"error": self.climate_error}
+        view: dict[str, Any] = {"error": self.climate_error, "loaded": False}
         if self.climate is not None:
             view.update(self.climate.snapshot())
         return view

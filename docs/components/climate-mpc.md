@@ -22,7 +22,7 @@ plans: nothing writes to Home Assistant or the plant. Owner: this repository (`c
   comfort rooms and offsets as in [thermal-model](thermal-model.md); setpoints from design sections 3
   and 6 (`optimum_start`). **Out:** `<data_dir>/analysis/v1/climate-mpc/<run-id>/`. **Consumers:** B2, B3.
 - **Live shadow (B2,** [ops](../service.md#climate-shadow-track-b2)**):** the same model and MILP hourly on
-  live data (prior from `hack/climate_shadow_prior.py`, forecast weather, the controller's DHW plan); out:
+  live data (prior from `hack/climate_shadow_prior.py`, forecast weather, today's DHW plan); out:
   `service/v1/climate_*`, `climate_shadow_*` metrics, `climate-shadow-report` (preregistration section A).
 
 ## Calibrated on

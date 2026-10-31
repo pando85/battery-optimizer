@@ -98,11 +98,16 @@ def metric(service, name, **labels):
 def test_the_job_runs_read_only_with_the_comfort_regime_and_the_dhw_plan(tmp_path):
     states = [
         ha_state(REGIME, "on", MIDNIGHT),
-        ha_state(DHW_PLAN, "02:00-03:00", MIDNIGHT),
+        ha_state(
+            DHW_PLAN,
+            '{"day":"2026-11-16","start":"2026-11-16T02:00:00+01:00",'
+            '"end":"2026-11-16T03:00:00+01:00","forced":true,"target_written":true,"done":null}',
+            MIDNIGHT,
+        ),
     ]
     server = FakeHAServer(states)
     service = make_service(tmp_path, server)
-    fc_at = MIDNIGHT + timedelta(minutes=5)
+    fc_at = MIDNIGHT - timedelta(minutes=55)  # the fetch of the hour before t0
     service.sink.append_weather_forecast(fc_at, forecast_record(fc_at))
     try:
         _ok, summary = asyncio.run(
@@ -116,8 +121,8 @@ def test_the_job_runs_read_only_with_the_comfort_regime_and_the_dhw_plan(tmp_pat
     assert dec["regime"] == "comfort" and dec["regime_state"] == "on"
     assert dec["inputs"]["dhw_source"] == "plan" and dec["inputs"]["dhw_slots"] == [8, 9, 10, 11]
     assert dec["inputs"]["weather"] == "forecast"
-    # the newest archived forecast: the archive's own fetch at the run, not the older record
-    assert dec["inputs"]["forecast_requested_at"] == RUN_AT.isoformat() != fc_at.isoformat()
+    # the newest forecast issued by t0 (23:00): the archive's own fetch at the run is later
+    assert dec["inputs"]["forecast_requested_at"] == fc_at.isoformat()
     # every byte sent to HA passed the read-only guard; the only service call is the forecast
     # archive's own weather.get_forecasts query, none from the climate job
     for message in server.all_sent:
@@ -144,6 +149,42 @@ def test_the_job_runs_read_only_with_the_comfort_regime_and_the_dhw_plan(tmp_pat
         "new": "UNDETERMINED",
     }
     assert status["actuation"].startswith("none")
+
+
+def test_up_is_zero_until_the_job_is_loaded(tmp_path):
+    service = make_service(tmp_path, FakeHAServer())
+    try:
+        assert service.climate is None and service.climate_error is None
+        assert metric(service, "climate_shadow_up") == 0.0
+        assert service.status()["climate_shadow"]["loaded"] is False
+    finally:
+        shutdown(service)
+
+
+@pytest.mark.parametrize(("minutes", "immediately"), [(25, True), (10, True), (5, False)])
+def test_on_start_the_current_boundary_is_caught_up_once_its_offset_passed(
+    tmp_path, minutes, immediately
+):
+    service = make_service(tmp_path, FakeHAServer())
+    service.clock.set(MIDNIGHT + timedelta(minutes=minutes))
+    runs = []
+
+    async def fake_run():
+        runs.append(service.clock.now())
+        raise asyncio.CancelledError
+
+    service.run_climate_shadow = fake_run
+
+    async def go():
+        with pytest.raises(asyncio.CancelledError):
+            await service._climate_loop()
+
+    try:
+        asyncio.run(go())
+    finally:
+        shutdown(service)
+    expected = MIDNIGHT + timedelta(minutes=minutes if immediately else 10)
+    assert runs == [expected]
 
 
 def test_regime_inputs_from_the_store(tmp_path):
@@ -220,8 +261,8 @@ def test_the_committed_config_keeps_the_job_off_with_placeholder_entities():
     config = load_service_config(REPO / "config" / "service.yaml")
     s = config.climate_shadow
     assert not s.enabled and s.prior is None and s.go_live is None
-    assert s.regime_entity == REGIME and s.dhw_plan_entity == DHW_PLAN and s.away_entity is None
-    assert s.gate_rooms == ("bedroom", "hall_kitchen", "office_t", "office_a")
+    assert s.regime_entity == REGIME and s.dhw_plan_entity == DHW_PLAN
+    assert s.away_entity == "input_boolean.comfort_away"
     raw = yaml.safe_load((REPO / "config" / "service.yaml").read_text())
     assert set(raw["climate_shadow"]) <= set(
         __import__("battery_optimizer.service.config", fromlist=["x"])._CLIMATE_SHADOW_KEYS
@@ -235,7 +276,7 @@ def test_the_committed_config_keeps_the_job_off_with_placeholder_entities():
         ({"climate_shadow.surprise": 1}, "unknown climate_shadow keys"),
         ({"climate_shadow.entities.regime": "not an entity"}, "entities.regime"),
         ({"climate_shadow.entities.extra": "a.b"}, "unknown climate_shadow.entities keys"),
-        ({"climate_shadow.gate_rooms": ["attic"]}, "gate_rooms"),
+        ({"climate_shadow.gate_rooms": ["bedroom"]}, "unknown climate_shadow keys"),
         ({"climate_shadow.go_live": "soon"}, "go_live"),
         ({"climate_shadow.prior": "XYZ"}, "prior id"),
         ({"climate_shadow.offset_minutes": 60}, "offset_minutes"),
@@ -260,9 +301,12 @@ def test_go_live_and_the_battery_config_hash(tmp_path):
 # Static guard
 # ---------------------------------------------------------------------------
 
+CLIMATE = REPO / "src" / "battery_optimizer" / "climate"
 CLIMATE_SHADOW_MODULES = [
-    REPO / "src" / "battery_optimizer" / "climate" / "shadow.py",
-    REPO / "src" / "battery_optimizer" / "climate" / "shadow_gates.py",
+    *sorted(CLIMATE.glob("mpc*.py")),
+    CLIMATE / "b2d.py",
+    CLIMATE / "shadow.py",
+    CLIMATE / "shadow_gates.py",
     REPO / "src" / "battery_optimizer" / "service" / "climate_shadow.py",
 ]
 

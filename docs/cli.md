@@ -502,11 +502,14 @@ Prints the preregistered section-A gate report of the [climate shadow](service.m
 from the records the service persisted (`climate_scores`, `climate_days`); nothing is fetched.
 
 ```bash
-battery-optimizer climate-shadow-report [--data-dir <store>] [--service-config <yaml>] [--format md|json]
+battery-optimizer climate-shadow-report [--data-dir <store>] [--service-config <yaml>] \
+    [--prior <id>] [--mpc-config-sha256 <hash>] [--all-lineages] [--format md|json]
 ```
 
-`--service-config` only supplies `climate_shadow.go_live` (default: the first record in the `comfort`
-regime). Per window (legacy, new): valid heating days, each criterion with value, threshold and PASS /
+`--service-config` supplies `climate_shadow.go_live` (without it there is no new-window verdict; the first
+`comfort` record is shown as a provisional date only), the default prior and the default MPC config hash.
+Only the records of that lineage are evaluated (`--all-lineages` mixes them, as a diagnostic). Per window
+(legacy, new): valid heating days, each criterion with value, threshold and PASS /
 FAIL / UNDETERMINED (fewer than 6 weeks of valid heating days is UNDETERMINED), RMSE, persistence RMSE,
 skill and bias at 1, 6, 12 and 24 h, the daily heat MdAPE, solver statistics, the top-offset share and the
 descriptive plan-over-rule electricity ratio. The figures are private: keep the output with the data.

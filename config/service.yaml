@@ -157,20 +157,19 @@ climate_shadow:
   offset_minutes: 10                  # after the weather fetch at :05
   forecast_max_age_minutes: 180       # older archive records: the last outdoor reading is held
   score_lookback_days: 7              # unscored decisions older than this are dropped
-  # Preregistered room-mean: the thermostat rooms of design section 3 (the owner confirms the
-  # list at review, preregistration section 5).
-  gate_rooms: [bedroom, hall_kitchen, office_t, office_a]
-  # Local day of the comfort controller's go-live; null = the first record in the `comfort`
-  # regime.  The new window starts 7 days later (preregistration section 1).
+  # Local day of the comfort controller's go-live.  REQUIRED for any new-window verdict: while
+  # null, the first `comfort` record is only reported as a provisional date (preregistration
+  # amendment 2026-10-31).  The new window starts 7 days later.  The gate room-mean is fixed by
+  # the preregistration: comfort.rooms of climate.yaml (bedroom, hall_kitchen, office_t).
   go_live: null
-  # Read-only Home Assistant helpers; each may be absent.  PLACEHOLDERS until the homelab
-  # comfort-controller PR creates them: confirm the ids there.
+  # Read-only Home Assistant helpers of the homelab comfort controller
+  # (config/integrations/appdaemon_comfort.yaml); each may be absent until it is deployed.
   entities:
     # on = comfort controller in charge (regime `comfort`); absent = `legacy`.
     regime: input_boolean.comfort_control_enable
-    # The DHW window the comfort controller schedules: "start/end" ISO instants with offset
-    # (comma-separated), a JSON {"start", "end"} object or list, or a daily "HH:MM-HH:MM".
-    # Absent or unparseable: yesterday's measured DHW slots.
+    # JSON written by comfort_control.py: {"day", "start", "end", "forced", "target_written",
+    # "done"} for today only (start/end null once the window is over), or {"done"} alone.
+    # Today's slots follow it; other slots, a stale or unreadable plan: yesterday's DHW slots.
     dhw_plan: input_text.comfort_dhw_plan
-    # Away switch of design section 5 (every room at 21.5 degC); unknown id, so off.
-    away: null
+    # Away (design section 5): every room at 21.5 degC.
+    away: input_boolean.comfort_away

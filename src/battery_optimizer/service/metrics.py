@@ -197,7 +197,7 @@ def _climate_families(c: dict[str, Any]) -> Iterable[Metric]:
         return GaugeMetricFamily(f"{name}_{suffix}", doc, labels=labels)
 
     up = family("up", "1 when the job is loaded (configs, prior, site file)", [])
-    up.add_metric([], 0.0 if c.get("error") else 1.0)
+    up.add_metric([], 1.0 if c.get("loaded") and not c.get("error") else 0.0)
     yield up
     for suffix, key, doc in (
         ("last_run_timestamp_seconds", "last_run_at", "Unix time of the last decision run"),
