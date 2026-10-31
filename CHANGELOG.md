@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.1](https://github.com/pando85/home-energy-optimizer/tree/v0.4.1) - 2026-10-31
+
+### Fixed
+
+- service: Wait for the Home Assistant sync before the climate shadow catch-up run ([3845f67](https://github.com/pando85/home-energy-optimizer/commit/3845f67d1ca2f970a84c701452158f2398263f4c))
+
 ## [v0.4.0](https://github.com/pando85/home-energy-optimizer/tree/v0.4.0) - 2026-10-31
 
 ### Added
