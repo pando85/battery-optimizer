@@ -102,6 +102,8 @@ Planner = Callable[[PlanningSnapshot], PlanResult]
 
 _HISTORY_RETRY_S = 600.0
 _PLAN_MEMORY = 16
+#: Longest the startup catch-up of the climate shadow waits for the first Home Assistant sync.
+CLIMATE_SYNC_TIMEOUT_S = 60.0
 
 
 class NotReadyError(Exception):
@@ -147,6 +149,7 @@ class ShadowService:
         planner: Planner = run_planner,
         enable_ha: bool = True,
         climate_job_factory: Callable[[], ClimateShadowJob] | None = None,
+        climate_sync_timeout_s: float = CLIMATE_SYNC_TIMEOUT_S,
     ) -> None:
         self.config = config
         self.tariff = tariff
@@ -228,6 +231,8 @@ class ShadowService:
         self.virtual_soc_origin: str | None = None
         self._init_virtual_battery()
 
+        self._climate_sync_timeout_s = climate_sync_timeout_s
+        self._ha_synced = asyncio.Event()  # set by the first HA sync; the catch-up run waits on it
         self.climate: ClimateShadowJob | None = None
         self.climate_error: str | None = None
         self._climate_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bo-climate")
@@ -282,6 +287,7 @@ class ShadowService:
     # ------------------------------------------------------------------ HA hooks
 
     def _on_synced(self) -> None:
+        self._ha_synced.set()
         self._spawn(
             self._record_event("ha_synced", {"resyncs": self.ha.stats.resyncs if self.ha else 0})
         )
@@ -509,17 +515,37 @@ class ShadowService:
         first = True
         while True:
             now = self.clock.now()
+            catch_up = False
             # at start, catch up the current boundary once its offset has passed (the job skips a
             # boundary it already decided)
             if first and now >= floor_slot(now, 3600) + offset:
                 due = now
+                catch_up = True
             elif self.climate is not None:
                 due = self.climate.next_run(now)
             else:
                 due = next_run_time(now, timedelta(minutes=60), s.offset_minutes)
             first = False
             await self.clock.sleep(max(0.0, (due - now).total_seconds()))
+            if catch_up:
+                await self._wait_for_ha_sync()
             await self.run_climate_shadow()
+
+    async def _wait_for_ha_sync(self) -> None:
+        """Hold the startup catch-up run until HA has synced, so its regime is not ``unknown``.
+
+        Does not wait without HA or once synced; on timeout the run goes ahead (and records
+        ``unknown``, which is then true).
+        """
+        if self.ha is None or self.ha.stats.synced:
+            return
+        try:
+            await asyncio.wait_for(self._ha_synced.wait(), self._climate_sync_timeout_s)
+        except TimeoutError:
+            log.warning(
+                "climate shadow catch-up: Home Assistant not synced after %.0f s, running anyway",
+                self._climate_sync_timeout_s,
+            )
 
     def _climate_view(self) -> dict[str, Any] | None:
         if not self.config.climate_shadow.enabled:
