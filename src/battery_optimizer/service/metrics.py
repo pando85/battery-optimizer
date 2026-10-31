@@ -178,6 +178,89 @@ class _RuntimeCollector(Collector):
             "Samples that arrived after their slot had been closed",
             snap.get("late_samples"),
         )
+        climate = snap.get("climate_shadow")
+        if climate is not None:
+            yield from _climate_families(climate)
+
+
+#: Values of the ``status`` label of the gate state set.
+GATE_STATUSES = ("PASS", "FAIL", "UNDETERMINED")
+CLIMATE_REGIMES = ("legacy", "comfort", "comfort_off", "unknown")
+CLIMATE_SOLVE_STATUSES = ("optimal", "gap", "time_limit", "infeasible", "error")
+
+
+def _climate_families(c: dict[str, Any]) -> Iterable[Metric]:
+    """The climate shadow's scrape-time gauges (prefix ``battery_optimizer_climate_shadow_``)."""
+    name = f"{PREFIX}_climate_shadow"
+
+    def family(suffix: str, doc: str, labels: list[str]) -> GaugeMetricFamily:
+        return GaugeMetricFamily(f"{name}_{suffix}", doc, labels=labels)
+
+    up = family("up", "1 when the job is loaded (configs, prior, site file)", [])
+    up.add_metric([], 1.0 if c.get("loaded") and not c.get("error") else 0.0)
+    yield up
+    for suffix, key, doc in (
+        ("last_run_timestamp_seconds", "last_run_at", "Unix time of the last decision run"),
+        ("last_refit_timestamp_seconds", "last_refit_at", "Unix time of the last weekly refit"),
+    ):
+        g = family(suffix, doc, [])
+        if c.get(key) is not None:
+            g.add_metric([], c[key].timestamp())
+        yield g
+    regime = family("regime", "1 for the control regime recorded at the last run", ["regime"])
+    current = (c.get("last") or {}).get("regime")
+    for r in CLIMATE_REGIMES:
+        regime.add_metric([r], 1.0 if r == current else 0.0)
+    yield regime
+    queue = family("scoring_queue", "Decisions waiting for their horizon to be observed", [])
+    queue.add_metric([], float(c.get("queue") or 0))
+    yield queue
+    top_last = family(
+        "last_plan_top_offset_share_ratio",
+        "Share of the last plan's heating slots at the top water offset",
+        [],
+    )
+    if (c.get("last") or {}).get("plan_top_offset_share") is not None:
+        top_last.add_metric([], float(c["last"]["plan_top_offset_share"]))
+    yield top_last
+
+    report = c.get("report") or {}
+    windows = report.get("windows") or {}
+    rmse = family(
+        "rmse_kelvin", "Room-mean RMSE of the open-loop prediction", ["window", "horizon"]
+    )
+    skill = family("skill_ratio", "1 - RMSE(model) / RMSE(persistence)", ["window", "horizon"])
+    bias = family("abs_bias_kelvin", "Absolute mean room-mean error", ["window", "horizon"])
+    n = family("origins", "Scored forecast origins on valid heating days", ["window", "horizon"])
+    mdape = family(
+        "daily_heat_mdape_ratio", "Median absolute percentage error of daily heat", ["window"]
+    )
+    weeks = family("valid_weeks", "Valid heating days in the window / 7", ["window"])
+    top = family(
+        "top_offset_share_ratio", "Share of planned heating slots at the top offset", ["window"]
+    )
+    gate = family(
+        "gate",
+        "Preregistered section-A criterion status (state set; criterion verdict = the window)",
+        ["window", "criterion", "status"],
+    )
+    for w, win in windows.items():
+        for h, st in (win.get("horizons") or {}).items():
+            n.add_metric([w, h], float(st.get("n") or 0))
+            for fam, value in ((rmse, st.get("rmse")), (skill, st.get("skill"))):
+                if value is not None:
+                    fam.add_metric([w, h], float(value))
+            if st.get("bias") is not None:
+                bias.add_metric([w, h], abs(float(st["bias"])))
+        if (win.get("daily_heat") or {}).get("mdape") is not None:
+            mdape.add_metric([w], float(win["daily_heat"]["mdape"]))
+        weeks.add_metric([w], float(win.get("valid_weeks") or 0.0))
+        if (win.get("plan") or {}).get("top_offset_share") is not None:
+            top.add_metric([w], float(win["plan"]["top_offset_share"]))
+        for criterion, status in {**win.get("criteria", {}), "verdict": win.get("verdict")}.items():
+            for st in GATE_STATUSES:
+                gate.add_metric([w, criterion, st], 1.0 if st == status else 0.0)
+    yield from (rmse, skill, bias, n, mdape, weeks, top, gate)
 
 
 class ServiceMetrics:
@@ -278,6 +361,44 @@ class ServiceMetrics:
             "Requested energy the replay had to clip (SOC, power, import ceiling, no export)",
             registry=r,
         )
+        self.climate_runs = Counter(
+            f"{PREFIX}_climate_shadow_runs",
+            "Climate shadow decision runs by outcome",
+            ["result"],
+            registry=r,
+        )
+        self.climate_solves = Counter(
+            f"{PREFIX}_climate_shadow_solves",
+            "Comfort-MPC MILP solves by status",
+            ["status"],
+            registry=r,
+        )
+        self.climate_solve_duration = Histogram(
+            f"{PREFIX}_climate_shadow_solve_duration_seconds",
+            "Wall time of one comfort-MPC MILP solve",
+            buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60),
+            registry=r,
+        )
+        self.climate_scores = Counter(
+            f"{PREFIX}_climate_shadow_scores",
+            "Forecast origins leaving the scoring queue by outcome",
+            ["result"],
+            registry=r,
+        )
+        self.climate_refits = Counter(
+            f"{PREFIX}_climate_shadow_refits",
+            "Weekly re-estimations by outcome (refitted, prior_kept)",
+            ["result"],
+            registry=r,
+        )
+        for result in ("planned", "plan_failed", "no_state", "no_inputs", "error"):
+            self.climate_runs.labels(result=result)
+        for status in CLIMATE_SOLVE_STATUSES:
+            self.climate_solves.labels(status=status)
+        for result in ("scored", "expired", "failed"):
+            self.climate_scores.labels(result=result)
+        for result in ("refitted", "prior_kept"):
+            self.climate_refits.labels(result=result)
         for result in ("written", "failed"):
             self.pvpc_snapshots.labels(result=result)
         for result in ("ok", "failed"):

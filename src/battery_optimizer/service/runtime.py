@@ -33,6 +33,13 @@ of every price-entity state change and a periodic ``weather.get_forecasts`` fetc
 They are collected on the event loop but never read by the planner; a failure is
 counted and logged and never touches readiness, a solve or a slot close.
 
+Climate shadow
+--------------
+With ``climate_shadow.enabled`` the track-B2 job (:mod:`.climate_shadow`) runs hourly on its own
+worker thread: B0's thermal model and the comfort MPC on live data, recorded and scored, never
+sent.  It reads three optional HA helpers through the entity store and the weather archive; a
+failure is counted and reported and never touches readiness or the battery planner.
+
 Safety
 ------
 There is no actuation path: the HA adapters are read-only by construction
@@ -51,11 +58,12 @@ import time
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from battery_optimizer.climate.shadow import LiveInputs, detect_regime
 from battery_optimizer.config import TariffConfig
 
 from .archive import (
@@ -64,6 +72,7 @@ from .archive import (
     retry_delay_s,
     weather_forecast_record,
 )
+from .climate_shadow import ClimateShadowJob, build_job, latest_forecast, next_run_time
 from .clock import Clock
 from .config import ServiceConfig
 from .entity_store import EntityState, EntityStore, UpdateResult
@@ -137,6 +146,7 @@ class ShadowService:
         history_fetcher: HistoryFetcher | None = None,
         planner: Planner = run_planner,
         enable_ha: bool = True,
+        climate_job_factory: Callable[[], ClimateShadowJob] | None = None,
     ) -> None:
         self.config = config
         self.tariff = tariff
@@ -150,7 +160,10 @@ class ShadowService:
         self._interval = config.planning.interval_seconds
         self._tz = config.tz
 
-        self.store = EntityStore.for_entities(config.entities.all_entities())
+        climate_entities = config.climate_shadow.entities() if config.climate_shadow.enabled else ()
+        self.store = EntityStore.for_entities(
+            tuple(dict.fromkeys((*config.entities.all_entities(), *climate_entities)))
+        )
         self.observer = SlotObserver(config)
         self.store.add_listener(self.observer.on_state)
         self.store.add_listener(self._on_state)
@@ -215,6 +228,19 @@ class ShadowService:
         self.virtual_soc_origin: str | None = None
         self._init_virtual_battery()
 
+        self.climate: ClimateShadowJob | None = None
+        self.climate_error: str | None = None
+        self._climate_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bo-climate")
+        self._climate_factory = climate_job_factory or (
+            lambda: build_job(
+                config,
+                data_dir=data_dir,
+                sink=self.sink,
+                code_version=code_version,
+                metrics=self.metrics,
+            )
+        )
+
     # ------------------------------------------------------------------ lifecycle
 
     async def start(self) -> None:
@@ -229,6 +255,8 @@ class ShadowService:
             self._tasks.append(
                 asyncio.create_task(self._weather_archive_loop(), name="weather-archive")
             )
+        if self.config.climate_shadow.enabled:
+            self._tasks.append(asyncio.create_task(self._climate_loop(), name="climate-shadow"))
 
     async def stop(self) -> None:
         self._generation += 1  # fence any in-flight solve
@@ -247,6 +275,7 @@ class ShadowService:
         with contextlib.suppress(Exception):
             await self._record_event("service_stopped", {})
         self._executor.shutdown(wait=False, cancel_futures=True)
+        self._climate_pool.shutdown(wait=False, cancel_futures=True)
         self._io.shutdown(wait=True)
         self._history_pool.shutdown(wait=False, cancel_futures=True)
 
@@ -407,6 +436,98 @@ class ShadowService:
             else:
                 failures += 1
                 retry_at = now + timedelta(seconds=retry_delay_s(failures))
+
+    # ------------------------------------------------------------------ climate shadow
+
+    def climate_inputs(self, now: datetime) -> LiveInputs:
+        """The HA states the climate job reads (on the loop: the store is the loop's)."""
+        s = self.config.climate_shadow
+        synced = self.ha is not None and self.ha.stats.synced
+
+        def state(entity: str | None) -> EntityState | None:
+            return self.store.get(entity) if entity else None
+
+        reg, dhw, away = state(s.regime_entity), state(s.dhw_plan_entity), state(s.away_entity)
+        if s.regime_entity:
+            regime = detect_regime(
+                reg.state if reg else None, exists=reg is not None, synced=synced
+            )
+        else:
+            regime = "legacy" if synced else "unknown"
+        return LiveInputs(
+            regime=regime,
+            regime_state=reg.state if reg else None,
+            dhw_plan=dhw.state if dhw is not None and dhw.available else None,
+            away=(away.state.strip().lower() == "on")
+            if away is not None and away.available
+            else None,
+        )
+
+    async def run_climate_shadow(self) -> dict[str, Any] | None:
+        """Load the job if needed and run it once on its worker; ``None`` when it cannot run."""
+        loop = asyncio.get_running_loop()
+        if self.climate is None:
+            try:
+                self.climate = await loop.run_in_executor(self._climate_pool, self._climate_factory)
+                self.climate_error = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - reported and retried at the next run
+                self.climate_error = f"{type(exc).__name__}: {exc}"[:500]
+                self.metrics.climate_runs.labels(result="error").inc()
+                log.error("climate shadow not loaded: %s", self.climate_error)
+                await self._record_event("climate_shadow_error", {"error": self.climate_error})
+                return None
+        job = self.climate
+        now = self.clock.now()
+        inputs = self.climate_inputs(now)
+        weather = self.config.archive.weather_forecast
+        max_age = timedelta(minutes=self.config.climate_shadow.forecast_max_age_minutes)
+
+        def work() -> dict[str, Any]:
+            forecast = None
+            if weather.enabled:  # issued at or before t0: nothing after the decision
+                t0 = job.decision_time(now)
+                forecast = latest_forecast(self.data_dir, weather.entity_id, t0, max_age)
+            return job.run_once(now, replace(inputs, forecast=forecast))
+
+        try:
+            summary = await loop.run_in_executor(self._climate_pool, work)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad run must not stop the loop
+            self.climate_error = f"{type(exc).__name__}: {exc}"[:500]
+            self.metrics.climate_runs.labels(result="error").inc()
+            log.exception("climate shadow run failed")
+            return None
+        self.climate_error = None
+        return summary
+
+    async def _climate_loop(self) -> None:
+        s = self.config.climate_shadow
+        offset = timedelta(minutes=s.offset_minutes)
+        first = True
+        while True:
+            now = self.clock.now()
+            # at start, catch up the current boundary once its offset has passed (the job skips a
+            # boundary it already decided)
+            if first and now >= floor_slot(now, 3600) + offset:
+                due = now
+            elif self.climate is not None:
+                due = self.climate.next_run(now)
+            else:
+                due = next_run_time(now, timedelta(minutes=60), s.offset_minutes)
+            first = False
+            await self.clock.sleep(max(0.0, (due - now).total_seconds()))
+            await self.run_climate_shadow()
+
+    def _climate_view(self) -> dict[str, Any] | None:
+        if not self.config.climate_shadow.enabled:
+            return None
+        view: dict[str, Any] = {"error": self.climate_error, "loaded": False}
+        if self.climate is not None:
+            view.update(self.climate.snapshot())
+        return view
 
     def _request_replan(self, reason: str) -> None:
         if self._loop is None or (self._replan_task and not self._replan_task.done()):
@@ -1141,6 +1262,7 @@ class ShadowService:
             "terminal_value": plan.snapshot.terminal_value_eur_per_kwh if plan else None,
             "virtual_soc": self.virtual_soc,
             "late_samples": self.observer.late_samples,
+            "climate_shadow": self._climate_view(),
         }
 
     def status(self) -> dict[str, Any]:
@@ -1200,7 +1322,24 @@ class ShadowService:
                     "last_error": self.weather_error,
                 },
             },
+            "climate_shadow": self._climate_status(),
             "config_hash": self.config.config_hash(),
+        }
+
+    def _climate_status(self) -> dict[str, Any]:
+        view = self._climate_view()
+        if view is None:
+            return {"enabled": False}
+        report = view.pop("report", None) or {}
+        for key in ("last_run_at", "last_refit_at"):
+            if view.get(key) is not None:
+                view[key] = view[key].isoformat()
+        return {
+            "enabled": True,
+            "actuation": "none (plans are recorded, never sent)",
+            **view,
+            "go_live": report.get("go_live"),
+            "verdicts": {w: v["verdict"] for w, v in (report.get("windows") or {}).items()},
         }
 
     def _archive_success_at(self, archive: str) -> str | None:

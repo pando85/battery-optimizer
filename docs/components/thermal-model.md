@@ -13,7 +13,7 @@ learning for optimum start.
 - **In:** climate feature set, [outdoor-temperature](outdoor-temperature.md), [cop-model](cop-model.md)
   for the electricity criteria, the replayed legacy permission `u`, the private site file.
 - **Out:** `<data_dir>/analysis/v1/climate-models/<model_id>/` (`model.json`, `validation.json`).
-- **Consumers:** none live; the whole-system replay does **not** use it; [climate-mpc](climate-mpc.md) (offline) refits B0's candidate.
+- **Consumers:** not the whole-system replay; [climate-mpc](climate-mpc.md) refits B0's candidate offline (B1) and scores it read-only on live data (B2).
 
 ## Calibrated on
 
@@ -51,10 +51,10 @@ Already unaccepted; triggers against any future fit:
 
 Not by re-running `climate-fit`: the one predeclared iteration is spent and S3 is no longer an untouched
 holdout. Test the candidate above prospectively on live heating data against the criteria committed in the
-[2026-27 preregistration](../planning/climate-preregistration-2026-27.md) (section A). G-R1 to G-R3 of the
+[2026-27 preregistration](../planning/climate-preregistration-2026-27.md) (section A), as the B2 shadow does (`climate-shadow-report`). G-R1 to G-R3 of the
 [C2 recovery](../planning/climate-c2-recovery.md#7-status-2026-10-31-b0-results-r0-to-r2) plan are not reached.
 
 ## Status
 
-**parked** (2026-10-30, unchanged by B0 on 2026-10-31). Nothing consumes it; the battery side does not
-depend on it. Un-park only with a new predeclared evaluation.
+**parked** (2026-10-30, unchanged by B0 on 2026-10-31). Nothing acts on it; the battery side does not depend on it.
+B0's candidate is under its predeclared evaluation in the B2 shadow (implemented, not deployed); un-park only on that verdict.

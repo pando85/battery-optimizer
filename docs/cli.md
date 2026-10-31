@@ -22,6 +22,7 @@ The modules that have no CLI surface are described in [Architecture](architectur
 | `ha-states`    | **functional** | Read Home Assistant enum state history (read-side, deduplicated, as-of) |
 | `serve`        | **functional** | Resident shadow service: read-only HA/Prometheus, live MPC, intents recorded never sent ([docs](service.md)) |
 | `shadow-report`| **functional** | Shadow plans vs native battery behaviour: coverage, energy, cost, SOC violations |
+| `climate-shadow-report` | **functional** | Private: the preregistered section-A gates of the climate shadow (B2) from the store |
 | `mirror`       | deferred     | Deferred — not implemented in Phase 1          |
 
 ## `extract`
@@ -494,6 +495,25 @@ recorder keeps them for about ten days, so the Parquet store is the only survivi
 benchmark reads it. No appliance modelling, NILM or forecasting was built on it: it closes the long-deferred
 "there is no reader" gap and nothing more, and ADR-0002 Phase 3 remains the place where consumption would
 start.
+
+## `climate-shadow-report`
+
+Prints the preregistered section-A gate report of the [climate shadow](service.md#climate-shadow-track-b2)
+from the records the service persisted (`climate_scores`, `climate_days`); nothing is fetched.
+
+```bash
+battery-optimizer climate-shadow-report [--data-dir <store>] [--service-config <yaml>] \
+    [--prior <id>] [--mpc-config-sha256 <hash>] [--all-lineages] [--format md|json]
+```
+
+`--service-config` supplies `climate_shadow.go_live` (without it there is no new-window verdict; the first
+`comfort` record is shown as a provisional date only), the default prior and the default MPC config hash.
+Only the records of that lineage are evaluated (`--all-lineages` mixes them, as a diagnostic). Per window
+(legacy, new): valid heating days, each criterion with value, threshold and PASS /
+FAIL / UNDETERMINED (fewer than 6 weeks of valid heating days is UNDETERMINED), RMSE, persistence RMSE,
+skill and bias at 1, 6, 12 and 24 h, the daily heat MdAPE, solver statistics, the top-offset share and the
+descriptive plan-over-rule electricity ratio. The figures are private: keep the output with the data.
+Exit code 0; a malformed service config is an error.
 
 ## `mirror`
 

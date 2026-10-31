@@ -264,8 +264,29 @@ part of B0 to B3.
 |---|---|---|
 | **B0** | Diagnostics: [C2 recovery](climate-c2-recovery.md) R0 to R2 and the warm-up rates (feeds the optimum-start table) | done (2026-10-31), see [climate-c2-recovery section 7](climate-c2-recovery.md#7-status-2026-10-31-b0-results-r0-to-r2) |
 | **B1** | Offline MPC replay on the committed comfort schedule | implemented, offline ([climate-mpc](../components/climate-mpc.md)); result below |
-| **B2** | Shadow runner in the service (read-only plan and prediction metrics) | planned |
+| **B2** | Shadow runner in the service (read-only plan and prediction metrics) | implemented, not deployed (2026-10-31; [ops](../service.md#climate-shadow-track-b2)) |
 | **B3** | Preregistered comparison after winter | planned |
+
+### B2 interface to the controller (read-only)
+
+The shadow reads three helpers of the homelab app (`comfort_control.py`, helpers in
+`config/integrations/appdaemon_comfort.yaml`), writes none of them, and tolerates their absence:
+
+- `input_boolean.comfort_control_enable`: on while the comfort controller is in charge. It labels every
+  shadow record `comfort` (off: `comfort_off`; absent: `legacy`). The preregistered windows depend on it.
+- `input_text.comfort_dhw_plan`: JSON the app writes for **today only**, for example
+  `{"day":"2026-11-16","start":"2026-11-16T02:00:00+01:00","end":"2026-11-16T03:00:00+01:00","forced":true,"target_written":true,"done":"2026-11-15"}`.
+  After the window `start` and `end` are null; the app may also write `{"done":"2026-11-16"}` alone.
+  The shadow reads it as follows:
+  - `day` equal to the decision's local date: DHW in the slots that start in `[start, end)`; null
+    `start` and `end` mean no DHW for the rest of that day;
+  - otherwise, `done` equal to that date: today's window is finished, so no DHW today;
+  - a plan of another day (stale), an unreadable value or a helper that does not exist says nothing
+    about today.
+  Today's slots follow the plan. Tomorrow's slots of the 24 h horizon, and every slot when the plan says
+  nothing, repeat yesterday's measured DHW slots.
+- `input_boolean.comfort_away`: on means away (section 5). Every setpoint is 21.5 degC and the minimum is
+  the floor.
 
 ### B1 result (offline replay)
 

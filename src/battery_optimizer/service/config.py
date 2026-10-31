@@ -14,6 +14,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -27,6 +28,7 @@ __all__ = [
     "ENTITY_ROLES",
     "SOC_SOURCES",
     "ArchiveSettings",
+    "ClimateShadowSettings",
     "EntityMap",
     "HomeAssistantSettings",
     "ObservationSettings",
@@ -190,6 +192,34 @@ class ArchiveSettings:
 
 
 @dataclass(frozen=True)
+class ClimateShadowSettings:
+    """Live shadow of the thermal model and the comfort MPC (track B2); reads only.
+
+    ``climate_config`` and ``mpc_config`` are relative to the service config's directory.
+    The three entities are read from Home Assistant if they exist and are never written.
+    """
+
+    enabled: bool = False
+    climate_config: str = "climate.yaml"
+    mpc_config: str = "climate-mpc.yaml"
+    #: Id (or unique prefix) of ``<data_dir>/analysis/v1/climate-shadow/priors/<id>/``.
+    prior: str | None = None
+    #: Minutes after each decision boundary the job runs (data of the last slot has landed).
+    offset_minutes: int = 10
+    forecast_max_age_minutes: int = 180
+    #: Unscored decisions older than this are dropped from the scoring queue.
+    score_lookback_days: int = 7
+    #: Local day of the comfort controller's go-live; ``None`` = the first ``comfort`` record.
+    go_live: date | None = None
+    regime_entity: str | None = "input_boolean.comfort_control_enable"
+    dhw_plan_entity: str | None = "input_text.comfort_dhw_plan"
+    away_entity: str | None = "input_boolean.comfort_away"
+
+    def entities(self) -> tuple[str, ...]:
+        return tuple(e for e in (self.regime_entity, self.dhw_plan_entity, self.away_entity) if e)
+
+
+@dataclass(frozen=True)
 class ServiceConfig:
     """Fully resolved service configuration."""
 
@@ -200,6 +230,7 @@ class ServiceConfig:
     observation: ObservationSettings
     freshness_s: Mapping[str, float]
     archive: ArchiveSettings = field(default_factory=ArchiveSettings)
+    climate_shadow: ClimateShadowSettings = field(default_factory=ClimateShadowSettings)
     timezone: str = "Europe/Madrid"
     mode: str = "shadow"
     source_path: str | None = None
@@ -235,6 +266,12 @@ class ServiceConfig:
             "planning": asdict(self.planning),
             "observation": asdict(self.observation),
             "archive": asdict(self.archive),
+            "climate_shadow": {
+                **asdict(self.climate_shadow),
+                "go_live": self.climate_shadow.go_live.isoformat()
+                if self.climate_shadow.go_live
+                else None,
+            },
             "freshness_s": dict(self.freshness_s),
             "source_path": self.source_path,
         }
@@ -246,6 +283,7 @@ class ServiceConfig:
         public["prometheus"].pop("url", None)
         public.pop("source_path", None)
         public.pop("archive", None)  # passive collection never changes a plan
+        public.pop("climate_shadow", None)  # nor does the climate shadow (it plans no battery)
         text = json.dumps(public, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(text.encode()).hexdigest()
 
@@ -386,6 +424,79 @@ def _parse_archive(raw: Mapping[str, Any]) -> ArchiveSettings:
             interval_minutes=interval,
             offset_minutes=offset,
         ),
+    )
+
+
+_ENTITY_ID = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
+_CLIMATE_SHADOW_KEYS = (
+    "enabled",
+    "climate_config",
+    "mpc_config",
+    "prior",
+    "offset_minutes",
+    "forecast_max_age_minutes",
+    "score_lookback_days",
+    "go_live",
+    "entities",
+)
+
+
+def _parse_climate_shadow(raw: Mapping[str, Any]) -> ClimateShadowSettings:
+    _keys(raw, "climate_shadow", _CLIMATE_SHADOW_KEYS)
+    name = "climate_shadow"
+    ents = _section(raw, "entities")
+    _keys(ents, f"{name}.entities", ("regime", "dhw_plan", "away"))
+    entities: dict[str, str | None] = {}
+    defaults = ClimateShadowSettings()
+    for key, default in (
+        ("regime", defaults.regime_entity),
+        ("dhw_plan", defaults.dhw_plan_entity),
+        ("away", defaults.away_entity),
+    ):
+        value = ents.get(key, default)
+        if value is not None and (not isinstance(value, str) or not _ENTITY_ID.match(value)):
+            raise ValueError(f"service config: {name}.entities.{key} must be an entity ID or null")
+        entities[key] = value
+    go_live = raw.get("go_live")
+    if go_live is not None:
+        if isinstance(go_live, str):
+            try:
+                go_live = date.fromisoformat(go_live)
+            except ValueError:
+                go_live = None
+        if not isinstance(go_live, date):
+            raise ValueError(f"service config: {name}.go_live must be a local date or null")
+    prior = raw.get("prior")
+    if prior is not None and (
+        not isinstance(prior, str) or not re.fullmatch(r"[0-9a-f]{6,}", prior)
+    ):
+        raise ValueError(f"service config: {name}.prior must be a prior id (hex) or null")
+    enabled = _bool(raw.get("enabled", False), f"{name}.enabled")
+    if enabled and prior is None:
+        raise ValueError(f"service config: {name}.enabled needs {name}.prior")
+    paths = {}
+    for key in ("climate_config", "mpc_config"):
+        value = raw.get(key, getattr(defaults, key))
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"service config: {name}.{key} must be a path")
+        paths[key] = value
+    offset = _int(raw.get("offset_minutes", 10), f"{name}.offset_minutes", 0)
+    if offset >= 60:
+        raise ValueError(f"service config: {name}.offset_minutes must be below 60")
+    return ClimateShadowSettings(
+        enabled=enabled,
+        climate_config=paths["climate_config"],
+        mpc_config=paths["mpc_config"],
+        prior=prior,
+        offset_minutes=offset,
+        forecast_max_age_minutes=_int(
+            raw.get("forecast_max_age_minutes", 180), f"{name}.forecast_max_age_minutes"
+        ),
+        score_lookback_days=_int(raw.get("score_lookback_days", 7), f"{name}.score_lookback_days"),
+        go_live=go_live,
+        regime_entity=entities["regime"],
+        dhw_plan_entity=entities["dhw_plan"],
+        away_entity=entities["away"],
     )
 
 
@@ -537,6 +648,7 @@ def load_service_config(path: Path | None = None) -> ServiceConfig:
         counter_max_age_s=_positive(obs_raw.get("counter_max_age_s", 300), "counter_max_age_s"),
     )
     archive = _parse_archive(_section(raw, "archive"))
+    climate_shadow = _parse_climate_shadow(_section(raw, "climate_shadow"))
     fresh_raw = _section(raw, "freshness_s")
     freshness = {str(k): _positive(v, f"freshness_s.{k}") for k, v in fresh_raw.items()}
     return ServiceConfig(
@@ -546,6 +658,7 @@ def load_service_config(path: Path | None = None) -> ServiceConfig:
         planning=planning,
         observation=observation,
         archive=archive,
+        climate_shadow=climate_shadow,
         freshness_s=freshness,
         timezone=timezone,
         mode=mode,

@@ -23,6 +23,10 @@ docker run --rm --read-only --cap-drop ALL -p 8080:8080 \
   ghcr.io/pando85/battery-optimizer:latest serve
 ```
 
+The [climate shadow](service.md#climate-shadow-track-b2) (off by default) needs no other variable: mount
+`climate.yaml` and `climate-mpc.yaml` in the same config directory as `service.yaml`, and put the prior
+directory (`analysis/v1/climate-shadow/priors/<id>/`) and `climate/site.yaml` into the data directory.
+
 ## Data directory, provenance and code identity
 
 The data directory must be writable by uid `65532`. Verify an image's provenance with
