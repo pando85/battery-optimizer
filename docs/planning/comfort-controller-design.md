@@ -262,9 +262,63 @@ part of B0 to B3.
 | Step | Content | Status |
 |---|---|---|
 | **B0** | Diagnostics: [C2 recovery](climate-c2-recovery.md) R0 to R2 and the warm-up rates (feeds the optimum-start table) | done (2026-10-31), see [climate-c2-recovery section 7](climate-c2-recovery.md#7-status-2026-10-31-b0-results-r0-to-r2) |
-| **B1** | Offline MPC replay on the committed comfort schedule | planned |
+| **B1** | Offline MPC replay on the committed comfort schedule | implemented, offline ([climate-mpc](../components/climate-mpc.md)); result below |
 | **B2** | Shadow runner in the service (read-only plan and prediction metrics) | planned |
 | **B3** | Preregistered comparison after winter | planned |
+
+### B1 result (offline replay)
+
+Runs `b1-20261031-b2d-perfect`, `-b2d-persistence` and `-c2-perfect` (code `26dcbb8`, dataset
+`cdd448abb006`, feature set `da6d678016ed`, MPC config `06ec157c`), S2 and S3 from November to March,
+a 24 h plan every hour (2932 and 3082 decisions). Formulation and causality rules:
+[climate-mpc](../components/climate-mpc.md). **Exploratory:** no thermal model is accepted and S3 was
+inspected in C2 and B0. **Planned kWh and planned comfort are model predictions of plans that were never
+executed, not realised outcomes;** each day starts from the house as the legacy controller left it.
+`perfect` weather is perfect foresight of the outdoor temperature.
+
+(a) Open-loop accuracy of the model inside the MPC (B0's model, legacy actions through it, perfect
+weather), MAE / bias in K. Beyond about 12 h the plan relies on low-confidence predictions.
+
+| Horizon | Room mean S2 | Room mean S3 | Persistence S2 / S3 | Hall/kitchen S2 | Hall/kitchen S3 |
+|---|---|---|---|---|---|
+| 1 h | 0.13 / -0.01 | 0.12 / 0.00 | 0.15 / 0.13 | 0.28 / -0.16 | 0.25 / +0.06 |
+| 6 h | 0.26 / -0.03 | 0.22 / -0.01 | 0.44 / 0.31 | 0.38 / -0.18 | 0.32 / +0.05 |
+| 12 h | 0.31 / -0.04 | 0.25 / -0.02 | 0.53 / 0.36 | 0.42 / -0.20 | 0.33 / +0.05 |
+| 24 h | 0.30 / -0.08 | 0.24 / -0.04 | 0.38 / 0.27 | 0.41 / -0.25 | 0.32 / +0.02 |
+
+- With persistence weather the room mean is 0.39 / 0.28 K at 12 h and 0.37 / 0.31 K at 24 h (S3 at
+  24 h is then worse than room persistence). C2's model B: 0.32 / 0.26 K at 6 h, 0.37 / 0.30 K at 12 h.
+- Heat delivered per day, given the legacy permission (the weakest link of B0): MAPE 14% (S2) and 15%
+  (S3), season bias +3% and +8% (C2's model B: 15% and 24%, +8% and +19%). Electricity per day:
+  MAPE 17% and 16%, bias +8% and +2%.
+
+(b) The midnight plan against the legacy day, same days (B0's model, perfect weather):
+
+| | S2 | S3 |
+|---|---|---|
+| Planned / measured legacy electricity | 1.18 | 2.42 |
+| Planned / the model's own prediction of the legacy day (days with both) | 1.12 | 1.82 |
+| Same, by HDD tercile (mild, middle, cold) | 1.07, 1.23, 1.19 | 2.12, 2.50, 2.50 |
+| Kh per day below 23.5 degC in the hall/kitchen window: plan, legacy | 4.6, 4.8 | 7.3, 15.1 |
+| Kh per day below the 21 degC floor (comfort rooms): plan, legacy | 0.35, 1.75 | 4.3, 17.4 |
+
+Persistence weather gives 1.31 and 2.47, C2's model B 1.25 and 2.61. **Reading:** on these days the
+plan buys comfort the legacy controller did not deliver (in S3 the 23.0 degC setpoint left the
+hall/kitchen below 23.5 degC on every day) and still misses the day minimum on 71% (S2) and 90% (S3)
+of days in its own prediction: the warm-up with the other rooms' valves shut is too
+slow, as B0 found. The plans heat about 18 h a day with about one start, at the top offset (+3 K) in 68%
+(S2) and 91% (S3) of heating slots, so the offset range binds. No kWh saving can be claimed; a
+comparison at matched comfort needs new-regime data.
+
+(c) Solver: 0 infeasible of 18042 solves (three per decision); median 0.05 s, p95 at most 0.46 s;
+44 solves hit the 20 s limit and used their incumbent (gap at most 0.35%). The re-linearisation changed
+the plan in 51 to 56% of decisions; 5 to 7% of planned heating slots have a lift outside the COP table.
+
+(d) The plan differs materially from the legacy day on 82% (S2) and 84% (S3) of days: electricity by
+more than 20% on 66% and 84%, heating-slot overlap below 0.5 on 43% and 33% (median overlap 0.50 and
+0.55).
+
+Legionella scheduling stays the future extension recorded above; it is not part of B1.
 
 ## 14. Owner decisions
 
