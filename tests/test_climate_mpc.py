@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from battery_optimizer.climate.cop import COP_MODEL_VERSION, CopModel
-from battery_optimizer.climate.mpc import MpcProblem, PlanSettings, plan, solve
+from battery_optimizer.climate.mpc import MpcProblem, PlanSettings, plan, solve, space_starts
 from battery_optimizer.climate.mpc_model import Exogenous, MpcModel, water_levels
 
 T = 24
@@ -117,16 +117,37 @@ def test_an_unreachable_minimum_stays_feasible_through_the_soft_penalty():
     assert res.extra["milp_kh_below"] > 0
 
 
-def test_dhw_slots_carry_no_space_heat_and_count_as_compressor_on():
+def test_dhw_slots_carry_no_space_heat_and_are_transparent_to_starts():
     dhw = np.zeros(T, dtype=bool)
     dhw[4:8] = True
     res = solve(_problem(x0=19.0, minimum=np.full((1, T), 30.0), dhw=dhw))
     assert res.on[4:8].sum() == 0
     assert res.on[:4].sum() == 4 and res.on[8:].sum() == T - 8
-    # an off slot right before DHW would violate nothing: DHW is exogenous; a start before it is
-    # one start, not two (the compressor runs through the hot-water block)
+    # heating on both sides of a DHW block is one space-heating run: one start, not two
     p = _problem(x0=19.0, minimum=np.full((1, T), 30.0), dhw=dhw, start_penalty_kwh=1.0)
     assert solve(p).objective == pytest.approx(solve(replace(p, start_penalty_kwh=0)).objective + 1)
+    assert space_starts(res.on, dhw, prev_on=False).sum() == 1
+
+
+def test_dhw_does_not_count_toward_the_minimum_on_time():
+    """A space-heating run that starts right after DHW still needs two space-heating slots: the
+    hot-water slot before it is not part of the run."""
+    dhw = np.zeros(T, dtype=bool)
+    dhw[0:2] = True
+    minimum = np.full((1, T), np.nan)
+    minimum[0, 2] = 21.05  # one heated slot right after DHW would be enough
+    p = _problem(x0=21.0, minimum=minimum, dhw=dhw, heat=np.full((T, 2), 3.0))
+    res = solve(replace(p, penalty_kwh_per_kh=1000.0))
+    on = res.on.astype(int)
+    assert on[2] == 1
+    space = np.flatnonzero(~dhw)
+    for s, n in _runs(on[space], 1):
+        if s + n < space.size:
+            assert n >= 2
+    # carry-in: a run of one space-heating slot before the decision forces the next
+    # space-heating slot on, which is the one after the DHW block
+    carried = solve(_problem(x0=23.0, dhw=dhw, prev_on=True, prev_run_slots=1))
+    assert carried.on[:2].sum() == 0 and carried.on[2] == 1 and carried.on[3:].sum() == 0
 
 
 def test_the_start_penalty_merges_runs():
@@ -146,6 +167,17 @@ def test_the_terminal_value_keeps_the_stored_heat():
     kept = solve(replace(p, terminal_value=0.5))
     assert kept.on.sum() > 0
     assert kept.extra["terminal_shortfall_kwh_th"] < 2.0
+
+
+def test_no_space_heating_where_every_valve_is_shut():
+    demand = np.zeros(T, dtype=bool)
+    demand[10:16] = True
+    res = solve(_problem(x0=19.0, minimum=np.full((1, T), 30.0), demand=demand))
+    assert res.status == "optimal"
+    assert (res.on[~demand] == 0).all() and (res.on[demand] == 1).all()
+    # a minimum on time in progress may still finish against shut valves
+    forced = solve(_problem(x0=19.0, demand=np.zeros(T, bool), prev_on=True, prev_run_slots=1))
+    assert forced.on[0] == 1 and forced.on[1:].sum() == 0
 
 
 def test_disallowed_levels_are_never_chosen():
@@ -193,11 +225,15 @@ class OneStateModel:
     def heat_table(self, x_ref, ex, water):
         return np.clip(0.5 * (water - x_ref[:, :1]), 0.0, 6.0)
 
-    def simulate(self, x0, on, water, ex):
+    def valves(self, x_ref, ex):
+        return (np.asarray(x_ref)[:, 0] < ex.setpoints[0] - 0.25).astype(float)
+
+    def simulate(self, x0, on, water, ex, run_logic=True):
         x = float(x0[0])
         xs, q = [x], np.zeros(ex.length)
         for t in range(ex.length):
-            if on[t] > 0.5:
+            open_ = x < ex.setpoints[0, t] - 0.25
+            if on[t] > 0.5 and (open_ or not run_logic):
                 q[t] = float(np.clip(0.5 * (water[t] - x), 0.0, 6.0))
             x = A * x + B_Q * q[t] + (1 - A) * ex.t_out[t]
             xs.append(x)
@@ -256,14 +292,29 @@ def test_any_model_implementing_the_interface_plugs_into_plan():
     minimum = np.full((1, T), np.nan)
     minimum[0, 12:] = 21.5
     ex = _exogenous(15.0)
-    p = plan(model, np.array([21.0]), ex, minimum, np.zeros(T, bool), _cop(), _settings())
-    assert p.result.ok and len(p.solves) == 2
+    settings = _settings(relinearize_iterations=3)
+    p = plan(model, np.array([21.0]), ex, minimum, np.zeros(T, bool), _cop(), settings)
+    assert p.result.ok and len(p.solves) == 4
     assert np.isfinite(p.water[p.on > 0]).all() and np.isnan(p.water[p.on == 0]).all()
     xs, q = model.simulate(np.array([21.0]), p.on, np.nan_to_num(p.water), ex)
     assert np.allclose(xs, p.xs) and np.allclose(q, p.q_kw)
     assert (p.xs[13:, 0] >= 21.5 - 0.05).all()
     assert p.elec_kwh[p.on == 0].sum() == 0
     assert p.starts >= 1
+    # every iterate is scored by simulation and the best one is kept
+    assert len(p.iterates) == 4 and p.iterates[1]["changed"] is not None
+    objectives = [it["objective"] for it in p.iterates]
+    assert p.chosen == int(np.argmin(objectives))
+    assert (p.valve_open[p.on > 0] > 0).all()  # no planned heat against shut valves
+
+
+def test_the_plan_does_not_heat_a_room_already_above_its_setpoint():
+    model = OneStateModel()
+    ex = replace(_exogenous(15.0), setpoints=np.full((1, T), 18.0))
+    minimum = np.full((1, T), 21.5)  # missed without heating, but every valve stays shut
+    p = plan(model, np.array([22.0]), ex, minimum, np.zeros(T, bool), _cop(), _settings())
+    assert p.result.ok
+    assert p.on.sum() == 0
 
 
 def test_a_failed_solve_returns_an_empty_plan_not_an_exception():

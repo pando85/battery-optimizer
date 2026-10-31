@@ -69,6 +69,19 @@ def test_heat_table_is_the_plant_law_along_the_reference_and_simulate_agrees():
     assert shut[0, 1] == pytest.approx(0.3 * table[0, 1])
 
 
+def test_the_run_logic_switches_heat_off_when_every_valve_is_shut():
+    m = _model()
+    x0 = np.array([21.0, 23.0])
+    shut = _ex(1, setpoint=20.0)  # every room above its setpoint
+    assert m.valves(x0[None, :], shut).tolist() == [0.0]
+    assert m.valves(x0[None, :], _ex(1)).tolist() == [1.0]
+    _xs, q = m.simulate(x0, np.array([1.0]), np.array([35.0]), shut)
+    assert q[0] == 0.0
+    _xs, q_legacy = m.simulate(x0, np.array([1.0]), np.array([35.0]), shut, run_logic=False)
+    assert q_legacy[0] == pytest.approx(0.3 * LAW.power(5.0, 35.0, 23.0))
+    assert m.valve_factor(np.array([0.0, 1.0])).tolist() == pytest.approx([0.3, 1.0])
+
+
 def test_room_outputs_read_the_hourly_offsets():
     offsets = np.zeros((3, 24))
     offsets[1, 7] = 0.4

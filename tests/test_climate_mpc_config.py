@@ -37,7 +37,9 @@ def test_shipped_config_holds_the_design_values():
     assert (cfg.machine.min_on_minutes, cfg.machine.min_off_minutes) == (30, 20)
     assert (cfg.machine.water_min_c, cfg.machine.water_max_c) == (20, 35)
     assert cfg.water.curve == ((-5.0, 32.0), (15.0, 25.0))
-    assert cfg.water.offsets_k == (0, 1, 2, 3)
+    assert cfg.water.offsets_k == (0, 1, 2, 3, 4, 5, 6)
+    assert cfg.optimum_start.lead_weekday_minutes == (675, 545, 275)  # design section 6, p75
+    assert cfg.optimum_start.lead_weekend_minutes == (530, 430, 215)
     settings = PlanSettings.from_config(cfg)
     assert (settings.min_on_slots, settings.min_off_slots) == (2, 2)  # 20 min rounds up
 
@@ -66,6 +68,8 @@ def test_the_climate_config_is_not_touched():
         (lambda r: r["water"].update(offsets_k=[0, 0]), "unique"),
         (lambda r: r["model"].update(c2_model_id="zz"), "hex"),
         (lambda r: r.update(config_version=2), "above the maximum"),
+        (lambda r: r["optimum_start"].update(lead_weekday_minutes=[600, 300]), "one lead per band"),
+        (lambda r: r["optimum_start"].update(band_edges_c=[12.0, 8.0]), "must increase"),
     ],
 )
 def test_malformed_configs_are_refused(tmp_path, mutate, message):

@@ -11,12 +11,15 @@ reads only what :class:`MpcModel` gives it:
 * the heat delivered at each candidate water temperature along a reference trajectory,
   :meth:`MpcModel.heat_table` (the plant law may be nonlinear in the state; the optimiser
   re-linearises along its own simulated plan);
+* the share of modelled thermostat valves that are open in each slot along a trajectory,
+  :meth:`MpcModel.valves`: with every valve shut the run logic of the controller (design section 2)
+  turns the heat pump off, so the optimiser does not heat there;
 * a nonlinear closed-loop simulation of a chosen plan, :meth:`MpcModel.simulate`, which is what the
-  planned comfort is reported from;
+  planned comfort is reported from (a slot with every valve shut delivers no heat: the run logic);
 * the heat capacity of each state (kWh/K), for the terminal value of stored heat.
 
 A model with another structure (more states, a per-room model, a valve model, another heat law)
-plugs in by implementing these six members; the optimiser does not change.
+plugs in by implementing these seven members; the optimiser does not change.
 
 :class:`RcComfortModel` is the implementation for the RC models of this package: model B of C2
 (:func:`battery_optimizer.climate.b2d.from_c2_record`) and B0's room-air two-state model with a
@@ -95,11 +98,24 @@ class MpcModel(Protocol):
         with the state of slot ``t`` taken as ``x_ref[t]`` (``(T, n)``)."""
         ...
 
+    def valves(self, x_ref: np.ndarray, ex: Exogenous) -> np.ndarray:
+        """``(T,)`` share of the modelled thermostat valves open with the state ``x_ref[t]`` at
+        the start of slot ``t`` and the setpoints of ``ex`` (0 = every valve shut)."""
+        ...
+
     def simulate(
-        self, x0: np.ndarray, on: np.ndarray, water: np.ndarray, ex: Exogenous
+        self,
+        x0: np.ndarray,
+        on: np.ndarray,
+        water: np.ndarray,
+        ex: Exogenous,
+        run_logic: bool = True,
     ) -> tuple[np.ndarray, np.ndarray]:
         """``(xs, q)``: states ``(T + 1, n)`` and heat ``(T,)`` kW of a plan (``on`` 0/1, ``water``
-        degC per slot), with the plant law closed on the simulated state."""
+        degC per slot), with the plant law closed on the simulated state.  With *run_logic* a slot
+        in which :meth:`valves` is 0 at the simulated state delivers no heat (the comfort
+        controller's run logic); without it the pump heats the always-open zones (the legacy
+        permission)."""
         ...
 
 
@@ -208,10 +224,19 @@ class RcComfortModel:
         hours = np.asarray(local_hour, dtype=np.int64)
         return c, np.nan_to_num(self.cap.offsets[:, hours])
 
-    def _valve(self, t_air: np.ndarray, ex: Exogenous) -> np.ndarray:
+    def _open_share(self, t_air: np.ndarray, ex: Exogenous) -> np.ndarray:
         temps = t_air[None, :] + np.nan_to_num(self.cap.offsets[:, ex.local_hour.astype(np.int64)])
-        open_share = (temps < ex.setpoints - self.cap.margin_k).mean(axis=0)
-        return self.cap.phi + (1.0 - self.cap.phi) * open_share
+        return (temps < ex.setpoints - self.cap.margin_k).mean(axis=0)
+
+    def _valve(self, t_air: np.ndarray, ex: Exogenous) -> np.ndarray:
+        return self.cap.phi + (1.0 - self.cap.phi) * self._open_share(t_air, ex)
+
+    def valve_factor(self, open_share: np.ndarray) -> np.ndarray:
+        """The heat factor of an open share: ``phi + (1 - phi) open``."""
+        return self.cap.phi + (1.0 - self.cap.phi) * np.asarray(open_share, float)
+
+    def valves(self, x_ref: np.ndarray, ex: Exogenous) -> np.ndarray:
+        return self._open_share(np.asarray(x_ref, float)[:, 0], ex)
 
     def heat_table(self, x_ref: np.ndarray, ex: Exogenous, water: np.ndarray) -> np.ndarray:
         x_ref = np.asarray(x_ref, float)
@@ -219,7 +244,12 @@ class RcComfortModel:
         return base * self._valve(x_ref[:, 0], ex)[:, None]
 
     def simulate(
-        self, x0: np.ndarray, on: np.ndarray, water: np.ndarray, ex: Exogenous
+        self,
+        x0: np.ndarray,
+        on: np.ndarray,
+        water: np.ndarray,
+        ex: Exogenous,
+        run_logic: bool = True,
     ) -> tuple[np.ndarray, np.ndarray]:
         n = ex.length
         drive = self.drive(ex)
@@ -230,9 +260,10 @@ class RcComfortModel:
         xs[0] = x
         for t in range(n):
             if on[t] > 0.5:
-                base = float(self.law.power(ex.t_out[t], water[t], x[1]))
-                valve = self._valve(np.array([x[0]]), _slot(ex, t))[0]
-                q[t] = base * valve
+                share = self._open_share(np.array([x[0]]), _slot(ex, t))[0]
+                if share > 0.0 or not run_logic:  # all shut: the run logic keeps it off
+                    base = float(self.law.power(ex.t_out[t], water[t], x[1]))
+                    q[t] = base * self.valve_factor(share)
             x = self.ad @ x + bq * q[t] + drive[t]
             xs[t + 1] = x
         return xs, q

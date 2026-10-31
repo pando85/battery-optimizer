@@ -15,18 +15,25 @@ Formulation (``T`` slots, ``K`` water levels, ``n`` states, ``R`` rooms):
   and for a level that duplicates a lower one after clamping.
 * Heat and electricity of a level are parameters of the slot: ``Q[t, k]`` from the model's heat
   table along a reference trajectory and ``E[t, k]`` from the COP model at that water temperature
-  and the slot's outdoor temperature.  The plan is solved, simulated with the nonlinear plant law,
-  the table re-evaluated along that simulated plan and solved again
-  (``solver.relinearize_iterations``).  This keeps the MILP linear and small: the state-dependence
-  of the heat (slab temperature, valve cap) enters through the reference, not through big-M rows.
+  and the slot's outdoor temperature.  The first reference is the free-running house (no heat);
+  the plan is solved, simulated with the nonlinear plant law, the table re-evaluated along that
+  simulated plan and solved again (``solver.relinearize_iterations``).  Every iterate is scored
+  by simulation with the MILP's own objective terms and the best one is kept (no convergence is
+  assumed).  This keeps the MILP linear and small: the state-dependence of the heat (slab
+  temperature, valve cap) enters through the reference, not through big-M rows.
+* Run logic (design section 2): a slot in which every modelled thermostat valve is shut along the
+  reference may not heat (except to finish a minimum on time in progress); the simulation delivers
+  no heat in such a slot either.
 * State: ``x[t + 1] = A x[t] + b_q sum_k Q[t, k] z[t, k] + drive[t]``, ``x[0]`` the observer's
   estimate at the decision.
 * Comfort (soft): ``c_r . x[t + 1] + offset[r, t] + s[t, r] >= min[r, t]``, ``s >= 0``, costing
   ``penalty * s * 0.25`` (kWh-equivalent per Kh).  Slots without a minimum have no row.
-* Compressor: ``c[t] = on[t] + dhw[t]`` (hot water runs the compressor too); start ``u[t] >= c[t] -
-  c[t-1]``, stop ``v[t] >= c[t-1] - c[t]`` (continuous in [0, 1], integral at the optimum); minimum
-  on ``sum_{j < U} u[t - j] <= c[t]``, minimum off ``sum_{j < D} v[t - j] <= 1 - c[t]``, with the
-  run already in progress at the decision carried in.
+* Space heating only: over the sequence of non-DHW slots (a DHW block is transparent), start
+  ``u >= on[t] - on[prev]``, stop ``v >= on[prev] - on[t]`` (continuous in [0, 1], integral at the
+  optimum); minimum on ``sum of the last U starts <= on[t]``, minimum off ``sum of the last D stops
+  <= 1 - on[t]``, with the space-heating run in progress at the decision carried in.  ``U`` and
+  ``D`` are the minutes rounded up to whole slots: 30 min is 2 slots and 20 min is also 2 slots
+  (30 min).
 * Terminal (optional): heat content ``sum_i C_i (x_i[T] - x_i[0]) + s_T >= 0``, the shortfall
   ``s_T`` (kWh of heat) charged at the horizon's mean electricity per heat unit at offset 0.
 
@@ -123,8 +130,11 @@ class MpcProblem:
     dhw: np.ndarray  # (T,) bool
     capacities: np.ndarray  # (n,) kWh/K
     terminal_value: float  # kWh_el per kWh_th of stored-heat shortfall (0 = off)
+    #: (T,) slots with at least one modelled valve open along the reference; ``None`` = all
+    demand: np.ndarray | None = None
     prev_on: bool = False
-    prev_run_slots: int = 10**6  # slots the compressor has been in its current state
+    #: space-heating slots (DHW slots skipped) the heat pump has been in its current state
+    prev_run_slots: int = 10**6
     min_on_slots: int = 2
     min_off_slots: int = 2
     start_penalty_kwh: float = 0.0
@@ -153,15 +163,16 @@ class MpcResult:
         return self.status in ("optimal", "gap", "time_limit") and self.on.size > 0
 
 
-def _forced(p: MpcProblem) -> tuple[np.ndarray, np.ndarray]:
-    """Slots forced on / forced off by the run in progress at the decision."""
+def _forced(p: MpcProblem, space: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Slots forced on / forced off by the space-heating run in progress at the decision; the
+    count runs over the space-heating slots *space* (DHW slots are transparent)."""
     t = p.heat.shape[0]
     force_on = np.zeros(t, dtype=bool)
     force_off = np.zeros(t, dtype=bool)
     if p.prev_on and p.prev_run_slots < p.min_on_slots:
-        force_on[: p.min_on_slots - p.prev_run_slots] = True
+        force_on[space[: p.min_on_slots - p.prev_run_slots]] = True
     if not p.prev_on and p.prev_run_slots < p.min_off_slots:
-        force_off[: p.min_off_slots - p.prev_run_slots] = True
+        force_off[space[: p.min_off_slots - p.prev_run_slots]] = True
     return force_on, force_off
 
 
@@ -169,21 +180,21 @@ def solve(p: MpcProblem, *, time_limit_s: float = 20.0, mip_rel_gap: float = 1e-
     """Solve one MILP (see the module docstring for the formulation)."""
     t_n, k_n, n, r_n = p.shape
     dhw = np.asarray(p.dhw, dtype=bool)
-    allowed = np.asarray(p.allowed, dtype=bool) & ~dhw[:, None]
+    space = np.flatnonzero(~dhw)  # space-heating slots; starts and limits count these only
+    m_n = space.size
     has_min = np.isfinite(p.minimum)
     rows_r = np.argwhere(has_min.T)  # (t, r) pairs with a minimum
-    force_on, force_off = _forced(p)
-    # DHW runs the compressor: it already satisfies a minimum on time, and it overrides a minimum
-    # off time (hot water is exogenous, the plan cannot move it)
-    force_on &= ~dhw
-    force_off &= ~dhw
+    force_on, force_off = _forced(p, space)
+    allowed = np.asarray(p.allowed, dtype=bool) & ~dhw[:, None]
+    if p.demand is not None:  # every valve shut: the run logic keeps the pump off
+        allowed &= (np.asarray(p.demand, bool) | force_on)[:, None]
 
     # variable layout
     iz = 0
     ix = iz + t_n * k_n  # x[1..T]
-    iu = ix + t_n * n
-    iv = iu + t_n
-    is_ = iv + t_n
+    iu = ix + t_n * n  # starts, one per space-heating slot
+    iv = iu + m_n  # stops
+    is_ = iv + m_n
     it = is_ + rows_r.shape[0]
     nvar = it + 1
 
@@ -251,27 +262,27 @@ def solve(p: MpcProblem, *, time_limit_s: float = 20.0, mip_rel_gap: float = 1e-
         ent.append((is_ + j, 1.0))
         add(ent, float(p.minimum[rr, t] - p.out_offset[rr, t]), np.inf)
 
-    # starts and stops: c[t] = sum_k z[t, k] + dhw[t]
-    def c_terms(t, sign):
+    # space-heating starts and stops over the space-heating slots only: a DHW block is
+    # transparent (on[t] = sum_k z[t, k]; the slot before is the previous space-heating slot)
+    def on_terms(t, sign):
         return [(zi(t, k), sign) for k in range(k_n)]
 
     prev = 1.0 if p.prev_on else 0.0
-    for t in range(t_n):
-        d_now = float(dhw[t])
-        if t == 0:
-            add([(iu, 1.0), *c_terms(0, -1.0)], d_now - prev, np.inf)
-            add([(iv, 1.0), *c_terms(0, 1.0)], prev - d_now, np.inf)
+    for j, t in enumerate(space):
+        if j == 0:
+            add([(iu, 1.0), *on_terms(t, -1.0)], -prev, np.inf)
+            add([(iv, 1.0), *on_terms(t, 1.0)], prev, np.inf)
         else:
-            d_prev = float(dhw[t - 1])
-            add([(iu + t, 1.0), *c_terms(t, -1.0), *c_terms(t - 1, 1.0)], d_now - d_prev, np.inf)
-            add([(iv + t, 1.0), *c_terms(t - 1, -1.0), *c_terms(t, 1.0)], d_prev - d_now, np.inf)
-    for t in range(t_n):
+            tp = int(space[j - 1])
+            add([(iu + j, 1.0), *on_terms(t, -1.0), *on_terms(tp, 1.0)], 0.0, np.inf)
+            add([(iv + j, 1.0), *on_terms(tp, -1.0), *on_terms(t, 1.0)], 0.0, np.inf)
+    for j, t in enumerate(space):
         if p.min_on_slots > 1:
-            window = range(max(0, t - p.min_on_slots + 1), t + 1)
-            add([*((iu + j, 1.0) for j in window), *c_terms(t, -1.0)], -np.inf, float(dhw[t]))
-        if p.min_off_slots > 1 and not dhw[t]:
-            window = range(max(0, t - p.min_off_slots + 1), t + 1)
-            add([*((iv + j, 1.0) for j in window), *c_terms(t, 1.0)], -np.inf, 1.0 - float(dhw[t]))
+            window = range(max(0, j - p.min_on_slots + 1), j + 1)
+            add([*((iu + i, 1.0) for i in window), *on_terms(t, -1.0)], -np.inf, 0.0)
+        if p.min_off_slots > 1:
+            window = range(max(0, j - p.min_off_slots + 1), j + 1)
+            add([*((iv + i, 1.0) for i in window), *on_terms(t, 1.0)], -np.inf, 1.0)
     # terminal heat content
     if p.terminal_value > 0:
         ent = [(xi(t_n - 1, i), float(p.capacities[i])) for i in range(n)]
@@ -345,6 +356,11 @@ class Plan:
     starts: int
     solves: list[MpcResult]
     lift_outside_table: float  # share of planned heating slots outside the COP lift table
+    #: share of modelled valves open at the simulated state, per slot
+    valve_open: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    #: simulated objective (kWh-equivalent) of every iterate, and the one kept
+    iterates: list[dict[str, Any]] = field(default_factory=list)
+    chosen: int = -1
 
 
 def build_problem(
@@ -360,7 +376,8 @@ def build_problem(
     prev_on: bool = False,
     prev_run_slots: int = 10**6,
 ) -> tuple[MpcProblem, np.ndarray]:
-    """The MILP of one decision with the heat table along *x_ref*; also returns the levels."""
+    """The MILP of one decision with the heat table and the valve demand along *x_ref*; also
+    returns the levels."""
     water, distinct = water_levels(
         ex.t_out, settings.curve, settings.offsets, settings.water_min, settings.water_max
     )
@@ -388,6 +405,7 @@ def build_problem(
         dhw=np.asarray(dhw, bool),
         capacities=np.asarray(model.capacities, float),
         terminal_value=terminal_value,
+        demand=np.asarray(model.valves(x_ref, ex)) > 0.0,
         prev_on=prev_on,
         prev_run_slots=prev_run_slots,
         min_on_slots=settings.min_on_slots,
@@ -412,6 +430,58 @@ def _electricity(cop_model, heat_kw, water, t_out) -> np.ndarray:
     )
 
 
+def space_starts(on: np.ndarray, dhw: np.ndarray, prev_on: bool) -> np.ndarray:
+    """Per slot 1 where space heating starts, counted over the space-heating slots only (a DHW
+    block is transparent, as in the MILP)."""
+    out = np.zeros(np.asarray(on).size)
+    prev = 1.0 if prev_on else 0.0
+    for t in np.flatnonzero(~np.asarray(dhw, bool)):
+        if on[t] > 0.5 and prev < 0.5:
+            out[t] = 1.0
+        prev = float(on[t] > 0.5)
+    return out
+
+
+def _evaluate(model, x0, ex, minimum, dhw, cop_model, p: MpcProblem, res, water, prev_on):
+    """Simulate a solved plan with the nonlinear law and score it with the MILP's own objective
+    terms (electricity, starts, Kh below the minimums, stored-heat shortfall)."""
+    t_n = ex.length
+    w_plan = np.where(res.level >= 0, water[np.arange(t_n), np.maximum(res.level, 0)], np.nan)
+    xs, q = model.simulate(x0, res.on, np.nan_to_num(w_plan), ex)
+    elec = np.where(
+        (res.on > 0) & (q > 0),
+        cop_mod.predict_electricity(
+            cop_model, q * STEP_H, np.nan_to_num(w_plan), ex.t_out, starts=0.0, hours_on=STEP_H
+        ),
+        0.0,
+    )
+    starts = space_starts(res.on, dhw, prev_on)
+    # the objective charges starts through the penalty (which includes a regression's start
+    # term); the reported electricity adds that term back
+    base_kwh = float(elec.sum())
+    elec = elec + _start_term(cop_model) * starts
+    temps = xs[1:] @ p.out_c.T + p.out_offset.T  # (T, R)
+    with np.errstate(invalid="ignore"):
+        deficit = np.where(np.isfinite(minimum.T), np.maximum(minimum.T - temps, 0.0), 0.0)
+    kh = float(deficit.sum() * STEP_H)
+    shortfall = max(0.0, float(p.capacities @ (p.x0 - xs[-1])))
+    objective = (
+        base_kwh
+        + p.start_penalty_kwh * float(starts.sum())
+        + p.penalty_kwh_per_kh * kh
+        + p.terminal_value * shortfall
+    )
+    return {
+        "w_plan": w_plan,
+        "xs": xs,
+        "q": q,
+        "elec": elec,
+        "starts": int(starts.sum()),
+        "kh": kh,
+        "objective": objective,
+    }
+
+
 def plan(
     model: MpcModel,
     x0: np.ndarray,
@@ -424,11 +494,19 @@ def plan(
     prev_on: bool = False,
     prev_run_slots: int = 10**6,
 ) -> Plan:
-    """Solve, simulate the plan with the nonlinear plant law, re-linearise and solve again."""
+    """Solve along a reference, simulate with the nonlinear plant law, re-linearise along the
+    simulated plan and solve again; keep the iterate with the best simulated objective.
+
+    The first reference is the free-running house (no heat), so the valve demand starts from the
+    temperatures the house would reach without heating."""
     t_n = ex.length
-    x_ref = np.repeat(np.asarray(x0, float)[None, :], t_n, axis=0)
+    x0 = np.asarray(x0, float)
+    x_ref, _ = model.simulate(x0, np.zeros(t_n), np.zeros(t_n), ex)
+    x_ref = x_ref[:-1]
     solves: list[MpcResult] = []
-    best: tuple[MpcResult, np.ndarray] | None = None
+    iterates: list[dict[str, Any]] = []
+    best: tuple[MpcResult, np.ndarray, dict[str, Any]] | None = None
+    previous: MpcResult | None = None
     for _ in range(settings.relinearize_iterations + 1):
         problem, water = build_problem(
             model,
@@ -446,10 +524,20 @@ def plan(
         solves.append(res)
         if not res.ok:
             break
-        best = (res, water)
-        w_plan = np.where(res.level >= 0, water[np.arange(t_n), np.maximum(res.level, 0)], np.nan)
-        xs, _q = model.simulate(x0, res.on, np.nan_to_num(w_plan), ex)
-        x_ref = xs[:-1]
+        ev = _evaluate(model, x0, ex, minimum, dhw, cop_model, problem, res, water, prev_on)
+        changed = (
+            int(((res.on != previous.on) | (res.level != previous.level)).sum())
+            if previous is not None
+            else None
+        )
+        iterates.append(
+            {"objective": ev["objective"], "milp_objective": res.objective, "changed": changed}
+        )
+        if best is None or ev["objective"] < best[2]["objective"] - 1e-9:
+            best = (res, water, ev)
+            chosen = len(iterates) - 1
+        previous = res
+        x_ref = ev["xs"][:-1]
     if best is None:
         nan = np.full(t_n, np.nan)
         return Plan(
@@ -463,33 +551,24 @@ def plan(
             starts=0,
             solves=solves,
             lift_outside_table=float("nan"),
+            valve_open=nan,
+            iterates=iterates,
         )
-    res, water = best
-    w_plan = np.where(res.level >= 0, water[np.arange(t_n), np.maximum(res.level, 0)], np.nan)
-    xs, q = model.simulate(x0, res.on, np.nan_to_num(w_plan), ex)
-    elec = np.where(
-        res.on > 0,
-        cop_mod.predict_electricity(
-            cop_model, q * STEP_H, np.nan_to_num(w_plan), ex.t_out, starts=0.0, hours_on=STEP_H
-        ),
-        0.0,
-    )
-    c = res.on + np.asarray(dhw, float)
-    prev = 1.0 if prev_on else 0.0
-    starts = int((np.diff(np.concatenate(([prev], c))) > 0.5).sum())
-    if cop_model.selected == "regression":
-        elec = elec + _start_term(cop_model) * np.diff(np.concatenate(([prev], c))).clip(0)
+    res, water, ev = best
     return Plan(
         result=res,
         on=res.on,
-        water=w_plan,
+        water=ev["w_plan"],
         offset_index=res.level,
-        xs=xs,
-        q_kw=q,
-        elec_kwh=elec,
-        starts=starts,
+        xs=ev["xs"],
+        q_kw=ev["q"],
+        elec_kwh=ev["elec"],
+        starts=ev["starts"],
         solves=solves,
-        lift_outside_table=_lift_outside(cop_model, w_plan, ex.t_out, res.on),
+        lift_outside_table=_lift_outside(cop_model, ev["w_plan"], ex.t_out, res.on),
+        valve_open=np.asarray(model.valves(ev["xs"][:-1], ex), float),
+        iterates=iterates,
+        chosen=chosen,
     )
 
 

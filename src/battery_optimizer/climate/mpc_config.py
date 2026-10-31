@@ -76,6 +76,13 @@ SCHEMA: Spec = section(
                 "setpoint_margin_k": num(0.0, 3.0),
             }
         ),
+        "optimum_start": section(
+            {
+                "band_edges_c": seq(num(-30.0, 30.0), min_len=0, unique=True),
+                "lead_weekday_minutes": seq(integer(0, 24 * 60), min_len=1),
+                "lead_weekend_minutes": seq(integer(0, 24 * 60), min_len=1),
+            }
+        ),
         "machine": section(
             {
                 "min_on_minutes": integer(0, 240),
@@ -141,6 +148,13 @@ def _cross_checks(cfg: Section) -> None:
         raise _fail("water.curve", "outdoor temperatures must increase strictly")
     if cfg.replan_every_minutes % 15:
         raise _fail("replan_every_minutes", "must be a whole number of 15-minute slots")
+    o = cfg.optimum_start
+    edges = list(o.band_edges_c)
+    if edges != sorted(edges):
+        raise _fail("optimum_start.band_edges_c", "must increase")
+    for key in ("lead_weekday_minutes", "lead_weekend_minutes"):
+        if len(o[key]) != len(edges) + 1:
+            raise _fail(f"optimum_start.{key}", "needs one lead per band (len(band_edges_c) + 1)")
     if max(cfg.replay.accuracy_horizons_hours) > cfg.horizon_hours:
         raise _fail("replay.accuracy_horizons_hours", "must not exceed horizon_hours")
 

@@ -8,16 +8,29 @@ comfort figure is a model prediction of a plan that was not executed, not a real
 Inputs at a decision ``t0`` (slot index) are causal, except what is declared:
 
 * the state estimate uses measurements of slots before ``t0`` only (``thermal.observe``);
-* the compressor's run in progress (minimum on/off carry-in) is read from the measured slots
-  before ``t0``;
-* the model parameters in force at ``t0`` were fitted on the *other* season (the prior) and,
-  with ``model.reestimate``, re-estimated on days before ``t0`` only;
-* **declared foresight:** with ``replay.weather = perfect`` the outdoor temperature over the horizon
-  is the measured, debiased series (perfect weather foresight, a stand-in for a forecast; its
-  interpolation across compressor runs also reads up to ``max_gap_hours`` past ``t0``).  With
-  ``persistence`` it is the last valid reading before ``t0`` held flat and the observer reads the
-  same causal series.  The DHW mask of the horizon is the measured one (an exogenous schedule).
-  The sun proxy and the diurnal term are astronomical/calendar functions.  Occupancy is unknown.
+* the space-heating run in progress (minimum on/off carry-in) is read from the measured slots
+  before ``t0`` (DHW slots skipped, as in the MILP);
+* the weekly re-estimation (``model.reestimate``) uses days before ``t0`` only.
+
+**Leakage, declared:**
+
+* the season prior is fitted on the *other* season: an S3 replay reads an S2 prior (earlier), but
+  an **S2 replay is scored with an S3-fitted prior, i.e. a later season's data**; the heat law,
+  the room offsets and the COP table come from the same prior season.  ``model.kind: c2`` uses
+  C2's S2 prior for both seasons, so **its S2 run is in-sample**;
+* with ``replay.weather = perfect`` the outdoor temperature over the horizon is ``t_out_model``
+  (perfect weather foresight, a stand-in for a forecast), and **the observer reads the same series
+  for the past**: the debiased sensor interpolated across compressor runs (it reads up to
+  ``max_gap_hours`` past a slot) and, in longer gaps, the **fused station series**, whose offset is
+  Kalman-smoothed over the whole grid.  With ``persistence`` the horizon holds the last valid
+  reading before ``t0`` and the observer reads the same causal (forward-filled) series;
+* the DHW mask of the horizon is the measured one (an exogenous schedule); the sun proxy and the
+  diurnal term are astronomical/calendar functions.  Occupancy is unknown.
+
+The setpoints the valve cap reads follow design section 3 and the optimum start of section 6: the
+day room's day setpoint from the window start minus the lead of the outdoor band
+(``optimum_start``), the floor setpoint elsewhere.  The comfort minimum of a slot is the one in
+force at the **end** of the slot, because the MILP compares it with the end-of-slot state.
 
 Reported (all private figures; the data dir only):
 
@@ -83,11 +96,22 @@ def causal_outdoor(d: ClimateData) -> np.ndarray:
     return np.where(idx >= 0, d.t_out[np.maximum(idx, 0)], np.nan)
 
 
+def check_configs(ccfg: ClimateConfig, cfg: MpcConfig) -> None:
+    """The MPC config must agree with the climate config it reads data through."""
+    if cfg.timezone != ccfg.timezone:
+        raise ValueError(
+            f"climate-mpc timezone {cfg.timezone!r} differs from climate.yaml's {ccfg.timezone!r}"
+        )
+    if cfg.comfort.day_room not in ccfg.comfort.rooms:
+        raise ValueError(f"comfort.day_room {cfg.comfort.day_room!r} is not a comfort room")
+
+
 def comfort_minimum(
     rooms: Sequence[str], hour_frac: np.ndarray, weekend: np.ndarray, cfg: MpcConfig
 ) -> np.ndarray:
-    """``(rooms, T)`` minimum of the comfort schedule: the floor everywhere, the day minimum in the
-    day room's window (weekday or weekend start until the end hour)."""
+    """``(rooms, T)`` minimum of the comfort schedule at the local times *hour_frac*: the floor
+    everywhere, the day minimum in the day room's window (weekday or weekend start until the end
+    hour).  Callers pass the slot-**end** time (slot start + 0.25 h)."""
     c = cfg.comfort
     start = np.where(weekend, c.day_start_weekend_hour, c.day_start_weekday_hour)
     in_day = (hour_frac >= start) & (hour_frac < c.day_end_hour)
@@ -112,32 +136,85 @@ class Context:
     weekend: np.ndarray
     t_out_model: np.ndarray  # the observer's outdoor history (weather-mode dependent)
     t_out_causal: np.ndarray
-    compressor: np.ndarray  # measured: space heat delivered or DHW, per slot (NaN unknown)
+    space_heat: np.ndarray  # measured space heating per slot: 1 / 0, NaN unknown
 
     @property
     def horizon(self) -> int:
         return int(self.cfg.horizon_hours * 4)
 
 
-def compressor_state(d: ClimateData) -> np.ndarray:
-    """1.0 where the compressor heated or made hot water, 0.0 where not, ``NaN`` unknown."""
+def space_heat_state(d: ClimateData) -> np.ndarray:
+    """1.0 where space heat was delivered, 0.0 where not, ``NaN`` unknown (DHW slots are 0;
+    :func:`_run_in_progress` skips them)."""
     with np.errstate(invalid="ignore"):
-        heat = d.q_heat_kwh >= plant.HEAT_ON_KWH
-    known = np.isfinite(d.q_heat_kwh) | d.dhw
-    return np.where(known, (heat | d.dhw).astype(float), np.nan)
+        heat = (d.q_heat_kwh >= plant.HEAT_ON_KWH) & ~d.dhw
+    return np.where(np.isfinite(d.q_heat_kwh) | d.dhw, heat.astype(float), np.nan)
 
 
-def _run_in_progress(c: np.ndarray, t0: int) -> tuple[bool, int]:
-    """The compressor state of slot ``t0 - 1`` and how many slots it has held (capped at 96)."""
-    if t0 == 0 or not np.isfinite(c[t0 - 1]):
-        return False, 10**6
-    state = c[t0 - 1]
+def _run_in_progress(c: np.ndarray, dhw: np.ndarray, t0: int) -> tuple[bool, int]:
+    """The space-heating state of the last non-DHW slot before ``t0`` and how many non-DHW
+    slots it has held (capped at a day: no carry-in).  DHW slots are transparent, as in the MILP;
+    an unknown slot means no carry-in."""
+    state = None
     run = 0
     for t in range(t0 - 1, max(-1, t0 - 1 - SLOTS_PER_DAY), -1):
-        if c[t] != state:
+        if dhw[t]:
+            continue
+        if not np.isfinite(c[t]):
+            break
+        if state is None:
+            state = c[t]
+        elif c[t] != state:
             break
         run += 1
+    if state is None:
+        return False, 10**6
     return bool(state > 0.5), run if run < SLOTS_PER_DAY else 10**6
+
+
+def _first_at(hour_frac: np.ndarray, hour: float) -> int:
+    """Index of the first slot at or after *hour* (the day's length if none; DST-safe)."""
+    hits = np.flatnonzero(hour_frac >= hour)
+    return int(hits[0]) if hits.size else int(hour_frac.size)
+
+
+def schedule_setpoints(ctx: Context, t0: int, hi: int, rooms: Sequence[str]) -> np.ndarray:
+    """``(rooms, hi - t0)`` thermostat setpoints the controller writes (design sections 3 and 6):
+    the floor plus the margin everywhere; the day room's day minimum plus the margin from its
+    optimum start (window start minus the lead of the outdoor band, never before 22:00 the evening
+    before) until the window end.
+
+    The band reads the mean outdoor temperature from 22:00 the evening before to the window start:
+    ``t_out_model`` with perfect weather (declared foresight), otherwise the causal series before
+    ``t0`` and its last value held after it."""
+    d, cfg = ctx.d, ctx.cfg
+    c, o = cfg.comfort, cfg.optimum_start
+    margin = float(c.setpoint_margin_k)
+    out = np.full((len(rooms), hi - t0), float(c.floor_c) + margin)
+    room = list(rooms).index(c.day_room)
+    if cfg.replay.weather == "perfect":
+        series = d.t_out_model
+    else:
+        held = ctx.t_out_causal[t0 - 1] if t0 > 0 else np.nan
+        series = np.concatenate([ctx.t_out_causal[:t0], np.full(d.n - t0, held)])
+    evening = 2 * 4  # 22:00 the evening before, in slots before local midnight
+    first, last = int(d.day_of_slot[t0]), int(d.day_of_slot[hi - 1])
+    for j in range(first, min(last + 1, len(d.days) - 1) + 1):
+        _label, lo, end = d.days[j]
+        hf = ctx.hour_frac[lo:end]
+        weekend = bool(ctx.weekend[lo])
+        start_h = c.day_start_weekend_hour if weekend else c.day_start_weekday_hour
+        ws = lo + _first_at(hf, start_h)
+        we = lo + _first_at(hf, c.day_end_hour)
+        night = series[max(0, lo - evening) : ws]
+        band_t = float(np.nanmean(night)) if np.isfinite(night).any() else -np.inf
+        band = int(np.searchsorted(np.asarray(o.band_edges_c, float), band_t, side="right"))
+        leads = o.lead_weekend_minutes if weekend else o.lead_weekday_minutes
+        early = max(ws - int(round(leads[band] / 15.0)), lo - evening)
+        a, b = max(early, t0), min(we, hi)
+        if a < b:
+            out[room, a - t0 : b - t0] = float(c.day_min_c) + margin
+    return out
 
 
 def decision_inputs(ctx: Context, t0: int) -> dict[str, Any] | None:
@@ -160,15 +237,17 @@ def decision_inputs(ctx: Context, t0: int) -> dict[str, Any] | None:
         t_out = np.full(h, last)
     if not np.isfinite(t_out).all():
         return None
-    minimum = comfort_minimum(model.rooms, ctx.hour_frac[t0:hi], ctx.weekend[t0:hi], cfg)
+    minimum = comfort_minimum(
+        model.rooms, ctx.hour_frac[t0:hi] + STEP_H, ctx.weekend[t0:hi], cfg
+    )  # slot-end time: compared with the end-of-slot state
     ex = Exogenous(
         t_out=np.asarray(t_out, float),
         solar=d.solar[t0:hi],
         diurnal=ctx.diurnal[t0:hi],
         local_hour=d.local_hour[t0:hi].astype(np.int64),
-        setpoints=minimum + cfg.comfort.setpoint_margin_k,
+        setpoints=schedule_setpoints(ctx, t0, hi, model.rooms),
     )
-    prev_on, run = _run_in_progress(ctx.compressor, t0)
+    prev_on, run = _run_in_progress(ctx.space_heat, d.dhw, t0)
     return {
         "model": model,
         "x0": np.asarray(x0, float),
@@ -382,12 +461,8 @@ def run_decision(
             {"status": s.status, "solve_s": s.solve_s, "gap": s.gap, "objective": s.objective}
             for s in p.solves
         ],
-        "relinearize_changed": bool(
-            len(p.solves) > 1
-            and p.solves[0].ok
-            and p.solves[-1].ok
-            and not np.array_equal(p.solves[0].level, p.solves[-1].level)
-        ),
+        "iterates": p.iterates,
+        "chosen_iterate": int(p.chosen),
     }
     if p.result.ok:
         temps = (p.xs[1:] @ c.T).T + off
@@ -401,6 +476,7 @@ def run_decision(
                     int((p.offset_index == k).sum()) for k in range(len(cfg.water.offsets_k))
                 ],
                 "plan_lift_outside_table": p.lift_outside_table,
+                **_slot_stats(model, p, cfg),
                 "plan_terminal_shortfall_kwh_th": p.result.extra.get("terminal_shortfall_kwh_th"),
                 **{
                     f"plan_{k}": v
@@ -415,6 +491,23 @@ def run_decision(
     if accuracy:
         rec["accuracy"] = _accuracy(ctx, t0, inp, model, midnight)
     return rec
+
+
+def _slot_stats(model, p: Plan, cfg: MpcConfig) -> dict[str, Any]:
+    """Per planned heating slot: the top offset, the open valves at the simulated state and the
+    valve factor, and the slots the run logic switched off in simulation (every valve shut)."""
+    on = p.on > 0
+    rooms = len(model.rooms)
+    open_rooms = np.round(np.nan_to_num(p.valve_open) * rooms).astype(int)
+    out: dict[str, Any] = {
+        "plan_heat_slots": int(on.sum()),
+        "plan_top_slots": int((on & (p.offset_index == len(cfg.water.offsets_k) - 1)).sum()),
+        "plan_open_rooms": [int((on & (open_rooms == k)).sum()) for k in range(rooms + 1)],
+        "plan_runlogic_off": int((on & (open_rooms == 0)).sum()),
+    }
+    if hasattr(model, "valve_factor"):
+        out["plan_valve_factor_sum"] = float(model.valve_factor(p.valve_open)[on].sum())
+    return out
 
 
 def _accuracy(
@@ -435,7 +528,9 @@ def _accuracy(
     out: dict[str, Any] = {"run_slots": int(run)}
     if run == 0:
         return out
-    xs, q = model.simulate(inp["x0"], on[:run], water[:run], _cut(measured_ex, run))
+    xs, q = model.simulate(
+        inp["x0"], on[:run], water[:run], _cut(measured_ex, run), run_logic=False
+    )
     _c, off = model.room_outputs(ex.local_hour[:run])
     y_air = d.t_air[t0 : t0 + run]
     y_hall = d.room_temp[cfg.comfort.day_room][t0 : t0 + run]
@@ -524,7 +619,7 @@ def _legacy_day(ctx: Context, j: int) -> dict[str, Any]:
     dhw = d.dhw[lo:hi]
     e = np.where(dhw, 0.0, d.e_heat_kwh[lo:hi])
     rooms = tuple(d.comfort_rooms)
-    minimum = comfort_minimum(rooms, ctx.hour_frac[lo:hi], ctx.weekend[lo:hi], cfg)
+    minimum = comfort_minimum(rooms, ctx.hour_frac[lo:hi] + STEP_H, ctx.weekend[lo:hi], cfg)
     temps = np.vstack([d.room_temp[r][lo:hi] for r in rooms])
     u = d.u[lo:hi]
     t_out = d.t_out_model[lo:hi]
@@ -666,16 +761,64 @@ def summarise(days: list[dict[str, Any]], cfg: MpcConfig) -> dict[str, Any]:
             "median": float(np.median(gaps)) if gaps.size else None,
             "max": float(gaps.max()) if gaps.size else None,
         },
-        "relinearize_changed_share": float(np.mean([r["relinearize_changed"] for r in decisions]))
-        if decisions
-        else None,
         "lift_outside_table_mean": float(
             np.nanmean([r.get("plan_lift_outside_table", np.nan) for r in decisions])
         )
         if decisions
         else None,
+        "relinearization": _relin_stats(decisions),
     }
-    return {"accuracy": acc, "comparison": comparison, "solver": solver}
+    return {
+        "accuracy": acc,
+        "comparison": comparison,
+        "solver": solver,
+        "plan_slots": _plan_slot_stats(decisions),
+    }
+
+
+def _relin_stats(decisions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Which iterate was kept and how much the last re-linearisation changed the plan."""
+    rows = [r for r in decisions if r.get("iterates")]
+    if not rows:
+        return {"decisions": 0}
+    n_it = max(len(r["iterates"]) for r in rows)
+    chosen = np.array([r["chosen_iterate"] for r in rows])
+    last_changed = [r["iterates"][-1]["changed"] for r in rows if len(r["iterates"]) > 1]
+    gain = [
+        r["iterates"][0]["objective"] - r["iterates"][r["chosen_iterate"]]["objective"]
+        for r in rows
+    ]
+    return {
+        "decisions": len(rows),
+        "chosen_share": {str(i): float(np.mean(chosen == i)) for i in range(n_it)},
+        "last_iterate_changed_slots": {
+            "median": float(np.median(last_changed)) if last_changed else None,
+            "share_zero": float(np.mean(np.array(last_changed) == 0)) if last_changed else None,
+        },
+        "objective_gain_vs_first_median": float(np.median(gain)),
+    }
+
+
+def _plan_slot_stats(decisions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Top-offset share, valve factor and open valves over every planned heating slot."""
+    rows = [r for r in decisions if "plan_heat_slots" in r]
+    heat = sum(r["plan_heat_slots"] for r in rows)
+    if not heat:
+        return {"heat_slots": 0}
+    rooms = np.sum([r["plan_open_rooms"] for r in rows], axis=0)
+    out = {
+        "heat_slots": int(heat),
+        "top_offset_share": sum(r["plan_top_slots"] for r in rows) / heat,
+        "open_rooms_share": {str(k): float(v / heat) for k, v in enumerate(rooms)},
+        "runlogic_off_share": sum(r["plan_runlogic_off"] for r in rows) / heat,
+    }
+    if all("plan_valve_factor_sum" in r for r in rows):
+        out["valve_factor_mean"] = sum(r["plan_valve_factor_sum"] for r in rows) / heat
+    mid = [r for r in rows if "plan_on" in r]
+    mid_heat = sum(r["plan_heat_slots"] for r in mid)
+    if mid_heat:
+        out["midnight_top_offset_share"] = sum(r["plan_top_slots"] for r in mid) / mid_heat
+    return out
 
 
 def _compare(rows: list[dict[str, Any]], cfg: MpcConfig) -> dict[str, Any]:

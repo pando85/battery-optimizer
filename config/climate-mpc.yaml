@@ -10,7 +10,7 @@
 # Everything here is degC, K, minutes, kWh or a count: no price and no site coordinate.
 
 config_version: 1
-timezone: Europe/Madrid
+timezone: Europe/Madrid # must equal config/climate.yaml's (checked by the replay)
 
 horizon_hours: 24 # needed for the long warm-up leads; beyond about 12 h predictions are weak
 replan_every_minutes: 60 # replay decision interval (the grid stays 15 min)
@@ -29,10 +29,20 @@ comfort:
   # Thermostat setpoints the plan assumes for the valve cap: minimum + margin (design section 3).
   setpoint_margin_k: 0.5
 
+# --- optimum start (design section 6) -------------------------------------------------------------
+# The hall/kitchen day setpoint (day_min_c + setpoint_margin_k) is written at the window start minus
+# the lead of the outdoor band, never before 22:00 the evening before; the valves (and so the run
+# logic) follow it. Leads are B0's measured p75 by day type (run b0-20261031). The band reads the
+# mean outdoor temperature from 22:00 the evening before to the window start, as B0 measured it.
+optimum_start:
+  band_edges_c: [8.0, 12.0] # below 8, 8 to 12, 12 and above
+  lead_weekday_minutes: [675, 545, 275]
+  lead_weekend_minutes: [530, 430, 215]
+
 # --- machine limits (in code in the controller, design section 2 and 7.1) -------------------------
 machine:
   min_on_minutes: 30
-  min_off_minutes: 20 # rounded up to whole 15-minute slots (2 slots)
+  min_off_minutes: 20 # rounded up to whole 15-minute slots: 2 slots, so effectively 30 min
   water_min_c: 20
   water_max_c: 35
   start_penalty_kwh: 0.1 # kWh-equivalent per compressor start (cycling losses, see cop-model)
@@ -41,7 +51,9 @@ machine:
 water:
   # (outdoor degC, water degC), linear between the points and clamped outside them
   curve: [[-5.0, 32.0], [15.0, 25.0]]
-  offsets_k: [0, 1, 2, 3] # decision per slot; target = clamp(round(curve + offset), min, max)
+  # decision per slot; target = clamp(round(curve + offset), min, max). 0 to +3 K bound in 75 to 95%
+  # of planned heating slots once the optimum-start valves were modelled, so the range is +6 K
+  offsets_k: [0, 1, 2, 3, 4, 5, 6]
 
 # --- the model behind the MPC (battery_optimizer.climate.mpc_model) -----------------------------
 model:
@@ -67,8 +79,10 @@ terminal:
 solver:
   time_limit_s: 20.0
   mip_rel_gap: 0.001
-  # re-evaluate the heat table along the plan's own simulated trajectory and solve again
-  relinearize_iterations: 2
+  # re-evaluate the heat table and the valve demand along the plan's own simulated trajectory and
+  # solve again (first reference: the free-running house); the iterate with the best simulated
+  # objective is kept
+  relinearize_iterations: 3
 
 # --- offline replay ------------------------------------------------------------------------------
 replay:

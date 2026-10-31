@@ -11,13 +11,14 @@ Usage:
         --feature-set <climate feature set id or prefix> --dataset <dataset dir or id> \\
         [--data-dir ~/data/<store>] [--run-id <name>] [--workers 8] \\
         [--config config/climate.yaml] [--mpc-config config/climate-mpc.yaml] \\
-        [--model b2d|c2] [--weather perfect|persistence] [--seasons S2,S3] [--max-days N]
+        [--model b2d|c2] [--weather perfect|persistence] [--seasons S2,S3] [--max-days N] \\
+        [--offsets 0,1,2,3]
 
 ``BATTERY_OPTIMIZER_DATA_DIR`` replaces ``--data-dir``. Everything is written to
 ``<data_dir>/analysis/v1/climate-mpc/<run-id>/`` (``report.json``, ``report.md``,
 ``days.jsonl``); the repository is never touched. The figures are private: keep them in the data
-dir. ``--model``, ``--weather``, ``--seasons`` and ``--max-days`` override the configuration and are
-recorded in the report.
+dir. ``--model``, ``--weather``, ``--seasons``, ``--max-days`` and ``--offsets`` override the
+configuration and are recorded in the report.
 """
 
 from __future__ import annotations
@@ -84,6 +85,27 @@ def _pct(x: float | None) -> str:
 
 def _f(x: float | None, nd: int = 3) -> str:
     return "n/a" if x is None else f"{x:.{nd}f}"
+
+
+def _relin(r: dict[str, Any]) -> str:
+    if not r.get("decisions"):
+        return "n/a"
+    last = r["last_iterate_changed_slots"]
+    return (
+        f"iterate kept {r['chosen_share']}, last iterate changed a median of "
+        f"{_f(last['median'], 1)} slots (unchanged in {_pct(last['share_zero'])})"
+    )
+
+
+def _slots(p: dict[str, Any]) -> str:
+    if not p.get("heat_slots"):
+        return "no planned heating"
+    return (
+        f"top offset {_pct(p['top_offset_share'])} (midnight plans "
+        f"{_pct(p.get('midnight_top_offset_share'))}); mean valve factor "
+        f"{_f(p.get('valve_factor_mean'))}; open rooms share {p['open_rooms_share']}; "
+        f"switched off by the run logic in simulation {_pct(p['runlogic_off_share'])}"
+    )
 
 
 def render(report: dict[str, Any]) -> str:
@@ -174,8 +196,12 @@ def render(report: dict[str, Any]) -> str:
             f"- solve time median / p95 / max {_f(sol['solve_s']['median'])} / "
             f"{_f(sol['solve_s']['p95'])} / {_f(sol['solve_s']['max'])} s; gap median / max "
             f"{_f(sol['gap']['median'], 5)} / {_f(sol['gap']['max'], 5)}",
-            f"- re-linearisation changed the plan in {_pct(sol['relinearize_changed_share'])} of "
-            f"decisions; planned lift outside the COP table {_pct(sol['lift_outside_table_mean'])}",
+            f"- planned lift outside the COP table {_pct(sol['lift_outside_table_mean'])}; "
+            f"re-linearisation: {_relin(sol['relinearization'])}",
+            "",
+            "### Planned heating slots",
+            "",
+            f"- {_slots(s['summary']['plan_slots'])}",
             "",
         ]
     return "\n".join(lines)
@@ -200,11 +226,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-days", type=int, default=None, help="evenly spaced subset per season"
     )
+    parser.add_argument("--offsets", default=None, help="water offsets in K, e.g. 0,1,2,3")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
     ccfg = load_climate_config(args.config)
     cfg = load_mpc_config(args.mpc_config)
+    try:
+        mpc_replay.check_configs(ccfg, cfg)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     overrides: dict[str, Any] = {}
     if args.model:
         cfg = _override(cfg, ("model", "kind"), args.model)
@@ -217,6 +248,10 @@ def main(argv: list[str] | None = None) -> int:
         overrides["replay.seasons"] = list(seasons)
     if args.max_days:
         overrides["max_days"] = args.max_days
+    if args.offsets:
+        offsets = [int(v) for v in args.offsets.split(",")]
+        cfg = _override(cfg, ("water", "offsets_k"), tuple(offsets))
+        overrides["water.offsets_k"] = offsets
 
     root = resolve_data_dir(args.data_dir)
     out_dir = mpc_replay.outputs_dir(root, args.run_id)
@@ -291,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
             weekend=weekend,
             t_out_model=hist_t_out,
             t_out_causal=t_out_causal,
-            compressor=mpc_replay.compressor_state(d),
+            space_heat=mpc_replay.space_heat_state(d),
         )
         days = mpc_replay.replay_day_indices(ctx, season, args.max_days)
         log.info("replaying %d days of %s with %d workers", len(days), season, args.workers)

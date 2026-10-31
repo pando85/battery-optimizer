@@ -41,13 +41,18 @@ def _cop() -> CopModel:
     )
 
 
-def _data(perturb_after: int | None = None, outdoor_too: bool = True):
-    """Six synthetic days; with *perturb_after*, every measurement from that slot on differs."""
+def _data(
+    perturb_after: int | None = None, outdoor_too: bool = True, t_out_level: float | None = None
+):
+    """Six synthetic days from a Monday; with *perturb_after*, every measurement from that slot on
+    differs; with *t_out_level*, a constant outdoor temperature."""
     starts = grid(date(2025, 1, 6), 6)
     n = starts.size
     t = np.arange(n)
     rng = np.random.default_rng(0)
     t_out = 5.0 + 3.0 * np.sin(2 * np.pi * t / 96.0)
+    if t_out_level is not None:
+        t_out = np.full(n, t_out_level)
     room = 21.5 + 0.5 * np.sin(2 * np.pi * t / 96.0) + rng.normal(0, 0.05, n)
     q = np.where((t // 6) % 4 == 0, 1.0, 0.0)
     dhw = np.where(t % 96 == 20, 0.3, 0.0)
@@ -99,7 +104,7 @@ def _context(d, weather: str) -> mpc_replay.Context:
         weekend=weekend,
         t_out_model=w[:, 1],
         t_out_causal=causal,
-        compressor=mpc_replay.compressor_state(d),
+        space_heat=mpc_replay.space_heat_state(d),
     )
 
 
@@ -153,11 +158,75 @@ def test_no_state_or_no_horizon_means_no_decision():
     assert mpc_replay.decision_inputs(ctx, ctx.d.n - 10) is None  # horizon past the data
 
 
-def test_the_run_in_progress_comes_from_measured_slots():
+def test_the_run_in_progress_comes_from_measured_space_heating_slots():
     c = np.array([0, 0, 1, 1, 1, np.nan, 0], dtype=float)
-    assert mpc_replay._run_in_progress(c, 5) == (True, 3)
-    assert mpc_replay._run_in_progress(c, 2) == (False, 2)
-    assert mpc_replay._run_in_progress(c, 6) == (False, 10**6)  # unknown: no carry-in
+    no_dhw = np.zeros(7, dtype=bool)
+    assert mpc_replay._run_in_progress(c, no_dhw, 5) == (True, 3)
+    assert mpc_replay._run_in_progress(c, no_dhw, 2) == (False, 2)
+    assert mpc_replay._run_in_progress(c, no_dhw, 6) == (False, 10**6)  # unknown: no carry-in
+    # DHW slots are skipped: heating, DHW, DHW is a space-heating run of one slot
+    c2 = np.array([0, 0, 1, 0, 0], dtype=float)
+    dhw = np.array([False, False, False, True, True])
+    assert mpc_replay._run_in_progress(c2, dhw, 5) == (True, 1)
+    # and DHW right after a stop does not lengthen the off time
+    c3 = np.array([1, 1, 0, 0, 0], dtype=float)
+    dhw3 = np.array([False, False, False, True, True])
+    assert mpc_replay._run_in_progress(c3, dhw3, 5) == (False, 1)
+
+
+def test_the_comfort_window_is_aligned_to_the_slot_end():
+    ctx = _context(_data(), "perfect")
+    t0 = 2 * 96 + 32  # Wednesday 08:00 local
+    inp = mpc_replay.decision_inputs(ctx, t0)
+    hall = ROOMS.index("hall_kitchen")
+    hours = ctx.hour_frac[t0 : t0 + 96]
+    at = {float(h): i for i, h in enumerate(hours)}
+    # the slot 11:45-12:00 ends at the window start: its end state must meet 23.5
+    assert inp["minimum"][hall, at[11.5]] == 21.0
+    assert inp["minimum"][hall, at[11.75]] == 23.5
+    # the slot 21:45-22:00 ends at the window end: no day minimum
+    assert inp["minimum"][hall, at[21.5]] == 23.5
+    assert inp["minimum"][hall, at[21.75]] == 21.0
+
+
+@pytest.mark.parametrize(
+    ("t_out", "first_hour"),
+    [(5.0, 0.75), (10.0, 2.95), (15.0, 7.5)],  # leads 675, 545 and 275 min before 12:00
+)
+def test_the_optimum_start_setpoint_reaches_the_exogenous_inputs(t_out, first_hour):
+    ctx = _context(_data(t_out_level=t_out), "perfect")
+    t0 = 2 * 96  # Wednesday 00:00 local
+    inp = mpc_replay.decision_inputs(ctx, t0)
+    sp = inp["ex"].setpoints
+    hall = ROOMS.index("hall_kitchen")
+    hours = ctx.hour_frac[t0 : t0 + 96]
+    lead_slots = {5.0: 45, 10.0: 36, 15.0: 18}[t_out]  # round(minutes / 15)
+    start = 48 - lead_slots  # 12:00 is slot 48 of the day
+    assert hours[start] == pytest.approx(first_hour, abs=0.25)
+    assert (sp[hall, :start] == 21.5).all()
+    assert (sp[hall, start:88] == 24.0).all()  # until 22:00
+    assert (sp[hall, 88:] == 21.5).all()
+    others = [i for i in range(len(ROOMS)) if i != hall]
+    assert (sp[others] == 21.5).all()
+
+
+def test_persistence_reads_the_band_from_the_held_reading():
+    ctx = _context(_data(t_out_level=15.0), "persistence")
+    t0 = 2 * 96 + 4  # 01:00: the night so far is warm and the held reading too
+    sp = mpc_replay.decision_inputs(ctx, t0)["ex"].setpoints
+    hall = ROOMS.index("hall_kitchen")
+    assert (sp[hall, : 30 - 4] == 21.5).all() and sp[hall, 30 - 4] == 24.0  # 07:30
+
+
+def test_configs_must_agree():
+    from battery_optimizer.climate.config import load_climate_config
+
+    ccfg = load_climate_config(Path(__file__).resolve().parents[1] / "config/climate.yaml")
+    mpc_replay.check_configs(ccfg, CFG)
+    raw = CFG.to_dict()
+    raw["timezone"] = "Europe/Lisbon"
+    with pytest.raises(ValueError, match="timezone"):
+        mpc_replay.check_configs(ccfg, _section_cfg(raw, CFG))
 
 
 def test_comfort_minimum_follows_the_schedule():
@@ -188,6 +257,15 @@ def test_a_day_replays_and_summarises():
     assert summary["solver"]["decisions"] == len(days[0]["decisions"])
     assert summary["comparison"]["days"] == 1
     assert set(summary["accuracy"]) >= {"1h", "6h", "12h", "24h", "daily_heat"}
+    slots = summary["plan_slots"]
+    if slots["heat_slots"]:
+        assert 0.0 <= slots["top_offset_share"] <= 1.0
+        # planned against shut valves only where the kept iterate's simulation drifted from its
+        # reference; the run logic delivers no heat there
+        assert slots["open_rooms_share"]["0"] == pytest.approx(slots["runlogic_off_share"])
+        assert slots["runlogic_off_share"] < 0.05
+        assert 0.3 <= slots["valve_factor_mean"] <= 1.0
+    assert summary["solver"]["relinearization"]["decisions"] == len(days[0]["decisions"])
 
 
 def test_material_difference_rules():
