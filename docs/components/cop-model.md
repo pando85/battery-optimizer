@@ -15,7 +15,7 @@ Owner: this repository (`climate/cop.py`, `hack/climate_cop.py`).
 - **Out:** `CopModel` (versioned, hashable; `predict_electricity`), `cop.json` / `cop.md` in the data directory.
 - **Consumers:** the legacy-replay electricity and cost criteria of [thermal-model](thermal-model.md);
   the heat-pump regime transfer of the [whole-system replay](system-replay-benchmark.md) uses measured
-  COP bands, not this model. Nothing live.
+  COP bands, not this model; the offline [climate-mpc](climate-mpc.md) refits its lift table. Nothing live.
 
 ## Calibrated on
 

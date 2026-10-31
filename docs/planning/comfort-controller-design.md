@@ -268,7 +268,7 @@ part of B0 to B3.
 
 ### B1 result (offline replay)
 
-Runs `b1-20261031-b2d-perfect`, `-b2d-persistence` and `-c2-perfect` (code `26dcbb8`, dataset
+Runs `b1-20261031-b2d-perfect`, `-b2d-persistence` and `-c2-perfect` (code `dd344f3`, dataset
 `cdd448abb006`, feature set `da6d678016ed`, MPC config `06ec157c`), S2 and S3 from November to March,
 a 24 h plan every hour (2932 and 3082 decisions). Formulation and causality rules:
 [climate-mpc](../components/climate-mpc.md). **Exploratory:** no thermal model is accepted and S3 was
@@ -310,8 +310,8 @@ slow, as B0 found. The plans heat about 18 h a day with about one start, at the 
 (S2) and 91% (S3) of heating slots, so the offset range binds. No kWh saving can be claimed; a
 comparison at matched comfort needs new-regime data.
 
-(c) Solver: 0 infeasible of 18042 solves (three per decision); median 0.05 s, p95 at most 0.46 s;
-44 solves hit the 20 s limit and used their incumbent (gap at most 0.35%). The re-linearisation changed
+(c) Solver: 0 infeasible of 18042 solves (three per decision); median 0.06 s, p95 at most 0.47 s;
+43 solves hit the 20 s limit and used their incumbent (gap at most 0.35%). The re-linearisation changed
 the plan in 51 to 56% of decisions; 5 to 7% of planned heating slots have a lift outside the COP table.
 
 (d) The plan differs materially from the legacy day on 82% (S2) and 84% (S3) of days: electricity by

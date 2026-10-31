@@ -30,7 +30,7 @@ plans: nothing writes to Home Assistant or the plant. Owner: this repository (`c
   season, `ua` and `q0` re-estimated weekly on the trailing 28 days; heat law (C2's response B) and COP
   lift table fitted on the prior season. `c2`: C2's model B, static S2 prior (in-sample on S2).
 - Replays `b1-20261031-b2d-perfect`, `-b2d-persistence`, `-c2-perfect`: S2 and S3, November to March,
-  hourly; code `26dcbb8`, dataset `cdd448abb006`, feature set `da6d678016ed`, MPC config `06ec157c`.
+  hourly; code `dd344f3`, dataset `cdd448abb006`, feature set `da6d678016ed`, MPC config `06ec157c`.
   Legacy regime (10 to 15 h, water 26 to 28 degC). [Results](../planning/comfort-controller-design.md#b1-result-offline-replay).
 
 ## Assumptions
