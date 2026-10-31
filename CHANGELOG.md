@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.0](https://github.com/pando85/home-energy-optimizer/tree/v0.4.0) - 2026-10-31
+
+### Added
+
+- climate: Add the C2 data loader, config and audit ([953e3b3](https://github.com/pando85/home-energy-optimizer/commit/953e3b3dbb3111aa20626fb6e3eacc873d57e4d0))
+- climate: Add the heat-pump electricity (COP) model ([2182e3e](https://github.com/pando85/home-energy-optimizer/commit/2182e3eecb12f6ccfdbb43fe2258e8ba7cd80447))
+- climate: Add thermal models, heat response and climate-fit ([0ce7812](https://github.com/pando85/home-energy-optimizer/commit/0ce78129972b3359b07b1b75b38e322f3dba8417))
+- climate: Add an AEMET reference station and a fused outdoor temperature ([c792a8b](https://github.com/pando85/home-energy-optimizer/commit/c792a8b483eaa2f345b04688c36e915c8af49c63))
+- climate: Run the predeclared model iteration ([a9c26f8](https://github.com/pando85/home-energy-optimizer/commit/a9c26f8492a7eff234ab032a106681af21554b00))
+- climate: Add a price-blind comfort MPC and its offline replay (track B1) ([c285046](https://github.com/pando85/home-energy-optimizer/commit/c28504610cb3bc70b8f1cadfcf958d52ebbd0eea))
+- climate: Run the thermal model and comfort MPC in live shadow (track B2) ([45ce7f4](https://github.com/pando85/home-energy-optimizer/commit/45ce7f455fc0226a319e116b5d81bc8d19edc110))
+- extract: Add the OMIE day-ahead price source ([8b14542](https://github.com/pando85/home-energy-optimizer/commit/8b14542b8ca68a48e491060573e875fe0221c602))
+- forecast: Add cheap statistical load-forecaster candidates ([aa1334f](https://github.com/pando85/home-energy-optimizer/commit/aa1334f9738ce01f94572657aec279f0e855e239))
+- forecast: Add a structured component load forecaster ([13c904f](https://github.com/pando85/home-energy-optimizer/commit/13c904f8e37123b8557ffd2f99a5f98769807ef2))
+- forecast: P4 second look with the OMIE price estimate and a disabled-day fix ([ca50aab](https://github.com/pando85/home-energy-optimizer/commit/ca50aab13bb5354f90ba177a026252edc9cf2107))
+- hack: Add a read-only heat-pump x battery system replay ([f5be13d](https://github.com/pando85/home-energy-optimizer/commit/f5be13da8fb7c3eeef958002de205e06f8a59374))
+- just: Add a pull-store recipe for local analysis copies ([3259944](https://github.com/pando85/home-energy-optimizer/commit/3259944c5f7baa352bea3a09c5859e294b66f6ba))
+- price-outlook: Add OMIE next-day price estimators (PO-C) ([b6484b7](https://github.com/pando85/home-energy-optimizer/commit/b6484b70169e97f8e271d0e402b1163311255138))
+- rolling-horizon: Add price-outlook seam with exact, published_only and persistence ([e2f498b](https://github.com/pando85/home-energy-optimizer/commit/e2f498bdc36702de734a281d7ff5ef6a0dd12007))
+- service: Price battery wear at 0.01 EUR/kWh in the live planner ([c88342c](https://github.com/pando85/home-energy-optimizer/commit/c88342ce4c9a317d6fd58b759f2c7773ba597b12))
+- Add offline climate extraction and climate feature set (C1a) ([ac90586](https://github.com/pando85/home-energy-optimizer/commit/ac90586d9dba850b91ff571810e7d355535553f1))
+
+### Fixed
+
+- build: Reconstruct gross load from battery counters after commissioning ([40e6bb8](https://github.com/pando85/home-energy-optimizer/commit/40e6bb86c58856ca32d2825ffab30a6a6668dee8))
+
+### Documentation
+
+- climate: Plan flow-temperature calibration and guarded optimization ([ded8cbf](https://github.com/pando85/home-energy-optimizer/commit/ded8cbf4103e008050c861118ef4fe33b2a5e12b))
+- planning: Reconcile C7-F with the C2 outcome and plan the joint field trial ([109432e](https://github.com/pando85/home-energy-optimizer/commit/109432e926f14455b63e270f0b8438c7470a32c1))
+- Record the PO-A result and unblock load forecaster P4 ([d6125dc](https://github.com/pando85/home-energy-optimizer/commit/d6125dc77653d198453c2a9d053c852198c78882))
+- Record the P2 result in the load forecaster plan ([12eb815](https://github.com/pando85/home-energy-optimizer/commit/12eb815bfa4681e1a870de3079e834a32b30306d))
+- Park the load forecaster and price outlook plans ([936f01f](https://github.com/pando85/home-energy-optimizer/commit/936f01f8ea38a58647aa90538d7497c56359f456))
+- Point the direnv example at the pulled store copy ([6954200](https://github.com/pando85/home-energy-optimizer/commit/6954200b98ec07b63bc7b21a70d50e7d9d1e0b67))
+- Plan shared climate MPC on the existing battery optimizer runtime ([a2eb559](https://github.com/pando85/home-energy-optimizer/commit/a2eb559c397e7ad834db16099a485ebfe6ae0d71))
+- Record climate topology, data audit, C2 economic gate and C0 scope ([4418ec9](https://github.com/pando85/home-energy-optimizer/commit/4418ec9c6c1720187785965640dcacf1d84cf900))
+- Record the C2 design and predeclared climate gate ([69ed998](https://github.com/pando85/home-energy-optimizer/commit/69ed998ad4db168c870954d90b596664de5da7b9))
+- Document the whole-system replay and how to reproduce it ([3008366](https://github.com/pando85/home-energy-optimizer/commit/3008366d4fd5c59e642a8a1b18845439ff506b34))
+- Decouple heat-pump comfort control from battery price optimisation (ADR-0006) ([feb1884](https://github.com/pando85/home-energy-optimizer/commit/feb1884c35e2fe08756c083e6bfc20e472acfd13))
+- Add component calibration records and the plant regime log ([0a1cdc0](https://github.com/pando85/home-energy-optimizer/commit/0a1cdc0a5971b5aae7a617019eb45479c9cff1ce))
+- Record the Aquarea heater and import-limit facts in the component pages ([276df4a](https://github.com/pando85/home-energy-optimizer/commit/276df4a4011c7e3f42a831caf9459bb87063f839))
+- Design the comfort controller and amend ADR-0006 ([e30d7c3](https://github.com/pando85/home-energy-optimizer/commit/e30d7c3f9d8258ddb2bde8b89e17f9f0f4f43e94))
+- Record the owner's comfort-controller answers ([509b222](https://github.com/pando85/home-energy-optimizer/commit/509b222167f81f15ac92ad8e360ec27f0c1d9f3a))
+- Record the B0 diagnosis and preregister the 2026-27 criteria ([0e8ca30](https://github.com/pando85/home-energy-optimizer/commit/0e8ca302f8cd4d7e550e3583982c2a54d8bb7c16))
+
+### CI
+
+- Refuse AI session links in commit messages ([9e0168a](https://github.com/pando85/home-energy-optimizer/commit/9e0168a0a5aaae5702ba181feea34b8f08438c75))
+
+### Chore
+
+- Follow the repository rename to home-energy-optimizer ([2bd8165](https://github.com/pando85/home-energy-optimizer/commit/2bd81650bc69c937fe416443b060b7025c894cf1))
+- Make the comfort-history and cheap-price analyses reproducible ([4d1dadf](https://github.com/pando85/home-energy-optimizer/commit/4d1dadf0996f78229993df219dd48ff781587664))
+
 ## [v0.3.0](https://github.com/pando85/battery-optimizer/tree/v0.3.0) - 2026-10-25
 
 ### Added
