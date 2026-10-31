@@ -25,11 +25,10 @@ plans: nothing writes to Home Assistant or the plant. Owner: this repository (`c
 
 ## Calibrated on
 
-- `b2d`: B0's room-air two-state model with a weekday/weekend diurnal gain; prior, heat law and COP
-  table from the *other* season (S2 is scored with a later-season prior); weekly `ua`/`q0` refits.
-  `c2`: C2's model B, static S2 prior (its S2 run is in-sample).
+- `b2d`: B0's 2-state model with weekday/weekend diurnal gain; prior, heat law and COP table from the
+  *other* season (S2 scored with a later-season prior), weekly `ua`/`q0` refits. `c2`: S2 in-sample.
 - Replays `b1r2-20261031-*` (code `84b05f0`, MPC config `f1c25db4`, dataset `cdd448abb006`, feature set
-  `da6d678016ed`), legacy regime, S2 and S3 November to March; [results](../planning/comfort-controller-design.md#b1-result-offline-replay). The first replay `b1-20261031-*` is **withdrawn** (setpoint artefact).
+  `da6d678016ed`), legacy regime, S2 and S3 November to March; [results](../planning/comfort-controller-design.md#b1-result-offline-replay). The first replay `b1-20261031-*` is **withdrawn** (artefact of the setpoint assumption plus the placeholder `phi`).
 
 ## Assumptions
 
@@ -40,20 +39,21 @@ plans: nothing writes to Home Assistant or the plant. Owner: this repository (`c
   gaps); `persistence` holds the last valid reading; the DHW mask is known. Beyond about 12 h
   predictions are low-confidence. Lifts outside the COP table read the nearest bin, which understates
   the cost of high water (13 to 22% of planned slots at +6 K).
+- Residual: a slot forced on by a minimum on time in progress may be planned against shut valves, where
+  the MILP credits `phi` heat that `simulate` does not deliver (run logic).
 
 ## Invalidated when
 
 - The schedule, lead table, setpoint margin, water curve or machine limits change (edit the MPC config).
-- The comfort controller goes live (legacy-regime heat law, offsets and COP no longer hold), a successor
-  to B0's model is accepted, or the outdoor source or the heat measurement changes.
+- The comfort controller goes live (legacy heat law, offsets and COP no longer hold), a successor to
+  B0's model is accepted, or the outdoor source or heat measurement changes.
 
 ## Recalibrate by
 
 `uv run python hack/climate_mpc_replay.py --feature-set <id> --dataset <dir> --workers 30` (options
 `--weather persistence`, `--model c2`, `--offsets 0,1,2,3`) on new-regime data after the 28-day
 settling period. Acceptance is section A of the [2026-27 preregistration](../planning/climate-preregistration-2026-27.md)
-on live data (B3); this offline replay grants nothing.
-TODO (future extension, not code): schedule the legionella cycle (owner wish, design section 7.2).
+on live data (B3); this offline replay grants nothing. TODO (future extension, not code): schedule the legionella cycle (owner wish, design section 7.2).
 
 ## Status
 

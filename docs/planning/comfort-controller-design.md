@@ -35,7 +35,8 @@ close the floor valves.
 There is no separate optimum-start condition: optimum start works by moving the setpoint earlier (section 6), because a thermostat whose room is above its setpoint keeps its floor valve closed, so switching the heat pump on early would deliver no heat to that room.
 
 Machine limits (in code, not helpers): compressor **minimum on 30 min, minimum off 20 min**; a
-**starts-per-day alarm** (a notification, not a control action).
+**starts-per-day alarm** (a notification, not a control action). AppDaemon uses 20 min as written;
+the track-B MPC plans on 15-minute slots and rounds the minimum off up to 2 slots (30 min).
 
 The on/off action is the existing, proven command path (operating mode `Heat+DHW` / `DHW` through
 `input_select.heishamon_heatmode`), as in the C0 fixes of 2026-10-30.
@@ -270,9 +271,17 @@ part of B0 to B3.
 
 **The first replay (runs `b1-20261031-*`, code `dd344f3`) is withdrawn.** Its figures (+3 K binding,
 the day minimum missed on 71 to 90% of days, plan over legacy 1.18 and 2.42) were an **artefact of the
-setpoint assumption**: the hall/kitchen valve opened only at the window start, so about 97% (S2) and
-83% (S3) of the pre-window heating slots (review estimate) pumped into shut valves at the always-open share alone, which
-the run logic of section 2 would never do. The replay below fixes that and four smaller defects:
+setpoint assumption plus the placeholder `phi`**:
+
+- the hall/kitchen valve opened only at the window start;
+- 97% (S2) and 83% (S3) of the pre-window heating slots of its midnight plans had every modelled
+  valve shut. This is measured in `days.jsonl` of `b1-20261031-b2d-perfect`: planned heating slots
+  before the window start in which every room, at the slot's start state, was at or above its
+  setpoint minus the 0.25 K valve margin;
+- those slots heated only the always-open share, set to the unmeasured placeholder `phi` = 0.3. The
+  run logic of section 2 would never do that.
+
+The replay below makes five fixes:
 
 - the optimum-start setpoint of section 6 (p75 lead by band);
 - no heating where every modelled valve is shut;
@@ -368,7 +377,8 @@ heat output.
 | Planned lifts outside the COP lift table | 5% | 7% | 13% | 22% |
 
 - **Why widen.** With the setpoint fixes, +3 K still bound (79% and 95% of slots), so the range was
-  widened. +6 K cuts the remaining deficit by more than half.
+  widened. +6 K cuts the remaining day-minimum deficit by about a third in S2 (34%) and by more
+  than half in S3 (60%).
 - **+6 K still binds in S3.** It is chosen in 71% of heating slots.
 - **The COP penalty of high water is understated.** At +6 K, 13 to 22% of the planned lifts lie
   outside the COP lift table, which reads the nearest bin, so the electricity of the high-water slots
