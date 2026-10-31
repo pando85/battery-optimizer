@@ -263,6 +263,17 @@ stay in the data dir.
 `<data_dir>/analysis/v1/system-sim/<run-id>/`; method, results and the exact command are in the
 [system replay](planning/system-replay.md).
 
+**Price-blind comfort MPC (track B1, offline).** `mpc_config.py` loads
+[`config/climate-mpc.yaml`](../config/climate-mpc.yaml) strictly (its own file: `config/climate.yaml`
+stays untouched). `mpc_model.py` is the model interface the optimiser reads (`MpcModel`: linear state
+equation, room outputs, heat table along a reference, nonlinear simulation, capacities) and its RC
+implementation; `b2d.py` fits B0's room-air two-state model with a weekday/weekend diurnal gain (and
+rebuilds C2's model B for comparison); `mpc.py` is the MILP (scipy `milp` / HiGHS) and the
+solve, simulate and re-linearise loop; `mpc_replay.py` and `hack/climate_mpc_replay.py` run the
+offline receding-horizon replay into `<data_dir>/analysis/v1/climate-mpc/<run-id>/`. Nothing in it
+writes to Home Assistant or the plant. Formulation, causality and results:
+[climate-mpc](components/climate-mpc.md).
+
 `hack/comfort_history.py` (read-only) writes `report.json` and `report.md` into
 `<data_dir>/analysis/v1/comfort-history/<run-id>/`: per winter, the hall-kitchen temperature and
 setpoint in the weekday, weekend and night windows, the share of time at or above 25 and 23.5 degC,

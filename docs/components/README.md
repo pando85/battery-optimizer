@@ -71,6 +71,11 @@ flowchart LR
   TARIFF[tariff-prices] --> OPT
   BATT[battery-model] --> OPT
   OPT --> BENCH
+  DATA --> MPC[climate-mpc]
+  OUT --> MPC
+  COP --> MPC
+  THERM --> MPC
+  HPC -.calibrated on legacy.-> MPC
   BOOST[boost-mode] --> HPC
   BOOST --> LOAD
   BATT --> BOOST
@@ -80,9 +85,9 @@ flowchart LR
 |---|---|
 | [data-pipeline](data-pipeline.md) | every offline result; the shadow service history |
 | [outdoor-temperature](outdoor-temperature.md) | cop-model, thermal-model |
-| [heat-pump-controller](heat-pump-controller.md) | battery-load-forecast, cop-model, thermal-model, hp-consumption-forecast, system-replay-benchmark |
-| [cop-model](cop-model.md) | thermal-model replay, system-replay-benchmark (only through the legacy replay) |
-| [thermal-model](thermal-model.md) | nothing live (parked) |
+| [heat-pump-controller](heat-pump-controller.md) | battery-load-forecast, cop-model, thermal-model, hp-consumption-forecast, system-replay-benchmark, climate-mpc |
+| [cop-model](cop-model.md) | thermal-model replay, system-replay-benchmark (only through the legacy replay), climate-mpc |
+| [thermal-model](thermal-model.md) | climate-mpc (offline replay only); nothing live |
 | [hp-consumption-forecast](hp-consumption-forecast.md) | battery-load-forecast (optional) |
 | [battery-load-forecast](battery-load-forecast.md) | battery-optimizer |
 | [battery-model](battery-model.md) | battery-optimizer, boost-mode, system-replay-benchmark |
@@ -90,6 +95,7 @@ flowchart LR
 | [tariff-prices](tariff-prices.md) | battery-optimizer, boost-mode, every `dataset_id` |
 | [boost-mode](boost-mode.md) | heat-pump-controller, battery-load-forecast |
 | [system-replay-benchmark](system-replay-benchmark.md) | the decisions in the ADRs |
+| [climate-mpc](climate-mpc.md) | the B3 comparison after winter; nothing live |
 
 ## Status (2026-10-31)
 
@@ -107,3 +113,4 @@ flowchart LR
 | [tariff-prices](tariff-prices.md) | provisional | 2026-10-30 | Taxes unconfirmed, holidays missing |
 | [boost-mode](boost-mode.md) | planned | 2026-10-30 | Rule, thresholds and interlock not built; phase 2 after the comfort controller works |
 | [system-replay-benchmark](system-replay-benchmark.md) | valid as recorded (legacy and transferred regimes) | 2026-10-30 | Replay B load shape was never the real comfort schedule |
+| [climate-mpc](climate-mpc.md) | provisional (implemented, offline; shadow pending B2) | 2026-10-31 | Exploratory model (no thermal model accepted); planned figures are predictions, not outcomes |
