@@ -268,16 +268,37 @@ part of B0 to B3.
 
 ### B1 result (offline replay)
 
-Runs `b1-20261031-b2d-perfect`, `-b2d-persistence` and `-c2-perfect` (code `dd344f3`, dataset
-`cdd448abb006`, feature set `da6d678016ed`, MPC config `06ec157c`), S2 and S3 from November to March,
-a 24 h plan every hour (2932 and 3082 decisions). Formulation and causality rules:
-[climate-mpc](../components/climate-mpc.md). **Exploratory:** no thermal model is accepted and S3 was
-inspected in C2 and B0. **Planned kWh and planned comfort are model predictions of plans that were never
-executed, not realised outcomes;** each day starts from the house as the legacy controller left it.
-`perfect` weather is perfect foresight of the outdoor temperature.
+**The first replay (runs `b1-20261031-*`, code `dd344f3`) is withdrawn.** Its figures (+3 K binding,
+the day minimum missed on 71 to 90% of days, plan over legacy 1.18 and 2.42) were an **artefact of the
+setpoint assumption**: the hall/kitchen valve opened only at the window start, so about 97% (S2) and
+83% (S3) of the pre-window heating slots (review estimate) pumped into shut valves at the always-open share alone, which
+the run logic of section 2 would never do. The replay below fixes that and four smaller defects:
+
+- the optimum-start setpoint of section 6 (p75 lead by band);
+- no heating where every modelled valve is shut;
+- starts and minimum on/off counted on space heating only;
+- the comfort window aligned to the slot end;
+- re-linearisation keeping the best simulated iterate.
+
+Runs `b1r2-20261031-b2d-perfect`, `-b2d-persistence`, `-c2-perfect` and `-b2d-perfect-offset3`:
+
+- code `84b05f0`, MPC config `f1c25db4`, dataset `cdd448abb006`, feature set `da6d678016ed`;
+- S2 and S3 from November to March, a 24 h plan every hour (2932 and 3082 decisions).
+
+Formulation and causality rules: [climate-mpc](../components/climate-mpc.md).
+
+**Exploratory.** No thermal model is accepted, and S3 was inspected in C2 and B0. **Planned kWh and
+planned comfort are model predictions of plans that were never executed, not realised outcomes.** Each
+day starts from the house as the legacy controller left it. Leakage:
+
+- `perfect` weather is perfect foresight of the outdoor temperature, and the observer reads the same
+  series, which uses the fused station series in long gaps;
+- S2 is scored with an S3-fitted (later-season) prior;
+- the `c2` S2 run is in-sample.
 
 (a) Open-loop accuracy of the model inside the MPC (B0's model, legacy actions through it, perfect
-weather), MAE / bias in K. Beyond about 12 h the plan relies on low-confidence predictions.
+weather), MAE / bias in K. These figures do not depend on the plan, so the fixes leave them unchanged.
+Beyond about 12 h the plan relies on low-confidence predictions.
 
 | Horizon | Room mean S2 | Room mean S3 | Persistence S2 / S3 | Hall/kitchen S2 | Hall/kitchen S3 |
 |---|---|---|---|---|---|
@@ -286,37 +307,92 @@ weather), MAE / bias in K. Beyond about 12 h the plan relies on low-confidence p
 | 12 h | 0.31 / -0.04 | 0.25 / -0.02 | 0.53 / 0.36 | 0.42 / -0.20 | 0.33 / +0.05 |
 | 24 h | 0.30 / -0.08 | 0.24 / -0.04 | 0.38 / 0.27 | 0.41 / -0.25 | 0.32 / +0.02 |
 
-- With persistence weather the room mean is 0.39 / 0.28 K at 12 h and 0.37 / 0.31 K at 24 h (S3 at
-  24 h is then worse than room persistence). C2's model B: 0.32 / 0.26 K at 6 h, 0.37 / 0.30 K at 12 h.
-- Heat delivered per day, given the legacy permission (the weakest link of B0): MAPE 14% (S2) and 15%
-  (S3), season bias +3% and +8% (C2's model B: 15% and 24%, +8% and +19%). Electricity per day:
-  MAPE 17% and 16%, bias +8% and +2%.
+- **Persistence weather:** room mean 0.39 / 0.28 K at 12 h and 0.37 / 0.31 K at 24 h. At 24 h S3 is
+  worse than room persistence.
+- **C2's model B:** 0.32 / 0.26 K at 6 h and 0.37 / 0.30 K at 12 h.
+- **Heat delivered per day**, given the legacy permission (B0's weakest link): MAPE 14% (S2) and 15%
+  (S3), season bias +3% and +8%. C2's model B: 15% and 24%, +8% and +19%.
+- **Electricity per day:** MAPE 17% and 16%, bias +8% and +2%.
 
-(b) The midnight plan against the legacy day, same days (B0's model, perfect weather):
+(b) The midnight plan against the legacy day, same days (97 in S2, 111 in S3), B0's model, perfect
+weather, water offsets 0 to +6 K:
 
 | | S2 | S3 |
 |---|---|---|
-| Planned / measured legacy electricity | 1.18 | 2.42 |
-| Planned / the model's own prediction of the legacy day (days with both) | 1.12 | 1.82 |
-| Same, by HDD tercile (mild, middle, cold) | 1.07, 1.23, 1.19 | 2.12, 2.50, 2.50 |
-| Kh per day below 23.5 degC in the hall/kitchen window: plan, legacy | 4.6, 4.8 | 7.3, 15.1 |
-| Kh per day below the 21 degC floor (comfort rooms): plan, legacy | 0.35, 1.75 | 4.3, 17.4 |
+| Planned / measured legacy electricity | 1.52 | 3.22 |
+| Planned / the model's own prediction of the legacy day (days with both) | 1.42 | 2.53 |
+| Same as the first row, by HDD tercile (mild, middle, cold) | 1.14, 1.59, 1.60 | 2.71, 3.48, 3.26 |
+| Kh per day below 23.5 degC in the hall/kitchen window: plan, legacy | 1.8, 4.8 | 2.1, 15.1 |
+| Days with any Kh below the day minimum: plan, legacy | 51%, 70% | 71%, 100% |
+| Kh per day below the 21 degC floor (comfort rooms): plan, legacy | 0.35, 1.75 | 4.1, 17.4 |
 
-Persistence weather gives 1.31 and 2.47, C2's model B 1.25 and 2.61. **Reading:** on these days the
-plan buys comfort the legacy controller did not deliver (in S3 the 23.0 degC setpoint left the
-hall/kitchen below 23.5 degC on every day) and still misses the day minimum on 71% (S2) and 90% (S3)
-of days in its own prediction: the warm-up with the other rooms' valves shut is too
-slow, as B0 found. The plans heat about 18 h a day with about one start, at the top offset (+3 K) in 68%
-(S2) and 91% (S3) of heating slots, so the offset range binds. No kWh saving can be claimed; a
-comparison at matched comfort needs new-regime data.
+Electricity ratios for the other runs:
 
-(c) Solver: 0 infeasible of 18042 solves (three per decision); median 0.06 s, p95 at most 0.47 s;
-43 solves hit the 20 s limit and used their incumbent (gap at most 0.35%). The re-linearisation changed
-the plan in 51 to 56% of decisions; 5 to 7% of planned heating slots have a lift outside the COP table.
+| Run | S2 | S3 |
+|---|---|---|
+| Persistence weather | 1.62 | 3.28 |
+| C2's model B | 1.46 | 3.32 |
+| Offsets 0 to +3 K | 1.33 | 2.67 |
 
-(d) The plan differs materially from the legacy day on 82% (S2) and 84% (S3) of days: electricity by
-more than 20% on 66% and 84%, heating-slot overlap below 0.5 on 43% and 33% (median overlap 0.50 and
-0.55).
+**Reading:**
+
+- The plan buys comfort the legacy controller did not deliver: the hall/kitchen deficit is cut by 62%
+  (S2) and 86% (S3). The electricity cost is correspondingly large.
+- The plans heat 14 to 16 h a day with about one start.
+- No kWh saving can be claimed. A comparison at matched comfort needs new-regime data.
+
+**Planned heating slots** (all decisions, B0's model, perfect weather):
+
+| | S2 | S3 |
+|---|---|---|
+| Rooms with an open valve: one of three | 97% | 91% |
+| Rooms with an open valve: all three | 1% | 6% |
+| Mean valve factor (`phi + (1 - phi) open share`, placeholder `phi` 0.3) | 0.54 | 0.57 |
+| Simulated with every valve shut (run logic: no heat) | 1.8% | 0.3% |
+
+During optimum start only the hall/kitchen valve is open, so the plan heats at about half of the full
+heat output.
+
+**Water offset choice, and why the range is +6 K.**
+
+| Offset (K) | 0 | +1 | +2 | +3 | +4 | +5 | +6 |
+|---|---|---|---|---|---|---|---|
+| S2, share of planned heating slots | 9% | 8% | 10% | 7% | 8% | 19% | 40% |
+| S3, share of planned heating slots | 5% | 4% | 4% | 5% | 4% | 7% | 71% |
+
+| | 0 to +3 K, S2 | 0 to +3 K, S3 | 0 to +6 K, S2 | 0 to +6 K, S3 |
+|---|---|---|---|---|
+| Heating slots at the top offset | 79% | 95% | 40% | 71% |
+| Kh per day below the day minimum | 2.8 | 5.1 | 1.8 | 2.1 |
+| Planned / legacy electricity | 1.33 | 2.67 | 1.52 | 3.22 |
+| Planned lifts outside the COP lift table | 5% | 7% | 13% | 22% |
+
+- **Why widen.** With the setpoint fixes, +3 K still bound (79% and 95% of slots), so the range was
+  widened. +6 K cuts the remaining deficit by more than half.
+- **+6 K still binds in S3.** It is chosen in 71% of heating slots.
+- **The COP penalty of high water is understated.** At +6 K, 13 to 22% of the planned lifts lie
+  outside the COP lift table, which reads the nearest bin, so the electricity of the high-water slots
+  is under-estimated.
+- **The +6 K result needs the water-temperature trial.** It should not be read as a recommended water
+  curve until that trial ([C7-F](climate-flow-calibration-optimization.md)) supplies COP data at
+  higher water.
+
+(c) Solver:
+
+- 0 infeasible of 24056 solves (four per decision);
+- median 0.08 s, p95 at most 3.5 s;
+- 297 solves (1.2%) hit the 20 s limit and used their incumbent, with a gap of at most 1.3%.
+
+Re-linearisation:
+
+- The free-running first reference is rarely the best iterate (16% and 2% of decisions).
+- The last iterate changed no slot in 65% (S2) and 62% (S3) of decisions; otherwise the best
+  simulated iterate is kept, so the loop does not always converge.
+
+(d) The plan differs materially from the legacy day on 93% (S2) and 90% (S3) of days:
+
+- electricity by more than 20% on 78% and 87%;
+- heating-slot overlap below 0.5 on 70% and 57% (median overlap 0.38 and 0.45).
 
 Legionella scheduling stays the future extension recorded above; it is not part of B1.
 

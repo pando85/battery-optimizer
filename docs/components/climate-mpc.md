@@ -11,49 +11,48 @@ plans: nothing writes to Home Assistant or the plant. Owner: this repository (`c
 
 ## Interfaces
 
-- **MILP** (`climate/mpc.py`, HiGHS): one binary per slot and water level (software curve plus 0 to
-  +3 K, integer, clamped 20 to 35 degC: 4 binaries per slot instead of 16 temperatures); minimise COP
-  electricity of the level plus a start penalty; linear state equation; comfort minimums soft
-  (20 kWh-eq per Kh); minimum on 30 min, off 20 min; DHW slots off and counted as compressor runs;
-  stored heat valued at the horizon end. Heat per level: the model's heat table along a reference,
-  re-linearised twice along the plan's simulation.
+- **MILP** (`climate/mpc.py`, HiGHS): one binary per slot and water level (curve plus 0 to +6 K,
+  integer, 20 to 35 degC); minimises the COP electricity of the level plus a start penalty. Comfort
+  minimums are soft (20 kWh-eq per Kh) at the slot end; no heat where every modelled valve is shut.
+  Minimum on 30 min; minimum off 20 min is 2 slots, so **effectively 30 min**. Starts and limits count
+  space heating only (DHW transparent); stored heat is valued at the end. Heat per level comes from the
+  heat table along a reference (free-running house, then three re-linearisations; best iterate kept).
 - **Model interface** (`climate/mpc_model.py`, `MpcModel`): `dynamics()`, `drive()`, `room_outputs()`,
-  `heat_table()`, `simulate()`, `capacities`. A new model structure implements these; the MILP does not
-  change. Implementations: `b2d` (default) and `c2` (comparison).
+  `heat_table()`, `valves()`, `simulate()`, `capacities`. Implementations: `b2d` (default) and `c2`.
 - **In:** climate feature set, [outdoor-temperature](outdoor-temperature.md), [cop-model](cop-model.md),
-  comfort rooms and offsets as in [thermal-model](thermal-model.md). **Out:**
-  `<data_dir>/analysis/v1/climate-mpc/<run-id>/`. **Consumers:** none live; B2 shadow, B3 comparison.
+  comfort rooms and offsets as in [thermal-model](thermal-model.md); setpoints from design sections 3
+  and 6 (`optimum_start`). **Out:** `<data_dir>/analysis/v1/climate-mpc/<run-id>/`. **Consumers:** B2, B3.
 
 ## Calibrated on
 
-- `b2d`: B0's room-air two-state model with a weekday/weekend diurnal gain, prior fitted on the *other*
-  season, `ua` and `q0` re-estimated weekly on the trailing 28 days; heat law (C2's response B) and COP
-  lift table fitted on the prior season. `c2`: C2's model B, static S2 prior (in-sample on S2).
-- Replays `b1-20261031-b2d-perfect`, `-b2d-persistence`, `-c2-perfect`: S2 and S3, November to March,
-  hourly; code `dd344f3`, dataset `cdd448abb006`, feature set `da6d678016ed`, MPC config `06ec157c`.
-  Legacy regime (10 to 15 h, water 26 to 28 degC). [Results](../planning/comfort-controller-design.md#b1-result-offline-replay).
+- `b2d`: B0's room-air two-state model with a weekday/weekend diurnal gain; prior, heat law and COP
+  table from the *other* season (S2 is scored with a later-season prior); weekly `ua`/`q0` refits.
+  `c2`: C2's model B, static S2 prior (its S2 run is in-sample).
+- Replays `b1r2-20261031-*` (code `84b05f0`, MPC config `f1c25db4`, dataset `cdd448abb006`, feature set
+  `da6d678016ed`), legacy regime, S2 and S3 November to March; [results](../planning/comfort-controller-design.md#b1-result-offline-replay). The first replay `b1-20261031-*` is **withdrawn** (setpoint artefact).
 
 ## Assumptions
 
 - **Planned kWh and comfort are model predictions of plans never executed**; each day starts from the
-  legacy-run house; no thermal model is accepted. Valves follow thermostats at the schedule setpoints
-  (minimum + 0.5 K); a room is the comfort-room mean plus its hourly offset (office A not modelled).
-- `perfect` weather is the measured outdoor series (declared foresight); `persistence` holds the last
-  valid reading. The horizon's DHW mask is known. Beyond about 12 h predictions are low-confidence.
-  Lifts outside the COP table read the nearest bin; the start penalty stands in for cycling losses.
+  legacy-run house; no model is accepted. Valves follow the setpoints the controller writes; a room is
+  the comfort-room mean plus its hourly offset (office A not modelled); `phi` 0.3 is a placeholder.
+- `perfect` weather is declared foresight and the observer reads it too (fused station series in long
+  gaps); `persistence` holds the last valid reading; the DHW mask is known. Beyond about 12 h
+  predictions are low-confidence. Lifts outside the COP table read the nearest bin, which understates
+  the cost of high water (13 to 22% of planned slots at +6 K).
 
 ## Invalidated when
 
-- The schedule, setpoint margin, water curve or machine limits change (edit the MPC config).
-- The comfort controller goes live (legacy-regime heat law, offsets and COP no longer hold), a
-  successor to B0's model is accepted, or the outdoor source or heat measurement changes.
+- The schedule, lead table, setpoint margin, water curve or machine limits change (edit the MPC config).
+- The comfort controller goes live (legacy-regime heat law, offsets and COP no longer hold), a successor
+  to B0's model is accepted, or the outdoor source or the heat measurement changes.
 
 ## Recalibrate by
 
-`uv run python hack/climate_mpc_replay.py --feature-set <id> --dataset <dir> --workers 24` (plus
-`--weather persistence`, `--model c2`) on new-regime data after the 28-day settling period. Acceptance:
-section A of the [2026-27 preregistration](../planning/climate-preregistration-2026-27.md) on live data
-(B3); this offline replay is exploratory and grants nothing.
+`uv run python hack/climate_mpc_replay.py --feature-set <id> --dataset <dir> --workers 30` (options
+`--weather persistence`, `--model c2`, `--offsets 0,1,2,3`) on new-regime data after the 28-day
+settling period. Acceptance is section A of the [2026-27 preregistration](../planning/climate-preregistration-2026-27.md)
+on live data (B3); this offline replay grants nothing.
 TODO (future extension, not code): schedule the legionella cycle (owner wish, design section 7.2).
 
 ## Status

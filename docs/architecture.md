@@ -266,7 +266,8 @@ stay in the data dir.
 **Price-blind comfort MPC (track B1, offline).** `mpc_config.py` loads
 [`config/climate-mpc.yaml`](../config/climate-mpc.yaml) strictly (its own file: `config/climate.yaml`
 stays untouched). `mpc_model.py` is the model interface the optimiser reads (`MpcModel`: linear state
-equation, room outputs, heat table along a reference, nonlinear simulation, capacities) and its RC
+equation, room outputs, heat table and valve demand along a reference, nonlinear simulation,
+capacities) and its RC
 implementation; `b2d.py` fits B0's room-air two-state model with a weekday/weekend diurnal gain (and
 rebuilds C2's model B for comparison); `mpc.py` is the MILP (scipy `milp` / HiGHS) and the
 solve, simulate and re-linearise loop; `mpc_replay.py` and `hack/climate_mpc_replay.py` run the
